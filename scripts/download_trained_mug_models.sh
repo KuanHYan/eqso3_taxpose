@@ -2,6 +2,9 @@ cd trained_models
 mkdir ndf && cd ndf
 mkdir mug && cd mug
 mkdir arbitrary && cd arbitrary
+
+export ALL_PROXY=socks5://127.0.0.1:7897
+
 # wget --no-check-certificate 'https://docs.google.com/uc?export=download&id=1vN_0Vh1RC7jUnOzTa0IQs0_TC8GQslOu' -O grasp.ckpt
 # wget --no-check-certificate 'https://docs.google.com/uc?export=download&id=1ohtuv6Fj4vwYVNWhoO-_5bUI1dYJYjZQ' -O place.ckpt
 wget --load-cookies /tmp/cookies.txt "https://docs.google.com/uc?export=download&confirm=$(wget --quiet --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate 'https://docs.google.com/uc?export=download&id=1vN_0Vh1RC7jUnOzTa0IQs0_TC8GQslOu' -O- | sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p')&id=1vN_0Vh1RC7jUnOzTa0IQs0_TC8GQslOu" -O grasp.ckpt && rm -rf /tmp/cookies.txt
