@@ -58,7 +58,7 @@ def get_graph_feature(x, k=20):
     # x = x.squeeze()
     idx = knn(x, k=k)  # (batch_size, num_points, k)
     batch_size, num_points, _ = idx.size()
-    device = torch.device('cuda')
+    device = x.device
 
     idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
 
@@ -132,7 +132,7 @@ class Encoder(nn.Module):
     def __init__(self, layer, N):
         super(Encoder, self).__init__()
         self.layers = clones(layer, N)
-        self.norm = LayerNorm(layer.size)
+        self.norm = nn.LayerNorm(layer.size)
 
     def forward(self, x, mask):
         for layer in self.layers:
@@ -146,7 +146,7 @@ class Decoder(nn.Module):
     def __init__(self, layer, N):
         super(Decoder, self).__init__()
         self.layers = clones(layer, N)
-        self.norm = LayerNorm(layer.size)
+        self.norm = nn.LayerNorm(layer.size)
 
     def forward(self, x, memory, src_mask, tgt_mask):
         for layer in self.layers:
@@ -170,7 +170,7 @@ class LayerNorm(nn.Module):
 class SublayerConnection(nn.Module):
     def __init__(self, size, dropout=None):
         super(SublayerConnection, self).__init__()
-        self.norm = LayerNorm(size)
+        self.norm = nn.LayerNorm(size)
 
     def forward(self, x, sublayer):
         return x + sublayer(self.norm(x))
@@ -209,14 +209,14 @@ class DecoderLayer(nn.Module):
 
 
 class MultiHeadedAttention(nn.Module):
-    def __init__(self, h, d_model, dropout=0.1):
+    def __init__(self, h, d_model, dropout=0.1, project_bias=False):
         "Take in model size and number of heads."
         super(MultiHeadedAttention, self).__init__()
         assert d_model % h == 0
         # We assume d_v always equals d_k
         self.d_k = d_model // h
         self.h = h
-        self.linears = clones(nn.Linear(d_model, d_model), 4)
+        self.linears = clones(nn.Linear(d_model, d_model, bias=project_bias), 4)
         self.attn = None
         self.dropout = None
 

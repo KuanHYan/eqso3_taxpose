@@ -12,20 +12,29 @@ from taxpose.datasets.pretraining_point_cloud_data_module import (
     PretrainingMultiviewDataModule,
 )
 from taxpose.nets.transformer_flow import EquivariantFeatureEmbeddingNetwork
+from taxpose.utils.load_model import get_weights_path
 from taxpose.training.equivariant_feature_pretraining_module import (
     EquivariancePreTrainingModule,
 )
+from taxpose.utils.dup_stdout_manager import DupStdoutFileManager
 
 
 @hydra.main(version_base="1.1", config_path="../configs", config_name="pretraining")
 def main(cfg):
-    print(
-        json.dumps(
-            omegaconf.OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False),
-            sort_keys=True,
-            indent=4,
+    file_suffix = cfg.job_type
+    full_log_name = f"train_{file_suffix}"
+    # if os.path.exists(os.path.join(cfg.output_dir, f"{full_log_name}.log")):
+    #     raise ValueError(f"{full_log_name} already exists!")
+    with DupStdoutFileManager(
+            os.path.join(cfg.output_dir, f"{full_log_name}.log")
+    ) as _:
+        print(
+            json.dumps(
+                omegaconf.OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False),
+                sort_keys=True,
+                indent=4,
+            )
         )
-    )
 
     ######################################################################
     # Torch settings.
@@ -33,14 +42,32 @@ def main(cfg):
 
     # Make deterministic + reproducible.
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.benchmark = True
 
     # Since most of us are training on 3090s+, we can use mixed precision.
     torch.set_float32_matmul_precision("medium")
 
     pl.seed_everything(cfg.seed)
 
-    TRAINING = "PYTEST_CURRENT_TEST" not in os.environ
+    TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False') == "True"
+    
+    if cfg.resume_ckpt:
+        print("Resuming from checkpoint")
+        print(cfg.resume_ckpt)
+        resume_ckpt = get_weights_path(cfg.resume_ckpt, cfg.wandb)
+        resume_ckpt = os.path.join(cfg.log_dir, resume_ckpt)
+        # Resume the wandb run
+        if cfg.resume_ckpt.startswith(cfg.wandb.entity):
+            # Get the run_id from the checkpoint
+            resume_run_id = cfg.resume_ckpt.split("/")[2].split("-")[1].split(":")[0]
+        elif cfg.wandb.run_id_override is not None:
+            resume_run_id = cfg.wandb.run_id_override
+        else:
+            resume_run_id = None
+
+    else:
+        resume_ckpt = None
+        resume_run_id = None
 
     logger = WandbLogger(
         entity=cfg.wandb.entity,
@@ -48,18 +75,21 @@ def main(cfg):
         group=cfg.wandb.group,
         save_dir=cfg.wandb.save_dir,
         job_type=cfg.job_type,
+        offline=cfg.wandb.offline,
         save_code=True,
-        log_model=True,
+        log_model=not cfg.wandb.offline,
+        id=resume_run_id,
         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
     )
 
     trainer = pl.Trainer(
-        logger=logger if TRAINING else None,
+        logger=logger if not TESTING else False,
         accelerator="gpu",
         devices=[0],
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         max_epochs=cfg.training.epochs,
+        precision=cfg.training.precision,
         callbacks=(
             [
                 # This checkpoint callback saves the latest model during training, i.e. so we can resume if it crashes.
@@ -82,10 +112,9 @@ def main(cfg):
                     save_weights_only=True,
                 ),
             ]
-            if TRAINING
-            else []
+            if not TESTING else []
         ),
-        fast_dev_run=5 if "PYTEST_CURRENT_TEST" in os.environ else False,
+        fast_dev_run=5 if TESTING else False,
     )
 
     dm = PretrainingMultiviewDataModule(
@@ -95,6 +124,12 @@ def main(cfg):
     )
 
     network = EquivariantFeatureEmbeddingNetwork(encoder_cfg=cfg.encoder)
+    scheduler_cfg = {
+        'scheduler': cfg.training.scheduler,
+        'max_epochs': cfg.training.epochs,
+        'warmup_ratio': 0.05,
+        'by_epoch': True
+    }
     model = EquivariancePreTrainingModule(
         network,
         lr=cfg.training.lr,
@@ -103,13 +138,15 @@ def main(cfg):
         normalize_features=cfg.training.normalize_features,
         temperature=cfg.training.temperature,
         con_weighting=cfg.training.con_weighting,
+        lr_cfg=scheduler_cfg,
     )
 
-    trainer.fit(model, dm)
+    trainer.fit(model, dm, ckpt_path=resume_ckpt)
 
 
 if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
-    # torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
     torch.multiprocessing.set_sharing_strategy("file_system")
+
     main()

@@ -32,17 +32,14 @@ training:
   batch_size: 8
   max_epochs: 500
   scheduler: constant
-  warmup_ratio: 0.02
-  tr_super_start_time_ratio: 1.0
   point_cloud_loss: "MSE"
-  lr_scheduler_by_epoch: False
-  
+  warmup_ratio: 0.02
+  tr_super_start_time_ratio: 0.25
   sigmoid_on: True
-
+  lr_scheduler_by_epoch: False
   # Optimizer Settings
   lr: 1e-4
   min_lr: 1e-6
-
   # Loss Settings
   flow_supervision: both
   displace_loss_weight: 1
@@ -64,7 +61,7 @@ seed: 0
 resume_ckpt: null
 
 resources:
-  num_workers: 16
+  num_workers: 8
 
 wandb:
   group: Null

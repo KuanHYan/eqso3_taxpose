@@ -1,6 +1,7 @@
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.decomposition import PCA
 import torch
 import wandb
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -31,11 +32,13 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
         normalize_features=True,
         temperature=0.1,
         con_weighting="dist",
+        lr_cfg: dict = {'scheduler': 'constant', 'max_epochs': 100, 'warmup_ratio': 0.1, 'by_epoch': True},
     ):
         super().__init__(
             model=model,
             lr=lr,
             image_log_period=image_log_period,
+            **lr_cfg,
         )
         self.model = model
         self.lr = lr
@@ -68,7 +71,6 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
     def module_step(self, batch, batch_idx):
         points = batch  # B, num_points, 3
         transforms = Rotate(random_rotations(len(points), device=points.device))
-
         points_centered = points - points.mean(dim=1, keepdims=True)  # B, num_points, 3
 
         points_trans = transforms.transform_points(points)
@@ -77,9 +79,24 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
 
         phi = self.model(points_centered.transpose(-1, -2))
         phi_trans = self.model(points_trans_centered.transpose(-1, -2))
+
+        # ****************DEBUG***********************
+        # 在训练循环中加入监控
+        debug_log_values = {}
+        debug_log_values.update(
+            phi_mean=phi.abs().mean().item(),
+            phi_std=phi.std().item(),
+            phi_nonzero_ratio=(phi != 0).float().mean().item())
+
         if self.normalize_features:
             phi = F.normalize(phi, dim=1)
             phi_trans = F.normalize(phi_trans, dim=1)
+
+            debug_log_values.update(
+                phi_norm_mean=phi.abs().mean().item(),
+                phi_norm_std=phi.std().item(),
+                phi_norm_nonzero_ratio=(phi != 0).float().mean().item())
+
         if self.con_weighting.lower() == "mask":
             w = dist2weight(points_centered)
         elif self.con_weighting.lower() == "dist":
@@ -112,6 +129,7 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
             loss = loss + self.l2_reg_weight * l2_reg
             log_values["l2_reg_loss"] = self.l2_reg_weight * l2_reg
 
+        log_values.update(debug_log_values)
         return loss, log_values
 
     def visualize_results(self, batch, batch_idx):
@@ -119,50 +137,66 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
         transforms = Rotate(random_rotations(len(points), device=points.device))
 
         points_centered = points - points.mean(dim=1, keepdims=True)  # B, num_points, 3
-
         points_trans = transforms.transform_points(points)
         points_trans_centered = points_trans - points_trans.mean(dim=1, keepdims=True)
-        # B, num_points, 3
 
+        # 提取特征，形状：[B, C, N]
         phi = self.model(points_centered.transpose(-1, -2))
         phi_trans = self.model(points_trans_centered.transpose(-1, -2))
         if self.normalize_features:
             phi = F.normalize(phi, dim=1)
             phi_trans = F.normalize(phi_trans, dim=1)
 
+        # 相似度矩阵 [B, N, N]
         similarity = phi.transpose(-1, -2) @ phi_trans
 
-        color = phi[0, :3].T.detach().cpu().numpy()
-        color_trans = phi_trans[0, :3].T.detach().cpu().numpy()
+        # ---------- PCA 提取前三个主成分作为颜色 ----------
+        def pca_colors(feature_tensor):
+            """
+            feature_tensor: [B, C, N] 取第一个 batch -> [N, C]
+            返回: [N, 3] 的 RGB 颜色数组，值域 [0,255]
+            """
+            feat = feature_tensor[0].detach().cpu().numpy()  # [C, N]
+            feat = feat.T  # [N, C]
+            # 若特征维度小于3，则补零或直接使用（这里假设C>=3）
+            n_components = min(3, feat.shape[1])
+            pca = PCA(n_components=n_components)
+            pca_result = pca.fit_transform(feat)  # [N, n_components]
+            if n_components < 3:
+                # 补零至3维
+                pca_result = np.pad(pca_result, ((0,0),(0,3-n_components)), mode='constant')
+            # 对每列做 min-max 归一化到 [0,1]
+            pca_min = pca_result.min(axis=0, keepdims=True)
+            pca_max = pca_result.max(axis=0, keepdims=True)
+            pca_norm = (pca_result - pca_min) / (pca_max - pca_min + 1e-8)
+            # 映射到 0-255
+            colors = (pca_norm * 255)
+            return pca_norm, colors
 
-        if not self.normalize_features:
-            colors_all = np.concatenate([color, color_trans], axis=0)
-            c_min = colors_all.min(axis=0)
-            c_max = colors_all.max(axis=0)
-            color = 255 * (color - c_min) / (c_max - c_min)
-            color_trans = 255 * (color_trans - c_min) / (c_max - c_min)
-        else:
-            color = 255 * (color + 1) / 2.0
-            color_trans = 255 * (color_trans + 1) / 2.0
+        phi_pca, color = pca_colors(phi)          # [N, 3]
+        phi_trans_pca,color_trans = pca_colors(phi_trans)  # [N, 3]
 
-        points_emb = np.concatenate([points[0].detach().cpu().numpy(), color], axis=-1)
-        points_trans_emb = np.concatenate(
-            [points[0].detach().cpu().numpy(), color_trans], axis=-1
-        )
+        # 合并点云坐标与颜色，用于 wandb 3D 可视化
+        points_np = points[0].detach().cpu().numpy()
+        points_emb = np.concatenate([points_np, color], axis=-1)
+        points_trans_emb = np.concatenate([points_np, color_trans], axis=-1)
 
-        test_idx = 100
-        color_dist = (
-            255 * cm.viridis(similarity[0, test_idx].detach().cpu().numpy())[:, :3]
-        )
-        points_comp_disp = np.concatenate(
-            [points[0].detach().cpu().numpy(), color_dist], axis=-1
-        )
-        points_comp_disp[test_idx, 3:] = [255, 0, 0]
-        res_viz = {}
+        # ---------- 相似度颜色映射（归一化 + colormap） ----------
+        diag_sim = similarity[0].diagonal().detach().cpu().numpy()  # [N]
+        sim_min = diag_sim.min()
+        sim_max = diag_sim.max()
+        sim_norm = (diag_sim - sim_min) / (sim_max - sim_min + 1e-8)
+        # 使用 coolwarm (蓝-白-红) 映射
+        color_dist = (255 * cm.coolwarm(sim_norm)[:, :3])  # [N, 3]
 
-        res_viz["points_emb"] = wandb.Object3D(points_emb)
-        res_viz["points_trans_emb"] = wandb.Object3D(points_trans_emb)
-        res_viz["points_comp_disp"] = wandb.Object3D(points_comp_disp)
-        res_viz["sim_geo_distance"] = self.similarity_geo_distance(similarity, points)
+        # 构建对比显示的点云（相似度颜色）
+        points_comp_disp = np.concatenate([points_np, color_dist], axis=-1)
 
+        # 组装返回字典
+        res_viz = {
+            "points_emb": wandb.Object3D(points_emb),
+            "points_trans_emb": wandb.Object3D(points_trans_emb),
+            "points_comp_disp": wandb.Object3D(points_comp_disp),
+            "sim_geo_distance": self.similarity_geo_distance(similarity, points)
+        }
         return res_viz

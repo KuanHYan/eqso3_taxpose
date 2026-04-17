@@ -20,8 +20,8 @@ lightning:
   checkpoint_dir: ${output_dir}/checkpoints
 
 wandb:
-  entity: r-pad
-  project: taxpose
+  entity: yankunh27-zhejiang-university
+  project: tax-pose
 
   # Group is for grouping runs together (i.e. a train run and an eval run).
   group: ???
@@ -30,3 +30,5 @@ wandb:
   save_dir: ${output_dir}
   # Put artifacts at the toplevel so that we don't have to re-download each time...
   artifact_dir: ${hydra:runtime.cwd}/wandb_artifacts
+  offline: False
+  name: ???

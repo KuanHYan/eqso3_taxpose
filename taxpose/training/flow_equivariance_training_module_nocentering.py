@@ -14,9 +14,12 @@ from taxpose.utils.se3 import (
     flow2pose,
     get_degree_angle,
     get_translation,
+    mse_criterion
 )
 
-mse_criterion = nn.MSELoss(reduction="sum")
+import matplotlib.cm as cm
+import numpy as np
+
 to_tensor = ToTensor()
 
 
@@ -25,6 +28,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         self,
         model=None,
         lr=1e-3,
+        lr_cfg: dict = {'scheduler': 'constant', 'max_steps': 400, 'warmup_ratio': 0.1, 'min_lr': 1e-5, 'by_epoch': True},
         image_log_period=500,
         action_weight=1,
         anchor_weight=1,
@@ -36,12 +40,19 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         sigmoid_on=False,
         softmax_temperature=None,
         flow_supervision="both",  # ('both', 'action2anchor', 'anchor2action')
+        tr_super_time_ratio=0.0,
+        point_cloud_loss: str = "MSE",
+        tensorboard_writer=None,
     ):
         super().__init__(
             model=model,
             lr=lr,
             image_log_period=image_log_period,
+            tensorboard_writer=tensorboard_writer,
+            **lr_cfg,
         )
+        if mse_criterion.type_key != point_cloud_loss:
+            mse_criterion.set_type_key(point_cloud_loss)
         self.model = model
         self.lr = lr
         self.image_log_period = image_log_period
@@ -60,6 +71,9 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         self.flow_supervision = flow_supervision
         if self.weight_normalize == "l1":
             assert self.sigmoid_on, "l1 weight normalization need sigmoid on"
+
+        self.rotate_frobenius_loss_weight = 0.0
+        self.tr_super_time_ratio = tr_super_time_ratio
 
     def compute_loss(self, model_output, batch, log_values={}, loss_prefix=""):
         x_action = model_output["flow_action"]
@@ -309,6 +323,14 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             + self.direct_correspondence_loss_weight * dense_loss
         )
 
+        if self.rotate_frobenius_loss_weight > 0.:
+            R_delta = gt_T_action.get_matrix() - pred_T_action.get_matrix()
+            loss_tr = (
+                self.rotate_frobenius_loss_weight * (R_delta**2).sum(dim=(-1, -2)).mean()
+            )
+            log_values[loss_prefix + "tr_loss"] = loss_tr.detach()
+            loss += loss_tr
+
         log_values[loss_prefix + "point_loss"] = self.displace_loss_weight * point_loss
         log_values[loss_prefix + "smoothness_loss"] = (
             self.consistency_loss_weight * smoothness_loss
@@ -316,7 +338,12 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         log_values[loss_prefix + "dense_loss"] = (
             self.direct_correspondence_loss_weight * dense_loss
         )
-
+        centered_pred_ps_A = pred_points_action.detach()
+        centered_pred_ps_A = centered_pred_ps_A - centered_pred_ps_A.mean(dim=1, keepdim=True)
+        centered_gt_ps = points_action_target.detach()
+        centered_gt_ps = centered_gt_ps - centered_gt_ps.mean(dim=1, keepdim=True)
+        log_values[loss_prefix + "only_Rotate_L2_pcs_distance"] = \
+            mse_criterion(centered_pred_ps_A, centered_gt_ps)
         log_values[loss_prefix + "R0_mean"] = R0_mean
         log_values[loss_prefix + "R0_max"] = R0_max
         log_values[loss_prefix + "R0_min"] = R0_min
@@ -378,7 +405,15 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         loss, log_values = self.compute_loss(
             model_output, batch, log_values=log_values, loss_prefix=""
         )
+        log_values.update(lr=self._optimizer_.param_groups[0]["lr"])
         return loss, log_values
+
+    def on_train_epoch_start(self) -> None:
+        if self.current_epoch >= self.tr_super_time_ratio * self.max_lr_steps and \
+                self.rotate_frobenius_loss_weight == 0.0:
+            self.rotate_frobenius_loss_weight = 1.0
+            self.print("rotate_frobenius_loss_weight = 1.0")
+        return super().on_train_epoch_start()
 
     def forward(
         self,
@@ -668,5 +703,23 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             anchor_xyzrgb = torch.cat([points_anchor[0], anchor_symmetry_rgb[0]], dim=1)
             xyzrgb = torch.cat([action_xyzrgb, anchor_xyzrgb], dim=0)
             res_images["symmetry_vis"] = wandb.Object3D(xyzrgb.cpu().numpy())
+
+        attns_for_anchor = model_output['attns'][0].detach().cpu().sum(dim=0)
+        w_min = attns_for_anchor.min()
+        w_max = attns_for_anchor.max()
+        w_norm = (attns_for_anchor - w_min) / (w_max - w_min + 1e-8)
+
+        # 使用 coolwarm (蓝-白-红) 映射
+        color_dist = (255 * cm.coolwarm(w_norm.cpu().numpy())[:, :3])  # [N, 3], ignore alpha
+        attns_action = np.concatenate([points_trans_anchor[0].cpu().numpy(), color_dist], axis=1)
+        res_images['attns_action'] = wandb.Object3D(attns_action)
+        
+        corr_points = model_output['corr_points'][0].detach().cpu()
+        corr_points = get_color(
+            tensor_list=[points_trans_anchor[0], corr_points,
+                         corr_points+model_output['residual_flow_action'][0].detach().cpu()],
+            color_list=["blue", "red", "green"],
+        )
+        res_images['corr_points_action'] = wandb.Object3D(corr_points)
 
         return res_images

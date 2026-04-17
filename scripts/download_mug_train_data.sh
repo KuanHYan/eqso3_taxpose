@@ -13,7 +13,7 @@ mkdir mug_grasp && cd mug_grasp
 # -O train_data.zip && rm -rf /tmp/cookies.txt
 
 gdown --id 1GI33ZHKMB5yuZKDMkNhuUxOlEyrR68mR -O test_data.zip
-# gdown --id 1yhRegjfRfzyNMEmOFxU2p2ZRdO57pAdy -O train_data.zip
+gdown --id 1yhRegjfRfzyNMEmOFxU2p2ZRdO57pAdy -O train_data.zip
 unzip train_data.zip && rm -rf train_data.zip
 unzip test_data.zip && rm -rf test_data.zip
 

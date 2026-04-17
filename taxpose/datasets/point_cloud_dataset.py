@@ -22,7 +22,7 @@ class PointCloudDatasetConfig:
     translation_variance: float = 0.5
     action_rot_sample_method: str = "axis_angle"
     anchor_rot_sample_method: str = "axis_angle"
-    dataset_size: int = 1000
+    dataset_size: int = 1024
 
     # Handle the synthesizing of various features.
     include_symmetry_features: bool = False
@@ -48,6 +48,12 @@ def make_dataset(
         return real_world_mug.RealWorldMugPointCloudDataset(
             cast(real_world_mug.RealWorldMugPointCloudDatasetConfig, cfg)
         )
+    elif cfg.dataset_type == "asm_pair":
+        from taxpose.datasets import (
+            CustomPointCloudDataset, CustomPointCloudDatasetConfig)
+        return CustomPointCloudDataset(
+            cast(CustomPointCloudDatasetConfig, cfg)
+        )
     else:
         raise NotImplementedError(f"Unknown dataset type: {cfg.dataset_type}")
 
@@ -55,7 +61,11 @@ def make_dataset(
 class PointCloudDataset(Dataset):
     def __init__(self, cfg: PointCloudDatasetConfig):
         self.dataset = make_dataset(cfg.demo_dset)
-        self.dataset_size = cfg.dataset_size
+        if cfg.dataset_size <= len(self.dataset):
+            self.dataset_size = len(self.dataset)
+        else:
+            self.dataset_size = cfg.dataset_size
+        print(f"Total dataset: {self.dataset_size}")
         self.action_rot_var = cfg.action_rotation_variance
         self.anchor_rot_var = cfg.anchor_rotation_variance
         self.trans_var = cfg.translation_variance
@@ -64,11 +74,15 @@ class PointCloudDataset(Dataset):
         self.cfg = cfg
 
     def __getitem__(self, index):
-        data_ix = torch.randint(len(self.dataset), [1]).item()
+        if index >= len(self.dataset):
+            data_ix = torch.randint(len(self.dataset), [1]).item()
+        else:
+            data_ix = index
         data = self.dataset[data_ix]
         points_action = torch.from_numpy(data["points_action"])
         points_anchor = torch.from_numpy(data["points_anchor"])
-        phase_onehot = torch.from_numpy(data["phase_onehot"])
+        phase_onehot = None if data["phase_onehot"] is None else \
+            torch.from_numpy(data["phase_onehot"])
 
         T0 = random_se3(
             1,
@@ -96,9 +110,9 @@ class PointCloudDataset(Dataset):
             "points_anchor_trans": points_anchor_trans.squeeze(0),
             "T0": T0.get_matrix().squeeze(0),
             "T1": T1.get_matrix().squeeze(0),
-            "phase_onehot": phase_onehot,
         }
-
+        if phase_onehot is not None:
+            out_dict["phase_onehot"] = phase_onehot
         # Handle the extra features.
 
         # We might have different features to include here.

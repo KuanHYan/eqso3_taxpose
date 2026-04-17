@@ -10,9 +10,39 @@ from pytorch3d.transforms import (
     rotation_6d_to_matrix,
     so3_rotation_angle,
 )
+from pytorch3d.loss import chamfer_distance
 from torch.nn import functional as F
 
-mse_criterion = nn.MSELoss(reduction="sum")
+
+class PointCloudLoss(nn.Module):
+    def __init__(self, type_key="MSE", reduction="sum"):
+        super(PointCloudLoss, self).__init__()
+        self.type_key = type_key
+        self.reduction = reduction
+        if self.type_key not in ["MSE", "mse", "CD", "cd"]:
+            raise ValueError(
+                "Loss type {} is not supported. Please use MSE or CD.".format(
+                    self.type_key
+                )
+            )
+
+    def forward(self, x, y):
+        if self.type_key in ["CD", "cd"]:
+            loss = chamfer_distance(
+                x, y,
+                point_reduction=self.reduction,
+                single_directional=True)[0]
+        else:
+            bz = x.shape[0]
+            loss = F.mse_loss(x, y, reduction=self.reduction) / bz
+        return loss
+
+    def set_type_key(self, type_key):
+        self.type_key = type_key
+
+
+# mse_criterion = nn.MSELoss(reduction="sum")
+mse_criterion = PointCloudLoss("MSE", reduction="sum")
 
 
 def to_transform3d(x, rot_function=rotation_6d_to_matrix):

@@ -16,7 +16,11 @@ from taxpose.datasets.shapenet_pretraining import (
     ShapeNetPretrainingPointCloudDataset,
     ShapeNetPretrainingPointCloudDatasetConfig,
 )
-
+from taxpose.datasets import (
+    CustomPretrainingPointCloudDataset,
+    CustomPretrainingPointCloudDatasetConfig,
+    CustomPretrainingTotalPCDataset,
+)
 
 def make_dataset(cfg: PretrainingPointCloudDatasetConfig):
     dataset_type = cfg.dataset_type
@@ -26,6 +30,12 @@ def make_dataset(cfg: PretrainingPointCloudDatasetConfig):
     elif dataset_type == "shapenet_pretraining":
         shapenet_cfg = cast(ShapeNetPretrainingPointCloudDatasetConfig, cfg)
         return ShapeNetPretrainingPointCloudDataset(shapenet_cfg)
+    elif dataset_type == "depth_pretraining":
+        custom_cfg = cast(CustomPretrainingPointCloudDatasetConfig, cfg)
+        return CustomPretrainingPointCloudDataset(custom_cfg)
+    elif dataset_type == "total_pcs_pretraining":
+        custom_cfg = cast(CustomPretrainingPointCloudDatasetConfig, cfg)
+        return CustomPretrainingTotalPCDataset(custom_cfg)
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
 

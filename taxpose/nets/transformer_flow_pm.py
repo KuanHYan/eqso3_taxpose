@@ -3,6 +3,7 @@ import math
 
 import torch
 from torch import nn
+from torch.nn import MultiheadAttention as torch_MultiheadAttention
 
 from taxpose.nets.dgcnn_gc import DGCNN_GC
 from taxpose.nets.pointnet import PointNet
@@ -44,7 +45,12 @@ class CustomTransformer(nn.Module):
         self.return_attn = return_attn
         self.bidirectional = bidirectional
         c = copy.deepcopy
-        attn = MultiHeadedAttention(self.n_heads, self.emb_dims)
+        attn = MultiHeadedAttention(
+            self.n_heads,
+            self.emb_dims,
+            dropout=self.dropout,
+            project_bias=False
+        )
         ff = PositionwiseFeedForward(self.emb_dims, self.ff_dims, self.dropout)
         self.model = EncoderDecoder(
             Encoder(EncoderLayer(self.emb_dims, c(attn), c(ff), self.dropout), self.N),
@@ -62,7 +68,7 @@ class CustomTransformer(nn.Module):
         tgt = input[1]
         src = src.transpose(2, 1).contiguous()
         tgt = tgt.transpose(2, 1).contiguous()
-        src_embedding = self.model(tgt, src, None, None).transpose(2, 1).contiguous()
+        src_embedding = self.model.forward(tgt, src, None, None).transpose(2, 1).contiguous()
         src_attn = self.model.decoder.layers[-1].src_attn.attn
 
         outputs = {"src_embedding": src_embedding, "src_attn": src_attn}

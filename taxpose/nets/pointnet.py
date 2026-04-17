@@ -13,12 +13,20 @@ class PointNet(nn.Module):
             convs.append(
                 nn.Conv1d(layer_dims[j], layer_dims[j + 1], kernel_size=1, bias=False)
             )
-            norms.append(nn.BatchNorm1d(layer_dims[j + 1]))
+            # norms.append(nn.BatchNorm1d(layer_dims[j + 1]))
+            norms.append(nn.LayerNorm(layer_dims[j + 1]))  # B, C, H, W 对应 B, L, S
+            # norms.append(nn.InstanceNorm1d(layer_dims[j + 1]))
 
         self.convs = nn.ModuleList(convs)
         self.norms = nn.ModuleList(norms)
 
     def forward(self, x):
-        for bn, conv in zip(self.norms, self.convs):
-            x = F.relu(bn(conv(x)))
+        for norm, conv in zip(self.norms, self.convs):
+            x = conv(x)  # B, new_c, N
+            if isinstance(norm, nn.LayerNorm):
+                # B, new_c, N -> B, N, new_c -> B, new_c, N
+                x = norm(x.swapaxes(1, 2)).swapaxes(1, 2)
+            else:
+                x = norm(x)
+            x = F.relu(x)
         return x

@@ -11,7 +11,7 @@ dm:
     translation_variance: 0.5
     action_rot_sample_method: "axis_angle"
     anchor_rot_sample_method: "axis_angle_uniform_z"
-    dataset_size: 1000
+    dataset_size: 1024
     include_symmetry_features: False
     include_rgb_features: False
 
@@ -22,6 +22,6 @@ dm:
     translation_variance: ${..train_dset.translation_variance}
     action_rot_sample_method: ${..train_dset.action_rot_sample_method}
     anchor_rot_sample_method: ${..train_dset.anchor_rot_sample_method}
-    dataset_size: ${..train_dset.dataset_size}
+    dataset_size: -1
     include_symmetry_features: ${..train_dset.include_symmetry_features}
     include_rgb_features: ${..train_dset.include_rgb_features}

@@ -100,7 +100,7 @@ def main(cfg):
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
         accelerator="gpu",
-        devices=[0],
+        devices="auto",
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         # reload_dataloaders_every_n_epochs=1,
@@ -130,8 +130,10 @@ def main(cfg):
             if not TESTING else []
         ),
         max_epochs=cfg.training.max_epochs,
-        fast_dev_run=TESTING,
+        fast_dev_run=5 if TESTING else False,
         precision=cfg.training.precision,
+        gradient_clip_algorithm='norm',
+        gradient_clip_val=300.0,
     )
 
     dm = MultiviewDataModule(
@@ -156,6 +158,8 @@ def main(cfg):
         'by_epoch': cfg.training.lr_scheduler_by_epoch,
     }
     print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_ratio: {cfg.training.warmup_ratio}")
+    tensorboard_writer = SummaryWriter()
+    print(f"tensorboard_writer output to: {tensorboard_writer.log_dir}")
     model = EquivarianceTrainingModule(
         network,
         lr=cfg.training.lr,
@@ -170,6 +174,7 @@ def main(cfg):
         flow_supervision=cfg.training.flow_supervision,
         tr_super_time_ratio=cfg.training.tr_super_start_time_ratio,
         point_cloud_loss=cfg.training.point_cloud_loss,
+        tensorboard_writer=tensorboard_writer,
     )
 
     model.cuda()
@@ -225,11 +230,14 @@ def main(cfg):
 
     # Print he run id of the current run
     print("Run ID: {} ".format(logger.experiment.id))
+    if TESTING:
+        tensorboard_writer.close()
 
 
 if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
     torch.autograd.set_detect_anomaly(True)
-    torch.cuda.empty_cache()
     torch.multiprocessing.set_sharing_strategy("file_system")
+    from torch.utils.tensorboard import SummaryWriter
+    print(f"Running in test mode because PYTEST_CURRENT_TEST is set {os.environ.get('PYTEST_CURRENT_TEST')}")
     main()

@@ -500,10 +500,12 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         self.conditional = conditional
 
         self.transformer_action = CustomTransformer(
-            emb_dims=emb_dims, return_attn=self.return_attn, bidirectional=False
+            emb_dims=emb_dims, return_attn=self.return_attn,
+            bidirectional=False, n_blocks=1, dropout=0.1,
         )
         self.transformer_anchor = CustomTransformer(
-            emb_dims=emb_dims, return_attn=self.return_attn, bidirectional=False
+            emb_dims=emb_dims, return_attn=self.return_attn,
+            bidirectional=False, n_blocks=1, dropout=0.1,
         )
         self.head_action: nn.Module
         self.head_anchor: nn.Module
@@ -672,7 +674,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 original_points_anchor = head_anchor_output["P_A"].permute(0, 2, 1)
                 outputs["original_points_anchor"] = original_points_anchor
                 outputs["sampled_ixs_anchor"] = head_anchor_output["A_ixs"]
-
+        #  *************************DEBUG*************************
+        outputs.update(attns=action_attn, corr_points=corr_points_action)
         return outputs
 
 

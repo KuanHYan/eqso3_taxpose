@@ -341,7 +341,6 @@ class TestPointCloudDataset(Dataset):
                 "points_anchor_trans": points_anchor_trans.squeeze(0),
                 "T0": T0.get_matrix().squeeze(0),
                 "T1": T1.get_matrix().squeeze(0),
-                "points_action": points_action.squeeze(0),
                 "symmetric_cls": symmetric_cls,
             }
             if self.symmetric_class is not None:
