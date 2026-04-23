@@ -11,7 +11,8 @@ train_dset:
   dataset_indices: null
   cloud_type: final
   action_class: ${..action_class}
-  num_points: 2048
+  num_points: 1024
+  data_size: 1000
   pc_aug: True
   phase: train
   data_fn: train_${..data_fn}
@@ -28,3 +29,4 @@ val_dset:
   phase: test
   data_fn: test_${..data_fn}
   shuffle_pcs: False
+  data_size: -1

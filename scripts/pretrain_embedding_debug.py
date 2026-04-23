@@ -17,7 +17,7 @@ from taxpose.training.equivariant_feature_pretraining_module import (
     EquivariancePreTrainingModule,
 )
 from taxpose.utils.dup_stdout_manager import DupStdoutFileManager
-
+from torch.utils.tensorboard.writer import SummaryWriter
 
 @hydra.main(version_base="1.1", config_path="../configs", config_name="pretraining")
 def main(cfg):
@@ -76,7 +76,7 @@ def main(cfg):
         save_dir=cfg.wandb.save_dir,
         job_type=cfg.job_type,
         offline=cfg.wandb.offline,
-        save_code=True,
+        save_code=not cfg.wandb.offline,
         log_model=not cfg.wandb.offline,
         id=resume_run_id,
         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
@@ -85,7 +85,7 @@ def main(cfg):
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
         accelerator="gpu",
-        devices=[0],
+        devices='auto',
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         max_epochs=cfg.training.epochs,
@@ -126,10 +126,11 @@ def main(cfg):
     network = EquivariantFeatureEmbeddingNetwork(encoder_cfg=cfg.encoder)
     scheduler_cfg = {
         'scheduler': cfg.training.scheduler,
-        'max_steps': int(cfg.training.epochs * cfg.dataset.train_dset.data_size),
-        'warmup_ratio': 3000,
+        'max_steps': int(cfg.training.epochs*64),
+        'warmup_ratio': 100,
         'by_epoch': False
     }
+    tensorboard_writer = SummaryWriter()
     model = EquivariancePreTrainingModule(
         network,
         lr=cfg.training.lr,
@@ -139,6 +140,7 @@ def main(cfg):
         temperature=cfg.training.temperature,
         con_weighting=cfg.training.con_weighting,
         lr_cfg=scheduler_cfg,
+        tensorboard_writer=tensorboard_writer,
     )
 
     trainer.fit(model, dm, ckpt_path=resume_ckpt)

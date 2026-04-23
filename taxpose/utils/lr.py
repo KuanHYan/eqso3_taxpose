@@ -209,11 +209,9 @@ class LinearAnnealingWarmup(_LRScheduler):
                 for base_lr in self.base_lrs
             ]
         else:
+            ra_ = (self.total_steps - self.cur_step) / (self.total_steps - self.warmup_steps)
             return [
-                base_lr
-                + (self.max_lr - base_lr)
-                * (self.total_steps - self.cur_step)
-                / (self.total_steps - self.warmup_steps)
+                base_lr + max((self.max_lr - base_lr) * ra_, 0)
                 for base_lr in self.base_lrs
             ]
 

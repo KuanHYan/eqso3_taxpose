@@ -3,7 +3,7 @@ from torch import nn
 
 
 class PointNet(nn.Module):
-    def __init__(self, layer_dims=[3, 64, 64, 64, 128, 512]):
+    def __init__(self, layer_dims=[3, 64, 64, 64, 128, 512], norm=nn.BatchNorm1d):
         super(PointNet, self).__init__()
 
         convs = []
@@ -14,7 +14,7 @@ class PointNet(nn.Module):
                 nn.Conv1d(layer_dims[j], layer_dims[j + 1], kernel_size=1, bias=False)
             )
             # norms.append(nn.BatchNorm1d(layer_dims[j + 1]))
-            norms.append(nn.LayerNorm(layer_dims[j + 1]))  # B, C, H, W 对应 B, L, S
+            norms.append(norm(layer_dims[j + 1]))  # B, C, H, W 对应 B, L, S
             # norms.append(nn.InstanceNorm1d(layer_dims[j + 1]))
 
         self.convs = nn.ModuleList(convs)

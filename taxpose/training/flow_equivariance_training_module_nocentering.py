@@ -1,10 +1,11 @@
 from typing import Any
+import wandb
 
 import torch
-import wandb
-from pytorch3d.transforms import Transform3d
 from torch import nn
 from torchvision.transforms import ToTensor
+from torch.cuda.amp.autocast_mode import autocast
+from pytorch3d.transforms import Transform3d
 
 from taxpose.training.point_cloud_training_module import PointCloudTrainingModule
 from taxpose.utils.color_utils import get_color
@@ -141,7 +142,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             # pred_T_action=T1T0^-1
             gt_T_action = T0.inverse().compose(T1)
             points_action_target = T1.transform_points(points_action)
-
+            
             error_R_max, error_R_min, error_R_mean = get_degree_angle(
                 T0.inverse().compose(T1).compose(pred_T_action.inverse())
             )
@@ -318,9 +319,9 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         )
 
         loss = (
-            self.displace_loss_weight * point_loss
-            + self.consistency_loss_weight * smoothness_loss
-            + self.direct_correspondence_loss_weight * dense_loss
+            self.displace_loss_weight * point_loss,
+            self.consistency_loss_weight * smoothness_loss,
+            self.direct_correspondence_loss_weight * dense_loss
         )
 
         if self.rotate_frobenius_loss_weight > 0.:
@@ -329,7 +330,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
                 self.rotate_frobenius_loss_weight * (R_delta**2).sum(dim=(-1, -2)).mean()
             )
             log_values[loss_prefix + "tr_loss"] = loss_tr.detach()
-            loss += loss_tr
+            loss += (loss_tr)
 
         log_values[loss_prefix + "point_loss"] = self.displace_loss_weight * point_loss
         log_values[loss_prefix + "smoothness_loss"] = (
@@ -409,7 +410,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         return loss, log_values
 
     def on_train_epoch_start(self) -> None:
-        if self.current_epoch >= self.tr_super_time_ratio * self.max_lr_steps and \
+        if self.current_epoch >= self.tr_super_time_ratio * self.end_lr_steps and \
                 self.rotate_frobenius_loss_weight == 0.0:
             self.rotate_frobenius_loss_weight = 1.0
             self.print("rotate_frobenius_loss_weight = 1.0")
@@ -491,6 +492,8 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
 
         return res
 
+    @torch.no_grad()
+    @autocast(enabled=False)
     def visualize_results(self, batch, batch_idx):
         # classes = batch['classes']
         # points = batch['points']

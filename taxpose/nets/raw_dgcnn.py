@@ -8,6 +8,7 @@
 """
 
 
+from dataclasses import dataclass
 import os
 import sys
 import copy
@@ -33,7 +34,7 @@ def get_graph_feature(x, k=20, idx=None):
     x = x.view(batch_size, -1, num_points)
     if idx is None:
         idx = knn(x, k=k)   # (batch_size, num_points, k)
-    device = torch.device('cuda')
+    device = x.device
 
     idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1)*num_points
 
@@ -85,17 +86,31 @@ class PointNet(nn.Module):
         return x
 
 
+class Swapaxes(nn.Module):
+    def forward(self, x):
+        return x.transpose(-1, -2)
+
+
 class DGCNN(nn.Module):
     def __init__(self, args, output_channels=40):
         super(DGCNN, self).__init__()
         self.args = args
         self.k = args.k
-        
-        self.bn1 = nn.BatchNorm2d(64)
-        self.bn2 = nn.BatchNorm2d(64)
-        self.bn3 = nn.BatchNorm2d(128)
-        self.bn4 = nn.BatchNorm2d(256)
-        self.bn5 = nn.BatchNorm1d(args.emb_dims)
+        self.norm = args.norm
+        if args.norm == 'group':
+            self.bn1 = nn.GroupNorm(1, 64)
+            self.bn2 = nn.GroupNorm(1, 64)
+            self.bn3 = nn.GroupNorm(1, 128)
+            self.bn4 = nn.GroupNorm(1, 256)
+            self.bn5 = nn.GroupNorm(1, args.emb_dims)
+        elif args.norm == 'BN':
+            self.bn1 = nn.BatchNorm2d(64)
+            self.bn2 = nn.BatchNorm2d(64)
+            self.bn3 = nn.BatchNorm2d(128)
+            self.bn4 = nn.BatchNorm2d(256)
+            self.bn5 = nn.BatchNorm1d(args.emb_dims)
+        else:
+            raise ValueError('Invalid normalization: %s' % args.norm)
 
         self.conv1 = nn.Sequential(nn.Conv2d(6, 64, kernel_size=1, bias=False),
                                    self.bn1,
@@ -151,3 +166,56 @@ class DGCNN(nn.Module):
         x = self.dp2(x)
         x = self.linear3(x)
         return x
+
+
+@dataclass
+class DGCNNArgs:
+    k: int = 20
+    emb_dims: int = 512
+    dropout: float = 0.3
+    norm: str = 'BN'
+
+
+class DGCNN4TaxPose(DGCNN):
+    def __init__(self, emb_dims=512, knn_n=20, dropout=0.1, norm='BN', output_c=1):
+        super().__init__(
+            DGCNNArgs(knn_n, emb_dims, dropout, norm), output_c)
+        self.linear1 = None
+        del self.linear1
+        self.bn6 = None
+        del self.bn6
+
+        self.linear2 = None
+        del self.linear2
+        self.bn7 = None
+        del self.bn7
+        self.dp2 = None
+        del self.dp2
+        self.linear3 = None
+        del self.linear3
+
+    def forward(self, x):
+        '''
+        input: x with shape of [B, 3, N]
+        '''
+        x = get_graph_feature(x, k=self.k)
+        x = self.conv1(x)
+        x1 = x.max(dim=-1, keepdim=False)[0]
+
+        x = get_graph_feature(x1, k=self.k)
+        x = self.conv2(x)
+        x2 = x.max(dim=-1, keepdim=False)[0]
+
+        x = get_graph_feature(x2, k=self.k)
+        x = self.conv3(x)
+        x3 = x.max(dim=-1, keepdim=False)[0]
+
+        x = get_graph_feature(x3, k=self.k)
+        x = self.conv4(x)
+        x4 = x.max(dim=-1, keepdim=False)[0]
+
+        x = torch.cat((x1, x2, x3, x4), dim=1)
+
+        x = self.conv5(x)
+
+        return self.dp1(x)

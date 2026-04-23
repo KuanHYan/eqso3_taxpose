@@ -168,12 +168,13 @@ class LayerNorm(nn.Module):
 
 
 class SublayerConnection(nn.Module):
-    def __init__(self, size, dropout=None):
+    def __init__(self, size, dropout=0.1):
         super(SublayerConnection, self).__init__()
         self.norm = nn.LayerNorm(size)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, sublayer):
-        return x + sublayer(self.norm(x))
+        return x + self.dropout(sublayer(self.norm(x)))
 
 
 class EncoderLayer(nn.Module):
@@ -248,12 +249,14 @@ class PositionwiseFeedForward(nn.Module):
     def __init__(self, d_model, d_ff, dropout=0.1):
         super(PositionwiseFeedForward, self).__init__()
         self.w_1 = nn.Linear(d_model, d_ff)
-        self.norm = nn.Sequential()  # nn.BatchNorm1d(d_ff)
+        # self.norm = nn.Sequential()  # nn.BatchNorm1d(d_ff)
         self.w_2 = nn.Linear(d_ff, d_model)
-        self.dropout = None
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.w_2(self.norm(F.relu(self.w_1(x)).transpose(2, 1).contiguous()).transpose(2, 1).contiguous())
+        x = F.relu(self.w_1(x))
+        x = self.dropout(x)
+        return self.w_2(x)
 
 
 class PointNet(nn.Module):

@@ -16,6 +16,7 @@ from taxpose.nets.tv_mlp import MLP as TVMLP
 from taxpose.nets.vn_dgcnn import VN_DGCNN, VNArgs
 from taxpose.utils.multilateration import estimate_p
 from third_party.dcp.model import DGCNN
+from taxpose.nets.raw_dgcnn import DGCNN4TaxPose
 
 
 class EquivariantFeatureEmbeddingNetwork(nn.Module):
@@ -39,7 +40,7 @@ class CorrespondenceFlow_DiffEmbMLP(nn.Module):
 
         self.emb_nn_action = create_embedding_network(encoder_cfg)
         self.emb_nn_anchor = create_embedding_network(encoder_cfg)
-        emb_dims = emb_nn.encoder
+        emb_dims = encoder_cfg.encoder
 
         self.center_feature = center_feature
 
@@ -203,7 +204,8 @@ class ResidualMLPHead(nn.Module):
     v_i = f(\phi_i) + \tilde{y}_i - x_i
     """
 
-    def __init__(self, emb_dims=512, pred_weight=True, residual_on=True):
+    def __init__(self, emb_dims=512, pred_weight=True, residual_on=True,
+                 norm=nn.BatchNorm1d, bias=False):
         super(ResidualMLPHead, self).__init__()
 
         self.emb_dims = emb_dims
@@ -211,19 +213,19 @@ class ResidualMLPHead(nn.Module):
             self.proj_flow = nn.Sequential(
                 PointNet([emb_dims, 64, 64, 64, 128, 512]),
                 # PointNet([emb_dims, emb_dims//2, emb_dims//4, emb_dims//8]),
-                nn.Conv1d(512, 1, kernel_size=1, bias=False),
+                nn.Conv1d(512, 1, kernel_size=1, bias=bias),
             )
         else:
             self.proj_flow = nn.Sequential(
-                PointNet([emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8]),
-                nn.Conv1d(emb_dims // 8, 3, kernel_size=1, bias=False),
+                PointNet([emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], norm),
+                nn.Conv1d(emb_dims // 8, 3, kernel_size=1, bias=bias),
             )
         self.pred_weight = pred_weight
         if self.pred_weight:
             self.proj_flow_weight = nn.Sequential(
-                PointNet([emb_dims, 64, 64, 64, 128, 512]),
+                PointNet([emb_dims, 64, 64, 64, 128, 512], norm),
                 # PointNet([emb_dims, emb_dims//2, emb_dims//4, emb_dims//8]),
-                nn.Conv1d(512, 1, kernel_size=1, bias=False),
+                nn.Conv1d(512, 1, kernel_size=1, bias=bias),
             )
 
         self.residual_on = residual_on
@@ -462,6 +464,8 @@ def create_embedding_network(cfg) -> nn.Module:
     elif cfg.name == "vn_dgcnn":
         args = VNArgs()
         network = VN_DGCNN(args, num_part=cfg.emb_dims, gc=False)
+    elif cfg.name == "raw_dgcnn":
+        network: nn.Module = DGCNN4TaxPose(cfg.emb_dims, cfg.knn, cfg.dropout, cfg.norm)
     else:
         raise ValueError(f"Unknown embedding network type: {cfg.name}")
 
@@ -469,6 +473,12 @@ def create_embedding_network(cfg) -> nn.Module:
 
 
 class ResidualFlow_DiffEmbTransformer(nn.Module):
+    head_norm = {
+        'BN': nn.BatchNorm1d,
+        'LN': nn.LayerNorm,
+        'IN': nn.InstanceNorm1d
+    }
+
     def __init__(
         self,
         encoder_cfg,
@@ -483,6 +493,9 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         mlat_nkps: int = 100,
         feature_channels=0,  # Number of extra channels we'll pass into the network.
         conditional: bool = False,
+        head_norm: str = 'BN',
+        dropout=0.0,
+        head_bias=False,
     ):
         super(ResidualFlow_DiffEmbTransformer, self).__init__()
         self.cycle = cycle
@@ -501,11 +514,11 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
 
         self.transformer_action = CustomTransformer(
             emb_dims=emb_dims, return_attn=self.return_attn,
-            bidirectional=False, n_blocks=1, dropout=0.1,
+            bidirectional=False, n_blocks=1, dropout=dropout,
         )
         self.transformer_anchor = CustomTransformer(
             emb_dims=emb_dims, return_attn=self.return_attn,
-            bidirectional=False, n_blocks=1, dropout=0.1,
+            bidirectional=False, n_blocks=1, dropout=dropout,
         )
         self.head_action: nn.Module
         self.head_anchor: nn.Module
@@ -527,11 +540,15 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 emb_dims=emb_dims,
                 pred_weight=self.pred_weight,
                 residual_on=self.residual_on,
+                norm=self.head_norm[head_norm],
+                bias=head_bias
             )
             self.head_anchor = ResidualMLPHead(
                 emb_dims=emb_dims,
                 pred_weight=self.pred_weight,
                 residual_on=self.residual_on,
+                norm=self.head_norm[head_norm],
+                bias=head_bias
             )
 
         if self.conditional:
@@ -562,13 +579,14 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         if not self.center_feature:
             action_points_dmean = action_points
             anchor_points_dmean = anchor_points
-
-        action_embedding = self.emb_nn_action(action_points_dmean)
-        anchor_embedding = self.emb_nn_anchor(anchor_points_dmean)
-
-        if self.freeze_embnn:
-            action_embedding = action_embedding.detach()
-            anchor_embedding = anchor_embedding.detach()
+        with torch.set_grad_enabled(not self.freeze_embnn):
+            action_embedding = self.emb_nn_action(action_points_dmean)
+            anchor_embedding = self.emb_nn_anchor(anchor_points_dmean)
+            action_embedding = F.normalize(action_embedding, dim=1)
+            anchor_embedding = F.normalize(anchor_embedding, dim=1)
+        # if self.freeze_embnn:
+        #     action_embedding = action_embedding.detach()
+        #     anchor_embedding = anchor_embedding.detach()
 
         if self.feature_channels > 0:
             # Add a symmetry label to the embeddings.
@@ -618,8 +636,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             action_attn = None
             anchor_attn = None
 
-        action_embedding_tf = action_embedding + action_embedding_tf
-        anchor_embedding_tf = anchor_embedding + anchor_embedding_tf
+        action_embedding_tf = action_embedding + F.normalize(action_embedding_tf, dim=1)
+        anchor_embedding_tf = anchor_embedding + F.normalize(anchor_embedding_tf, dim=1)
 
         if action_attn is not None:
             action_attn = action_attn.mean(dim=1)
@@ -705,6 +723,9 @@ class ResidualFlowDiffEmbTransformerConfig:
     feature_channels: int
     conditional: bool
 
+    head_norm: str
+    dropout: float
+
 
 @dataclass
 class CorrespondenceFlowDiffEmbMLPConfig:
@@ -733,6 +754,9 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             mlat_nkps=r_cfg.mlat_nkps,
             feature_channels=r_cfg.feature_channels,
             conditional=r_cfg.conditional,
+            head_norm=cfg.head_norm,
+            dropout=cfg.dropout,
+            head_bias=cfg.head_bias,
         )
     elif cfg.model_type == "correspondence_flow_diff_emb_mlp":
         c_cfg = cast(CorrespondenceFlowDiffEmbMLPConfig, cfg)

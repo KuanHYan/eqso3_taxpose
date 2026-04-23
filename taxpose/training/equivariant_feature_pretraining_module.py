@@ -32,12 +32,14 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
         normalize_features=True,
         temperature=0.1,
         con_weighting="dist",
-        lr_cfg: dict = {'scheduler': 'constant', 'max_epochs': 100, 'warmup_ratio': 0.1, 'by_epoch': True},
+        lr_cfg: dict = {'scheduler': 'constant', 'max_steps': 100, 'warmup_ratio': 0.0, 'by_epoch': True},
+        tensorboard_writer=None,
     ):
         super().__init__(
             model=model,
             lr=lr,
             image_log_period=image_log_period,
+            tensorboard_writer=tensorboard_writer,
             **lr_cfg,
         )
         self.model = model

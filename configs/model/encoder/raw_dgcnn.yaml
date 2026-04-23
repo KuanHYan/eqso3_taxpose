@@ -1,4 +1,4 @@
-name: dgcnn
+name: raw_dgcnn
 emb_dims: 512
 knn: 20
 dropout: 0.3

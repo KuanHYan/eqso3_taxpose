@@ -386,3 +386,5 @@ configs/checkpoints/**/*.yaml
 !configs/checkpoints/**/release.yaml
 !configs/checkpoints/**/pretraining.yaml
 !configs/checkpoints/**/pretraining/**/*.yaml
+
+grad_experiments_log/

@@ -12,6 +12,7 @@ from pytorch3d.transforms import (
 )
 from pytorch3d.loss import chamfer_distance
 from torch.nn import functional as F
+from torch.cuda.amp.autocast_mode import autocast
 
 
 class PointCloudLoss(nn.Module):
@@ -41,8 +42,27 @@ class PointCloudLoss(nn.Module):
         self.type_key = type_key
 
 
+class MultiTaskLoss(nn.Module):
+    """
+    Balanced loss
+    """
+    def __init__(self, num_tasks):
+        super(MultiTaskLoss, self).__init__()
+        self.num_tasks = num_tasks
+        self.log_vars = nn.Parameter(torch.zeros(num_tasks))
+
+    def forward(self, losses):
+        total = 0
+        for i, loss in enumerate(losses):
+            percision = torch.exp(-self.log_vars[i])
+            total += 0.5*percision * loss + 0.5*self.log_vars[i]
+        return total
+
+
 # mse_criterion = nn.MSELoss(reduction="sum")
 mse_criterion = PointCloudLoss("MSE", reduction="sum")
+
+
 
 
 def to_transform3d(x, rot_function=rotation_6d_to_matrix):
@@ -129,6 +149,7 @@ def random_se3(
     return Rotate(R, device=device).translate(t)
 
 
+@autocast(enabled=False)
 def get_degree_angle(T):
     angle_rad_T = (
         so3_rotation_angle(T.get_matrix()[:, :3, :3], eps=1e-2) * 180 / np.pi
@@ -140,6 +161,7 @@ def get_degree_angle(T):
     return max, min, mean
 
 
+@autocast(enabled=False)
 def get_translation(T):
     t = T.get_matrix()[:, 3, :3]  # B,3
     t_norm = torch.norm(t, dim=1)  # B
@@ -251,6 +273,7 @@ def flow2pose(
 eps = 1e-9
 
 
+@autocast(enabled=False, dtype=torch.float32)
 def dualflow2pose(
     xyz_src,
     xyz_tgt,
@@ -262,6 +285,14 @@ def dualflow2pose(
     normalization_scehme="l1",
     temperature=1,
 ):
+    raw_dtype = xyz_src.dtype
+    if raw_dtype in [torch.float16, torch.bfloat16]:
+        xyz_src = xyz_src.float()
+        xyz_tgt = xyz_tgt.float()
+        flow_src = flow_src.float()
+        flow_tgt = flow_tgt.float()
+        weights_src = weights_src.float() if weights_src is not None else None
+        weights_tgt = weights_tgt.float() if weights_tgt is not None else None
     assert normalization_scehme in [
         "l1",
         "softmax",
@@ -318,7 +349,9 @@ def dualflow2pose(
         (w_src.shape[1] * t_src + w_tgt.shape[1] * t_tgt)
         / (w_src.shape[1] + w_tgt.shape[1])
     ).squeeze(1)
-
+    # if R.dtype != raw_dtype:
+    #     R = R.to(raw_dtype)
+    #     t = t.to(raw_dtype)
     if return_transform3d:
         return Rotate(R).translate(t)
     return R, t

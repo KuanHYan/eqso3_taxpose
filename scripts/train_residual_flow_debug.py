@@ -238,6 +238,6 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
     torch.autograd.set_detect_anomaly(True)
     torch.multiprocessing.set_sharing_strategy("file_system")
-    from torch.utils.tensorboard import SummaryWriter
+    from torch.utils.tensorboard.writer import SummaryWriter
     print(f"Running in test mode because PYTEST_CURRENT_TEST is set {os.environ.get('PYTEST_CURRENT_TEST')}")
     main()

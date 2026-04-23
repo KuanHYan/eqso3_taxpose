@@ -381,6 +381,7 @@ class CustomPretrainingPointCloudDatasetConfig:
     shuffle_pcs: bool = True
     dataset_type: str = "depth_pretraining"
     cloud_type: str = "final"
+    data_size: int = -1
 
 
 class CustomPretrainingPointCloudDataset(Dataset):
@@ -539,6 +540,7 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
     def __init__(self, cfg: CustomPretrainingPointCloudDatasetConfig, overfit=-1):
         assert cfg.dataset_type == "total_pcs_pretraining", \
             "Only support total_pcs_pretraining"
+        self.data_size = cfg.data_size
         super().__init__(cfg, overfit)
 
     def _read_data(self, data_fn):
@@ -565,8 +567,8 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
             print(f"Removed from {len(bad_demo_names)} bad demos")
             filenames = [name for name in filenames if name not in bad_demo_names]
 
-        if len(filenames) < 1000:
-            idx = np.random.choice(len(filenames), 1000, replace=True)
+        if self.data_size > 0 and len(filenames) < self.data_size:
+            idx = np.random.choice(len(filenames), self.data_size, replace=True)
             filenames = [filenames[i] for i in idx]
 
         print(f"Total valid files: {len(filenames)} / {original_length}")

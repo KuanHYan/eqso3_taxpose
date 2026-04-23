@@ -4,6 +4,7 @@ TEST_MODE=$2
 SCHED=$3
 WANDB_NAME=$4
 CONFIG=$5
+RESUME_CKPT=$6
 ## use ./launch.sh local 0 $command to run on local machine
 ROOT_DIR=/home/yan/pose_estimation/taxpose/
 cd $ROOT_DIR
@@ -17,30 +18,26 @@ bash "./launch.sh" local $GPU_INDEX \
     --config-name $CONFIG \
     job_type="train_taxpose" \
     data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
-    training.image_logging_period=10000 \
-    training.log_every_n_steps=3000 \
-    training.check_val_every_n_epoch=1 \
-    training.max_epochs=1000 \
-    training.end_lr_ratio=0.5 \
+    training.max_epochs=500 \
     training.batch_size=32 \
     training.lr=0.0004 \
     training.min_lr=0.000004 \
-    training.warmup_ratio=0.005 \
+    training.warmup_ratio=0.02 \
     training.precision='32' \
     training.scheduler=$SCHED \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \
-    dm.train_dset.dataset_size=64000 \
+    dm.train_dset.dataset_size=1024 \
     model.freeze_embnn=True \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \
     model.head_norm=LN \
-    model.head_bias=True \
+    model.head_bias=False \
     model.dropout=0.0 \
     wandb.name=$WANDB_NAME \
     'model.pretraining.action.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
     'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
     wandb.offline=False \
-    # resume_ckpt='logs/train_taxpose/2026-04-15/17-16-50/checkpoints/last.ckpt' \
+    resume_ckpt=$RESUME_CKPT \
     # wandb.project="tax-pose" \
     # wandb.save_dir="${ROOT_DIR}pretrain_embedding" \

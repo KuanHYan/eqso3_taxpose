@@ -130,7 +130,7 @@ def main(cfg):
             if not TESTING else []
         ),
         max_epochs=cfg.training.max_epochs,
-        fast_dev_run=TESTING,
+        fast_dev_run=20 if TESTING else False,
         precision=cfg.training.precision,
     )
 
@@ -144,10 +144,11 @@ def main(cfg):
 
     network = create_network(cfg.model)
     if cfg.training.lr_scheduler_by_epoch:
-        lr_scheduler_total_steps = cfg.training.max_epochs
+        lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio
     else:
-        lr_scheduler_total_steps = cfg.training.max_epochs * \
-            int(len(dm.train_dataset) / cfg.training.batch_size)
+        lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio \
+            * int(len(dm.train_dataset) / cfg.training.batch_size)
+    lr_scheduler_total_steps = int(lr_scheduler_total_steps)
     scheduler_cfg = {
         'scheduler': cfg.training.scheduler,
         'max_steps': lr_scheduler_total_steps,
