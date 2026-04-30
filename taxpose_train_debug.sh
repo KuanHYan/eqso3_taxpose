@@ -16,9 +16,9 @@ bash "./launch.sh" local $GPU_INDEX \
     --config-name $CONFIG \
     job_type="train_taxpose" \
     data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
-    training.max_epochs=500 \
+    training.max_epochs=505 \
     training.batch_size=32 \
-    training.lr=0.0004 \
+    training.lr=0.0002 \
     training.warmup_ratio=0.02 \
     training.precision=32 \
     training.scheduler=$SCHED \
@@ -38,6 +38,6 @@ bash "./launch.sh" local $GPU_INDEX \
     training.displace_loss_weight=1 \
     training.direct_correspondence_loss_weight=1 \
     training.consistency_loss_weight=0.1 \
-    resume_ckpt=$RESUME_CKPT \
+    'resume_ckpt="logs/train_taxpose/2026-04-26/21-09-53/checkpoints/epoch=38-step=78000.ckpt"' \
     # wandb.project="tax-pose" \
     # wandb.save_dir="${ROOT_DIR}pretrain_embedding" \

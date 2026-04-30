@@ -14,24 +14,24 @@ export PYTEST_CURRENT_TEST=$TEST_MODE
 
 # train taxpose network
 bash "./launch.sh" local $GPU_INDEX \
-    python "./scripts/train_residual_flow.py" \
+    python "./scripts/train_residual_flow_CAGrad.py" \
     --config-name $CONFIG \
     job_type="train_taxpose" \
     data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
-    training.image_logging_period=10000 \
-    training.log_every_n_steps=3000 \
-    training.check_val_every_n_epoch=1 \
-    training.max_epochs=1000 \
-    training.end_lr_ratio=0.5 \
+    training.max_epochs=500 \
     training.batch_size=32 \
     training.lr=0.0004 \
     training.min_lr=0.000004 \
-    training.warmup_ratio=0.005 \
+    training.warmup_ratio=0.02 \
     training.precision='32' \
     training.scheduler=$SCHED \
+    training.optimization_mode='auto' \
+    training.displace_loss_weight=1.0 \
+    training.direct_correspondence_loss_weight=1.0 \
+    training.consistency_loss_weight=1.0 \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \
-    dm.train_dset.dataset_size=64000 \
+    dm.train_dset.dataset_size=1024 \
     model.freeze_embnn=True \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \

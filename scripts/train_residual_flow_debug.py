@@ -99,7 +99,7 @@ def main(cfg):
     # logger.log_hyperparams({"working_dir": os.getcwd()})
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
-        accelerator="gpu",
+        accelerator="cpu",
         devices="auto",
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,

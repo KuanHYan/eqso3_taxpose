@@ -44,12 +44,14 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         tr_super_time_ratio=0.0,
         point_cloud_loss: str = "MSE",
         tensorboard_writer=None,
+        optimization_mode: str = 'auto'
     ):
         super().__init__(
             model=model,
             lr=lr,
             image_log_period=image_log_period,
             tensorboard_writer=tensorboard_writer,
+            optimization_mode=optimization_mode,
             **lr_cfg,
         )
         if mse_criterion.type_key != point_cloud_loss:
@@ -343,8 +345,8 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         centered_pred_ps_A = centered_pred_ps_A - centered_pred_ps_A.mean(dim=1, keepdim=True)
         centered_gt_ps = points_action_target.detach()
         centered_gt_ps = centered_gt_ps - centered_gt_ps.mean(dim=1, keepdim=True)
-        log_values[loss_prefix + "only_Rotate_L2_pcs_distance"] = \
-            mse_criterion(centered_pred_ps_A, centered_gt_ps)
+        # log_values[loss_prefix + "only_Rotate_L2_pcs_distance"] = \
+        #     mse_criterion(centered_pred_ps_A, centered_gt_ps)
         log_values[loss_prefix + "R0_mean"] = R0_mean
         log_values[loss_prefix + "R0_max"] = R0_max
         log_values[loss_prefix + "R0_min"] = R0_min
@@ -707,10 +709,15 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             xyzrgb = torch.cat([action_xyzrgb, anchor_xyzrgb], dim=0)
             res_images["symmetry_vis"] = wandb.Object3D(xyzrgb.cpu().numpy())
 
-        attns_for_anchor = model_output['attns'][0].detach().cpu().sum(dim=0)
-        w_min = attns_for_anchor.min()
-        w_max = attns_for_anchor.max()
+        batch_0_attn = model_output['attns'][0].detach().cpu()
+        attns_for_anchor = batch_0_attn.sum(dim=0)  # [N, N] -> N, 1
+        # mean_entropy = -torch.sum(batch_0_attn * torch.log(batch_0_attn + 1e-8), dim=-1)
+        # idx = torch.randint(0, len(attns_for_anchor), (40,)).to(device=batch_0_attn.device)
+        w_min = torch.quantile(attns_for_anchor, 0.01)
+        w_max = torch.quantile(attns_for_anchor, 0.99)
+        attns_for_anchor = torch.clamp(attns_for_anchor, w_min, w_max)
         w_norm = (attns_for_anchor - w_min) / (w_max - w_min + 1e-8)
+        # print(f"DEBUG: shape {attns_for_anchor}, min {w_min}, max {w_max}, mean entropy {mean_entropy[idx]}")
 
         # 使用 coolwarm (蓝-白-红) 映射
         color_dist = (255 * cm.coolwarm(w_norm.cpu().numpy())[:, :3])  # [N, 3], ignore alpha

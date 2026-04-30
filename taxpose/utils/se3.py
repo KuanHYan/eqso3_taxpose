@@ -63,8 +63,6 @@ class MultiTaskLoss(nn.Module):
 mse_criterion = PointCloudLoss("MSE", reduction="sum")
 
 
-
-
 def to_transform3d(x, rot_function=rotation_6d_to_matrix):
     trans = x[:, :3]
     rot = x[:, 3:]
@@ -507,9 +505,10 @@ def points2pose(
     return R, t
 
 
+dense_mse_criterion = PointCloudLoss("MSE", reduction="sum")
 def dense_flow_loss(points, flow_pred, trans_gt):
     flow_gt = trans_gt.transform_points(points) - points
-    loss = mse_criterion(
+    loss = dense_mse_criterion(
         flow_pred,
         flow_gt,
     )

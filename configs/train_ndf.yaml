@@ -61,6 +61,8 @@ training:
 
   precision: 32
 
+  optimization_mode: "auto"
+
 seed: 0
 resume_ckpt: null
 

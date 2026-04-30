@@ -13,6 +13,7 @@ class PointCloudTrainingModule(pl.LightningModule):
             scheduler: str = 'constant', max_steps: int = 100,
             warmup_ratio: float = 0.1, by_epoch: bool = True,
             tensorboard_writer=None, image_log_period=500,
+            optimization_mode: str = 'auto'
             ):
         super().__init__()
         self.model = model
@@ -24,9 +25,10 @@ class PointCloudTrainingModule(pl.LightningModule):
         self.by_epoch = by_epoch
         self.end_lr_steps = max_steps
         self.warmup_steps = int(warmup_ratio * self.end_lr_steps)
+        self._automatic_optimization = optimization_mode == 'auto'
         if tensorboard_writer is not None:
             self.tensorboard_writer = tensorboard_writer
-            self.shared_params = list(self.model.parameters())
+            self.shared_params = list(self.parameters())
 
     def module_step(self, batch, batch_idx):
         raise NotImplementedError("module_step must be implemented by child class")
@@ -78,11 +80,10 @@ class PointCloudTrainingModule(pl.LightningModule):
         self.tensorboard_writer.add_scalar("cos_sim_pc_vpc_sm", cos_sim_vpc_sm, self.global_step)
         return
 
-
     def training_step(self, batch, batch_idx):
         loss, log_values = self.module_step(batch, batch_idx)
         if isinstance(loss, tuple):
-            self._ori_loss = loss
+            self._ori_losses = loss
             loss = sum(loss)
         for key, val in log_values.items():
             self.log(key, val, logger=True)

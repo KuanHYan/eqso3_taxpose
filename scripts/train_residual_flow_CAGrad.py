@@ -5,18 +5,14 @@ import omegaconf
 import pytorch_lightning as pl
 import torch
 import wandb
-# # 或指定不校验
-# os.environ["REQUESTS_CA_BUNDLE"] = ""
-# wandb.init()
 from omegaconf import OmegaConf
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
 from taxpose.datasets.point_cloud_data_module import MultiviewDataModule
 from taxpose.nets.transformer_flow import create_network
-from taxpose.training.flow_equivariance_training_module_nocentering import (
-    EquivarianceTrainingModule,
-)
+from taxpose.training import EquivarianceTrainingModuleCaGrad
+
 from taxpose.utils.load_model import get_weights_path
 
 
@@ -160,7 +156,7 @@ def main(cfg):
         'by_epoch': cfg.training.lr_scheduler_by_epoch,
     }
     print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_ratio: {cfg.training.warmup_ratio}")
-    model = EquivarianceTrainingModule(
+    model = EquivarianceTrainingModuleCaGrad(
         network,
         lr=cfg.training.lr,
         lr_cfg=scheduler_cfg,
@@ -174,8 +170,8 @@ def main(cfg):
         flow_supervision=cfg.training.flow_supervision,
         tr_super_time_ratio=cfg.training.tr_super_start_time_ratio,
         point_cloud_loss=cfg.training.point_cloud_loss,
+        optimization_mode=cfg.training.optimization_mode,
     )
-
     model.cuda()
     model.train()
     if cfg.training.load_from_checkpoint:
