@@ -31,9 +31,12 @@ def attention(query, key, value, mask=None, dropout=None):
     d_k = query.size(-1)
     scores = torch.matmul(query, key.transpose(-2, -1).contiguous()) / math.sqrt(d_k)
     if mask is not None:
-        scores = scores.masked_fill(mask == 0, -1e9)
+        scores = scores.masked_fill(mask == 0, torch.finfo(scores.dtype).min)
     p_attn = F.softmax(scores, dim=-1)
+    if dropout is not None:
+        p_attn = dropout(p_attn)
     return torch.matmul(p_attn, value), p_attn
+
 
 
 def nearest_neighbor(src, dst):
@@ -219,7 +222,7 @@ class MultiHeadedAttention(nn.Module):
         self.h = h
         self.linears = clones(nn.Linear(d_model, d_model, bias=project_bias), 4)
         self.attn = None
-        self.dropout = None
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, query, key, value, mask=None):
         "Implements Figure 2"
@@ -254,7 +257,7 @@ class PositionwiseFeedForward(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        x = F.relu(self.w_1(x))
+        x = F.gelu(self.w_1(x))
         x = self.dropout(x)
         return self.w_2(x)
 

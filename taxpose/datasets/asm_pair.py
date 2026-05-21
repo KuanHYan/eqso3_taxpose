@@ -321,6 +321,8 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
         # Downsample
         points_action, _ = maybe_downsample(points_action, self.min_num_points)
         points_anchor, _ = maybe_downsample(points_anchor, self.min_num_points)
+        np.random.shuffle(points_action)
+        np.random.shuffle(points_anchor)
 
         action_symmetry_features = None
         anchor_symmetry_features = None

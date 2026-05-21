@@ -9,14 +9,19 @@
 
 
 from dataclasses import dataclass
-import os
-import sys
-import copy
-import math
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from taxpose.nets.pointnet import PointwiseMLP, ResidualPointNet
+from taxpose.nets.vn_layers import (
+    VNLinearLeakyReLU,
+    VNLinearAndLeakyReLU,
+    VNMaxPool,
+    mean_pool,
+    VNStdFeature,
+    VNBatchNorm,
+    VNLayerNorm
+)
 
 
 def knn(x, k):
@@ -30,7 +35,7 @@ def knn(x, k):
 
 def get_graph_feature(x, k=20, idx=None):
     batch_size = x.size(0)
-    num_points = x.size(2)
+    num_points = x.size(-1)
     x = x.view(batch_size, -1, num_points)
     if idx is None:
         idx = knn(x, k=k)   # (batch_size, num_points, k)
@@ -52,6 +57,68 @@ def get_graph_feature(x, k=20, idx=None):
     feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 1, 2).contiguous()
   
     return feature
+
+
+def get_graph_feature_for_vndgcnn(x, k=20, idx=None, x_coord=None):
+    batch_size = x.size(0)
+    num_points = x.size(-1)
+    x = x.view(batch_size, -1, num_points)
+    if idx is None:
+        if x_coord is None: # dynamic knn graph
+            idx = knn(x, k=k)
+        else:          # fixed knn graph with input point coordinates
+            idx = knn(x_coord, k=k)
+    device = x.device
+
+    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1)*num_points
+
+    idx = idx + idx_base
+
+    idx = idx.view(-1)
+ 
+    _, num_dims, _ = x.size()
+    num_dims = num_dims // 3
+
+    x = x.transpose(2, 1).contiguous()
+    feature = x.view(batch_size*num_points, -1)[idx, :]
+    feature = feature.view(batch_size, num_points, k, num_dims, 3) 
+    x = x.view(batch_size, num_points, 1, num_dims, 3).repeat(1, 1, k, 1, 1)
+    
+    feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 4, 1, 2).contiguous()
+  
+    return feature
+
+
+class LayerNorm1d(nn.Module):
+    """对 (B, C, L) 输入在 C 维度执行 LayerNorm，保持输出形状不变。"""
+    def __init__(self, num_channels, eps=1e-5, elementwise_affine=True):
+        super().__init__()
+        self.norm = nn.LayerNorm(
+            num_channels, eps=eps, elementwise_affine=elementwise_affine)
+
+    def forward(self, x):
+        # x: (B, C, L) -> (B, L, C) -> LN -> (B, L, C) -> (B, C, L)
+        x = x.transpose(1, 2)
+        x = self.norm(x)
+        x = x.transpose(1, 2)
+        return x
+
+
+class LayerNorm2d(nn.Module):
+    """对 (B, C, L, W) 输入在 C*W 维度执行 LayerNorm，保持输出形状不变。"""
+    def __init__(self, num_channels: list, eps=1e-5, elementwise_affine=True):
+        super().__init__()
+        self.norm = nn.LayerNorm(
+            num_channels, eps=eps, elementwise_affine=elementwise_affine)
+
+    def forward(self, x):
+        """ 
+        x: (B, C, L) -> (B, L, C) -> LN -> (B, L, C) -> (B, C, L)
+        """
+        x = x.transpose(1, 2)
+        x = self.norm(x)
+        x = x.transpose(1, 2)
+        return x
 
 
 class PointNet(nn.Module):
@@ -95,14 +162,14 @@ class DGCNN(nn.Module):
     def __init__(self, args, output_channels=40):
         super(DGCNN, self).__init__()
         self.args = args
-        self.k = args.k
+        self.k = args.knn
         self.norm = args.norm
-        if args.norm == 'group':
-            self.bn1 = nn.GroupNorm(1, 64)
-            self.bn2 = nn.GroupNorm(1, 64)
-            self.bn3 = nn.GroupNorm(1, 128)
-            self.bn4 = nn.GroupNorm(1, 256)
-            self.bn5 = nn.GroupNorm(1, args.emb_dims)
+        if args.norm == 'LN':
+            self.bn1 = LayerNorm2d([64, self.k])
+            self.bn2 = LayerNorm2d([64, self.k])
+            self.bn3 = LayerNorm2d([128, self.k])
+            self.bn4 = LayerNorm2d([256, self.k])
+            self.bn5 = LayerNorm1d(args.emb_dims)
         elif args.norm == 'BN':
             self.bn1 = nn.BatchNorm2d(64)
             self.bn2 = nn.BatchNorm2d(64)
@@ -156,6 +223,7 @@ class DGCNN(nn.Module):
         x = torch.cat((x1, x2, x3, x4), dim=1)
 
         x = self.conv5(x)
+
         x1 = F.adaptive_max_pool1d(x, 1).view(batch_size, -1)
         x2 = F.adaptive_avg_pool1d(x, 1).view(batch_size, -1)
         x = torch.cat((x1, x2), 1)
@@ -170,7 +238,7 @@ class DGCNN(nn.Module):
 
 @dataclass
 class DGCNNArgs:
-    k: int = 20
+    knn: int = 20
     emb_dims: int = 512
     dropout: float = 0.3
     norm: str = 'BN'
@@ -219,3 +287,76 @@ class DGCNN4TaxPose(DGCNN):
         x = self.conv5(x)
 
         return self.dp1(x)
+
+
+class DGCNN_VAE(nn.Module):
+    def __init__(self, args, pos_encoding=False, output_channels=40):
+        super(DGCNN_VAE, self).__init__()
+        emb_dims = args.emb_dims
+        self.encoder = DGCNN4TaxPose(args.emb_dims, args.knn, args.dropout, args.norm)
+        if not pos_encoding:
+            self.decoder = PointwiseMLP(
+                [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, nn.BatchNorm1d)
+        else:
+            self.decoder = ResidualPointNet(
+                [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], nn.BatchNorm1d, pos_encoding=True)
+
+    def forward(self, x):
+        """
+        x with shape of [B, 3, N]
+        return: 
+            fea with shape of [B, C, N];
+            pts with shape of [B, N, 3]
+        """
+        if self.eval():
+            return self.inference(x)
+        fea = self.encoder(x)
+        pts = self.decoder(fea, x)
+        return fea, pts.transpose(-1, -2)
+
+    @torch.no_grad()
+    def inference(self, x):
+        """
+        x with shape of [B, 3, N]
+        return: fea with shape of [B, C, N]
+        """
+        fea = self.encoder(x)
+        return fea
+
+
+@dataclass
+class VNArgs:
+    knn: int = 16
+    emb_dims: int = 512
+    dropout: float = 0.3
+    norm: str = 'BN'
+    pooling: str = "mean"
+    channel: int = 3
+
+class VN_DGCNN(nn.Module):
+    def __init__(self, args: VNArgs, gc=False):
+        super(VN_DGCNN, self).__init__()
+        self.args = args
+        self.n_knn = args.knn
+        self.channel = channel = args.channel
+        norm = VNBatchNorm(channel, 4, -1) if args.norm == 'BN' \
+            else VNLayerNorm(channel, 4, -1)
+        self.conv1 = VNLinearAndLeakyReLU(
+            channel, channel, dim=4, norm=norm)
+        self.conv2 = VNLinearAndLeakyReLU(
+            channel, channel, dim=4, share_nonlinearity=True, norm=norm)
+        
+    def forward(self, xyz):
+        """
+        xyz: B, 3, N
+        """
+        xyz = xyz.transpose(2, 1).unsqueeze(-1)  # (B, N, 3, 1)
+        xyz = self.conv2(self.conv1(xyz), )
+
+
+if __name__ == '__main__':
+    x = torch.rand(10, 3, 1024)
+    model = DGCNN_VAE(DGCNNArgs(norm='LN'))
+    y = model(x)
+    print(y[0].shape)
+    print(y[1].shape)

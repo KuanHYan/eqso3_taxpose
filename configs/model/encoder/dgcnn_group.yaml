@@ -1,0 +1,5 @@
+name: dgcnn_group
+emb_dims: 256
+knn: 16
+norm: GN
+output_num: 512

@@ -12,7 +12,7 @@ train_dset:
   cloud_type: final
   action_class: ${..action_class}
   num_points: 1024
-  data_size: 1000
+  data_size: 1024
   pc_aug: True
   phase: train
   data_fn: train_${..data_fn}

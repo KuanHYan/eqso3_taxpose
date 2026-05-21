@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 # Pulled from DCP
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol, cast
 
+from omegaconf import OmegaConf
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,10 +15,15 @@ import torch.nn.functional as F
 from taxpose.nets.pointnet import PointwiseMLP, ResidualPointNet, PointNet
 from taxpose.nets.transformer_flow_pm import CustomTransformer
 from taxpose.nets.tv_mlp import MLP as TVMLP
-from taxpose.nets.vn_dgcnn import VN_DGCNN, VNArgs
+from taxpose.nets.vn_dgcnn import VN_DGCNN_iqSO3, VNArgs
 from taxpose.utils.multilateration import estimate_p
 from third_party.dcp.model import DGCNN
-from taxpose.nets.raw_dgcnn import DGCNN4TaxPose
+from taxpose.nets.raw_dgcnn import DGCNN4TaxPose, DGCNN_VAE
+from taxpose.nets.dgcnn_group import DGCNN_Grouper
+from taxpose.nets.head import create_head, HeadConfig
+from taxpose.nets.gemo_fea import ManualPointWiseGemoFea
+from taxpose.nets.huggingface_tf import Transformer
+from taxpose.nets.head import TransformerHead
 
 
 class EquivariantFeatureEmbeddingNetwork(nn.Module):
@@ -29,8 +36,12 @@ class EquivariantFeatureEmbeddingNetwork(nn.Module):
         points_dmean = points - points.mean(dim=2, keepdim=True)
 
         points_embedding = self.emb_nn(points_dmean)  # B, emb_dims, num_points
+        if isinstance(points_embedding, tuple):
+            points_embedding, points = points_embedding
+        return points_embedding, points.transpose(1, 2).contiguous()
 
-        return points_embedding
+    def get_group_centers(self):
+        return self.emb_nn.coord.transpose(1, 2).contiguous().detach()
 
 
 class CorrespondenceFlow_DiffEmbMLP(nn.Module):
@@ -196,177 +207,6 @@ class MLPHeadWeight(nn.Module):
         embedding = action_embedding
         flow = self.proj_flow(embedding)
         return flow
-
-
-class TransformerHead(nn.Module):
-    def __init__(self, emb_dims=512, pred_weight=True, residual_on=True,
-                 norm=nn.BatchNorm1d, bias=False):
-        super(TransformerHead, self).__init__()
-
-        self.emb_dims = emb_dims
-        self.proj_flow = nn.Sequential(
-            CustomTransformer(emb_dims, 1, dropout=0.0, bidirectional=False),
-            nn.Conv1d(emb_dims, 3, kernel_size=1, bias=bias),
-        )
-        self.pred_weight = pred_weight
-        if self.pred_weight:
-            self.proj_flow_weight = nn.Sequential(
-                PointNet([emb_dims, 64, 64, 64, 128, 512], norm),
-                # PointNet([emb_dims, emb_dims//2, emb_dims//4, emb_dims//8]),
-                nn.Conv1d(512, 1, kernel_size=1, bias=bias),
-            )
-
-        self.residual_on = residual_on
-
-    def forward(self, *input, scores=None):
-        action_embedding = input[0]
-        anchor_embedding = input[1]
-        action_points = input[2]
-        anchor_points = input[3]
-
-        if scores is None:
-            if len(input) <= 4:
-                action_query = action_embedding
-                anchor_key = anchor_embedding
-            else:
-                action_query = input[4]
-                anchor_key = input[5]
-
-            d_k = action_query.size(1)
-            scores = torch.matmul(
-                action_query.transpose(2, 1).contiguous(), anchor_key
-            ) / math.sqrt(d_k)
-            # W_i # B, N, N (N=number of points, 1024 cur)
-            scores = torch.softmax(scores, dim=2)
-
-        corr_points = torch.matmul(anchor_points, scores.transpose(2, 1).contiguous())
-        # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
-        corr_flow = corr_points - action_points
-
-        # action_embedding  B,512,N
-        # residual_flow = self.proj_flow((anchor_embedding, action_embedding))  # B,3,N
-        residual_flow = self.proj_flow[0](anchor_embedding, action_embedding)["src_embedding"]
-        residual_flow = self.proj_flow[1](residual_flow)
-
-        if self.residual_on:
-            flow = residual_flow + corr_flow
-        else:
-            flow = corr_flow
-
-        if self.pred_weight:
-            weight = self.proj_flow_weight(action_embedding)
-            corr_flow_weight = torch.concat([flow, weight], dim=1)
-        else:
-            corr_flow_weight = flow
-        return {
-            "full_flow": corr_flow_weight,
-            "residual_flow": residual_flow,
-            "corr_flow": corr_flow,
-            "corr_points": corr_points,
-            "scores": scores,
-        }
-
-
-class ResidualMLPHead(nn.Module):
-    """
-    Base ResidualMLPHead with flow calculated as
-    v_i = f(\phi_i) + \tilde{y}_i - x_i
-    """
-
-    def __init__(self, emb_dims=512, pred_weight=True, residual_on=True,
-                 norm=nn.BatchNorm1d, bias=False, use_coarse_ps=False):
-        super(ResidualMLPHead, self).__init__()
-
-        self.emb_dims = emb_dims
-        if self.emb_dims < 10:
-            self.proj_flow = PointwiseMLP([emb_dims, 64, 64, 64, 128, 512])
-        else:
-            # self.proj_flow = ResidualPointNet(
-            #     [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8],
-            #     norm,
-            #     init_scale=0.01,
-            #     use_coarse_ps=True, pos_encoding=False)
-            
-            # self.proj_flow = PointwiseMLP(
-            #     [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm)
-            self.proj_flow = nn.Sequential(
-                PointNet([emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], norm),
-                nn.Conv1d(emb_dims // 8, 3, kernel_size=1, bias=bias),
-            )
-
-        self.pred_weight = pred_weight
-        if self.pred_weight:
-            # self.proj_flow_weight = PointwiseMLP(
-            #     [emb_dims, 64, 64, 64, 128, 512], 1, norm)
-            self.proj_flow_weight = nn.Sequential(
-                PointNet([emb_dims, 64, 64, 64, 128, 512], norm),
-                nn.Conv1d(512, 1, kernel_size=1, bias=bias),
-            )
-        self.residual_on = residual_on
-        self.use_coarse_ps = isinstance(self.proj_flow, ResidualPointNet)
-
-    def forward(self, *input, scores=None, return_embedding=False):
-        action_embedding = input[0]
-        anchor_embedding = input[1]
-        action_points = input[2]
-        anchor_points = input[3]
-
-        if scores is None:
-            if len(input) <= 4:
-                action_query = action_embedding
-                anchor_key = anchor_embedding
-            else:
-                action_query = input[4]
-                anchor_key = input[5]
-
-            d_k = action_query.size(1)
-            scores = torch.matmul(
-                action_query.transpose(2, 1).contiguous(), anchor_key
-            ) / math.sqrt(d_k)
-            # W_i # B, N, N (N=number of points, 1024 cur)
-            scores = torch.softmax(scores, dim=2)
-
-        corr_points = torch.matmul(anchor_points, scores.transpose(2, 1).contiguous())
-        # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
-        corr_flow = corr_points - action_points
-
-        if self.pred_weight:
-            weight = self.proj_flow_weight(action_embedding)
-
-        if self.use_coarse_ps:
-            if self.pred_weight:
-                _weight = weight / (weight.sum(dim=1, keepdim=True) + 1e-8)  # 归一化权重和为1
-                center = (corr_points * _weight).sum(dim=1, keepdims=True)
-                centered = corr_points - center
-                distances = torch.norm(centered, dim=2, keepdim=False)  # [B,N]
-                radius = distances.max(dim=1, keepdim=True)[0].unsqueeze(-1)  # [B,1,1]
-                radius = torch.where(radius < 1e-8, torch.ones_like(radius), radius)
-                centered_corr_points = centered / radius
-            else:
-                centered_corr_points, center, radius = normalize(corr_points)
-
-        if not self.use_coarse_ps:
-            residual_flow = self.proj_flow(action_embedding) # B,3,N
-        else:
-            residual_flow = self.proj_flow(action_embedding, coarse_points=centered_corr_points)
-            residual_flow = residual_flow * radius + center
-
-        if self.residual_on:
-            flow = residual_flow + corr_flow
-        else:
-            flow = corr_flow
-
-        if self.pred_weight:
-            corr_flow_weight = torch.concat([flow, weight], dim=1)
-        else:
-            corr_flow_weight = flow
-        return {
-            "full_flow": corr_flow_weight,
-            "residual_flow": residual_flow,
-            "corr_flow": corr_flow,
-            "corr_points": corr_points,
-            "scores": scores,
-        }
 
 
 class MLPKernel(nn.Module):
@@ -559,6 +399,13 @@ def create_embedding_network(cfg) -> nn.Module:
         network = VN_DGCNN(args, num_part=cfg.emb_dims, gc=False)
     elif cfg.name == "raw_dgcnn":
         network: nn.Module = DGCNN4TaxPose(cfg.emb_dims, cfg.knn, cfg.dropout, cfg.norm)
+    elif cfg.name == "dgcnn_group":
+        network = DGCNN_Grouper(cfg.emb_dims, output_num=cfg.output_num, knn=cfg.knn)
+    elif cfg.name == "vae_dgcnn":
+        network = DGCNN_VAE(
+            cfg,
+            pos_encoding=cfg.pos_encoding,
+        )
     else:
         raise ValueError(f"Unknown embedding network type: {cfg.name}")
 
@@ -567,18 +414,17 @@ def create_embedding_network(cfg) -> nn.Module:
 
 class ResidualFlow_DiffEmbTransformer(nn.Module):
     head_norm = {
-        'BN': nn.BatchNorm1d,
-        'LN': nn.LayerNorm,
-        'IN': nn.InstanceNorm1d
+        "BN": nn.BatchNorm1d,
+        "LN": nn.LayerNorm,
+        "IN": nn.InstanceNorm1d
     }
 
     def __init__(
         self,
         encoder_cfg,
+        head_cfg,
         cycle=True,
         center_feature=False,
-        pred_weight=True,
-        residual_on=True,
         freeze_embnn=False,
         return_attn=True,
         multilaterate=False,
@@ -586,9 +432,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         mlat_nkps: int = 100,
         feature_channels=0,  # Number of extra channels we'll pass into the network.
         conditional: bool = False,
-        head_norm: str = 'BN',
-        dropout=0.0,
-        head_bias=False,
+        dropout=0.1,
+        pos_encoding=False,
     ):
         super(ResidualFlow_DiffEmbTransformer, self).__init__()
         self.cycle = cycle
@@ -599,22 +444,28 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         emb_dims = encoder_cfg.emb_dims
 
         self.center_feature = center_feature
-        self.pred_weight = pred_weight
-        self.residual_on = residual_on
         self.freeze_embnn = freeze_embnn
         self.return_attn = return_attn
         self.conditional = conditional
 
         self.transformer_action = CustomTransformer(
-            emb_dims=emb_dims, return_attn=self.return_attn,
-            bidirectional=False, n_blocks=1, dropout=dropout,
+            emb_dims=emb_dims,
+            n_blocks=1,
+            dropout=dropout,
+            ff_dims=1024,
+            n_heads=4,
+            return_attn=self.return_attn,
+            bidirectional=False
         )
         self.transformer_anchor = CustomTransformer(
-            emb_dims=emb_dims, return_attn=self.return_attn,
-            bidirectional=False, n_blocks=1, dropout=dropout,
+            emb_dims=emb_dims,
+            n_blocks=1,
+            dropout=dropout,
+            ff_dims=1024,
+            n_heads=4,
+            return_attn=self.return_attn,
+            bidirectional=False
         )
-        self.head_action: nn.Module
-        self.head_anchor: nn.Module
         if multilaterate:
             self.head_action = MultilaterationHead(
                 emb_dims=emb_dims,
@@ -629,19 +480,18 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 n_kps=mlat_nkps,
             )
         else:
-            self.head_action = ResidualMLPHead(
-                emb_dims=emb_dims,
-                pred_weight=self.pred_weight,
-                residual_on=self.residual_on,
-                norm=self.head_norm[head_norm],
-                bias=head_bias,
+            norm: nn.Module = self.head_norm[head_cfg.head_norm]
+            head_cfg = OmegaConf.to_container(head_cfg, resolve=True)
+            head_cfg.pop("head_norm")
+            cfg = HeadConfig(
+                **head_cfg,
+                norm=norm, emb_dims=emb_dims, pos_encoding=pos_encoding)
+            print(type(cfg))
+            self.head_action: nn.Module = create_head(
+                cfg, dgcnn=self.emb_nn_action
             )
-            self.head_anchor = ResidualMLPHead(
-                emb_dims=emb_dims,
-                pred_weight=self.pred_weight,
-                residual_on=self.residual_on,
-                norm=self.head_norm[head_norm],
-                bias=head_bias
+            self.head_anchor: nn.Module = create_head(
+                cfg, dgcnn=self.emb_nn_action
             )
 
         if self.conditional:
@@ -661,6 +511,10 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 nn.Conv1d(combined_dims * 4, emb_dims, kernel_size=1, bias=False),
             )
 
+        self.pos_encoding = pos_encoding
+        if pos_encoding:
+            self.pos_encoder = ManualPointWiseGemoFea(True, emb_dims)
+
     def forward(self, *input):
         action_points = input[0].permute(0, 2, 1)[:, :3]  # B,3,num_points
         anchor_points = input[1].permute(0, 2, 1)[:, :3]
@@ -674,9 +528,269 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             anchor_points_dmean = anchor_points
         if self.freeze_embnn:
             self.emb_nn_action.eval()
+        act_down_sample, anch_down_sample = None, None
+        # with torch.set_grad_enabled(not self.freeze_embnn):
+        action_embedding = self.emb_nn_action(action_points_dmean)
+        if isinstance(action_embedding, tuple):
+            action_embedding, pts = action_embedding
+            act_down_sample = pts + action_points.mean(dim=2, keepdim=True)
+            act_down_sample = act_down_sample
+            # action_points = pts + action_points.mean(dim=2, keepdim=True)
+        anchor_embedding = self.emb_nn_anchor(anchor_points_dmean)
+        if isinstance(anchor_embedding, tuple):
+            anchor_embedding, pts = anchor_embedding
+            anch_down_sample = pts + anchor_points.mean(dim=2, keepdim=True)
+            anch_down_sample = anch_down_sample
+            # anchor_points = pts + anchor_points.mean(dim=2, keepdim=True)
+        action_embedding = F.normalize(action_embedding, dim=1)
+        anchor_embedding = F.normalize(anchor_embedding, dim=1)
+        if self.freeze_embnn and not isinstance(self.head_action, TransformerHead):
+            action_embedding = action_embedding.detach()
+            anchor_embedding = anchor_embedding.detach()
+
+        if self.feature_channels > 0:
+            # Add a symmetry label to the embeddings.
+            action_features = input[2].permute(0, 2, 1)
+            anchor_features = input[3].permute(0, 2, 1)
+
+            action_embedding_stack = torch.cat(
+                [action_embedding, action_features], axis=1
+            )
+            anchor_embedding_stack = torch.cat(
+                [anchor_embedding, anchor_features], axis=1
+            )
+
+            action_embedding = self.feature_channel_encoder_action(
+                action_embedding_stack
+            )
+
+            anchor_embedding = self.feature_channel_encoder_anchor(
+                anchor_embedding_stack
+            )
+
+        if self.conditional:
+            # We first project the one-hot encoding to the embedding space.
+            onehot = input[4].float()  # B x C
+            # Extend the onehot vector so that C becomes 5.
+            onehot = F.pad(onehot, (0, 5 - onehot.shape[-1]), "constant", 0)
+            onehot_emb = self.proj_onehot(onehot)
+
+            # Then, we do a linear addition to the embeddings. This should broadcast correctly.
+            action_embedding = action_embedding + onehot_emb[..., None]
+            anchor_embedding = anchor_embedding + onehot_emb[..., None]
+
+        # tilde_phi, phi are both B,512,N
+        # Get the new cross-attention embeddings.
+        if self.pos_encoding:
+            action_pt_pos = self.pos_encoder(action_points)  # B,C,N
+            anchor_pt_pos = self.pos_encoder(anchor_points)
+            action_embedding += F.normalize(action_pt_pos)
+            anchor_embedding += F.normalize(anchor_pt_pos)
+        transformer_action_outputs = self.transformer_action(
+            action_embedding, anchor_embedding
+        )
+        transformer_anchor_outputs = self.transformer_anchor(
+            anchor_embedding, action_embedding
+        )
+        action_embedding_tf = transformer_action_outputs["src_embedding"]
+        action_attn = transformer_action_outputs["src_attn"]
+        anchor_embedding_tf = transformer_anchor_outputs["src_embedding"]
+        anchor_attn = transformer_anchor_outputs["src_attn"]
+
+        if not self.return_attn:
+            action_attn = None
+            anchor_attn = None
+        # 理论上， action_embedding_tf = action_embedding + residual(action_embedding)
+        # action_embedding_tf = action_embedding + F.normalize(action_embedding_tf, dim=1)
+        # anchor_embedding_tf = anchor_embedding + F.normalize(anchor_embedding_tf, dim=1)
+
+        if action_attn is not None:
+            action_attn = action_attn.mean(dim=1)  # b, h，N, M -> b, N, M
+
+        if self.pos_encoding:
+            action_embedding_tf += action_pt_pos
+            anchor_embedding_tf += anchor_pt_pos
+
+        del transformer_action_outputs, transformer_anchor_outputs
+        
+        head_action_output = self.head_action(
+            action_embedding_tf,
+            action_embedding,
+            action_points,
+            anchor_points,
+            act_down_sample,
+            anch_down_sample,
+            scores=action_attn,
+        )
+        flow_action = head_action_output["full_flow"].permute(0, 2, 1)
+        residual_flow_action = head_action_output["residual_flow"].permute(0, 2, 1)
+        corr_flow_action = head_action_output["corr_flow"].permute(0, 2, 1)
+        corr_points_action = head_action_output["corr_points"].permute(0, 2, 1)
+
+        outputs = {
+            "flow_action": flow_action,
+            "residual_flow_action": residual_flow_action,
+            "corr_flow_action": corr_flow_action,
+            "corr_points_action": corr_points_action,
+            "act_down_sample": (
+                None if act_down_sample is None else act_down_sample.permute(0, 2, 1)
+            ),
+        }
+
+        if "P_A" in head_action_output:
+            original_points_action = head_action_output["P_A"].permute(0, 2, 1)
+            outputs["original_points_action"] = original_points_action
+            outputs["sampled_ixs_action"] = head_action_output["A_ixs"]
+
+        del head_action_output
+
+        if self.cycle:
+            anchor_attn = anchor_attn.mean(dim=1)
+            head_anchor_output = self.head_anchor(
+                anchor_embedding_tf,
+                anchor_embedding,
+                anchor_points,
+                action_points,
+                anch_down_sample,
+                act_down_sample,
+                scores=anchor_attn,
+            )
+            flow_anchor = head_anchor_output["full_flow"].permute(0, 2, 1)
+            residual_flow_anchor = head_anchor_output["residual_flow"].permute(0, 2, 1)
+            corr_flow_anchor = head_anchor_output["corr_flow"].permute(0, 2, 1)
+            corr_points_anchor = head_anchor_output["corr_points"].permute(0, 2, 1)
+
+            outputs = {
+                **outputs,
+                "flow_anchor": flow_anchor,
+                "residual_flow_anchor": residual_flow_anchor,
+                "corr_flow_anchor": corr_flow_anchor,
+                "corr_points_anchor": corr_points_anchor,
+                "anch_down_sample": (
+                    None
+                    if anch_down_sample is None
+                    else anch_down_sample.permute(0, 2, 1)
+                ),
+            }
+
+            if "P_A" in head_anchor_output:
+                original_points_anchor = head_anchor_output["P_A"].permute(0, 2, 1)
+                outputs["original_points_anchor"] = original_points_anchor
+                outputs["sampled_ixs_anchor"] = head_anchor_output["A_ixs"]
+
+            del head_anchor_output
+        #  *************************DEBUG*************************
+        outputs.update(attns=action_attn)
+        return outputs
+
+    def set_residual_on(self, on):
+        self.head_action.residual_on = on
+        self.head_anchor.residual_on = on
+
+
+class ResidualFlow_DiffEmbTransformer_MultiBlock(ResidualFlow_DiffEmbTransformer):
+    def __init__(
+        self,
+        encoder_cfg,
+        head_cfg,
+        n_blocks=2,
+        cycle=True,
+        center_feature=False,
+        freeze_embnn=False,
+        return_attn=True,
+        multilaterate=False,
+        mlat_sample: bool = False,
+        mlat_nkps: int = 100,
+        feature_channels=0,  # Number of extra channels we'll pass into the network.
+        conditional: bool = False,
+        dropout=0.1,
+    ):
+        super(ResidualFlow_DiffEmbTransformer_MultiBlock, self).__init__(
+            encoder_cfg,
+            head_cfg,
+            cycle=cycle,
+            center_feature=center_feature,
+            freeze_embnn=freeze_embnn,
+            return_attn=return_attn,
+            feature_channels=feature_channels,
+            conditional=conditional,
+            dropout=dropout,
+        )
+        assert not head_cfg.up_sample, "up_sample not supported for this model"
+        output_num = encoder_cfg.output_num
+
+        class Backbone(nn.Module):
+            def __init__(self, n_blocks, tf_layer):
+                super(Backbone, self).__init__()
+                self.tf_layer = self.clones(tf_layer, n_blocks)
+                self.output_num = output_num
+                score_project = nn.Sequential(
+                    nn.Conv1d(encoder_cfg.emb_dims, output_num, 1, bias=False),
+                    nn.ReLU(),
+                    LayerNorm1d(output_num),
+                    nn.Conv1d(output_num, output_num, 1, bias=False),
+                    LayerNorm1d(output_num),
+                )
+                self.score_project = self.clones(score_project, n_blocks)
+
+            def forward(self, *input):
+                act_emb = input[0]
+                anch_emb = input[1]
+                bz, c, n = act_emb.shape
+                assert (
+                    n == self.output_num
+                ), f"shape mismatch: {act_emb.shape} vs {self.output_num}"
+                # output = {"score": torch.ones((bz, n, n)).to(act_emb.device)}
+                output = {}
+                for tf, score_project in zip(self.tf_layer, self.score_project):
+                    output.update(tf(act_emb, anch_emb))
+                    act_emb = output["src_embedding"]  # NOTE: shape is (bz, c, n)
+                    if "score" in output:
+                        output["score"] = output["score"] @ score_project(
+                            act_emb
+                        ).transpose(1, 2)
+                    else:
+                        output["score"] = score_project(act_emb).transpose(1, 2)
+                output["src_attn"] = output["score"].unsqueeze(1)
+                output.pop("score")
+                return output
+
+            @staticmethod
+            def clones(module, N):
+                return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
+
+        self.transformer_action = Backbone(n_blocks, self.transformer_action)
+        self.transformer_anchor = Backbone(n_blocks, self.transformer_anchor)
+
+
+class Flow_DiffEmbTransformer(ResidualFlow_DiffEmbTransformer):
+    def forward(self, *input):
+        action_points = input[0].permute(0, 2, 1)[:, :3]  # B,3,num_points
+        anchor_points = input[1].permute(0, 2, 1)[:, :3]
+
+        action_points_dmean = action_points - action_points.mean(dim=2, keepdim=True)
+        anchor_points_dmean = anchor_points - anchor_points.mean(dim=2, keepdim=True)
+
+        # mean center point cloud before DGCNN
+        if not self.center_feature:
+            action_points_dmean = action_points
+            anchor_points_dmean = anchor_points
+        if self.freeze_embnn:
+            self.emb_nn_action.eval()
+        act_down_sample, anch_down_sample = None, None
         with torch.set_grad_enabled(not self.freeze_embnn):
             action_embedding = self.emb_nn_action(action_points_dmean)
+            if isinstance(action_embedding, tuple):
+                action_embedding, pts = action_embedding
+                act_down_sample = pts + action_points.mean(dim=2, keepdim=True)
+                act_down_sample = act_down_sample
+                # action_points = pts + action_points.mean(dim=2, keepdim=True)
             anchor_embedding = self.emb_nn_anchor(anchor_points_dmean)
+            if isinstance(anchor_embedding, tuple):
+                anchor_embedding, pts = anchor_embedding
+                anch_down_sample = pts + anchor_points.mean(dim=2, keepdim=True)
+                anch_down_sample = anch_down_sample
+                # anchor_points = pts + anchor_points.mean(dim=2, keepdim=True)
             action_embedding = F.normalize(action_embedding, dim=1)
             anchor_embedding = F.normalize(anchor_embedding, dim=1)
         # if self.freeze_embnn:
@@ -716,6 +830,12 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
 
         # tilde_phi, phi are both B,512,N
         # Get the new cross-attention embeddings.
+        if self.pos_encoding:
+            action_pt_pos = self.pos_encoder(action_points)  # B,C,N
+            anchor_pt_pos = self.pos_encoder(anchor_points)
+            action_embedding += F.normalize(action_pt_pos)
+            anchor_embedding += F.normalize(anchor_pt_pos)
+        
         transformer_action_outputs = self.transformer_action(
             action_embedding, anchor_embedding
         )
@@ -730,19 +850,27 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         if not self.return_attn:
             action_attn = None
             anchor_attn = None
-
-        action_embedding_tf = action_embedding + F.normalize(action_embedding_tf, dim=1)
-        anchor_embedding_tf = anchor_embedding + F.normalize(anchor_embedding_tf, dim=1)
+        # 理论上， action_embedding_tf = action_embedding + residual(action_embedding)
+        # action_embedding_tf = action_embedding + F.normalize(action_embedding_tf, dim=1)
+        # anchor_embedding_tf = anchor_embedding + F.normalize(anchor_embedding_tf, dim=1)
 
         if action_attn is not None:
-            action_attn = action_attn.mean(dim=1) # b, h，N, M -> b, N, M
+            action_attn = action_attn.mean(dim=1)  # b, h，N, M -> b, N, M
 
+        if self.pos_encoding:
+            action_embedding_tf += action_pt_pos
+            anchor_embedding_tf += anchor_pt_pos
+
+        del transformer_action_outputs, transformer_anchor_outputs
+        
         head_action_output = self.head_action(
             action_embedding_tf,
-            anchor_embedding_tf,
+            anchor_embedding,
             action_points,
             anchor_points,
-            scores=action_attn,
+            act_down_sample,
+            anch_down_sample,
+            scores=action_attn
         )
         flow_action = head_action_output["full_flow"].permute(0, 2, 1)
         residual_flow_action = head_action_output["residual_flow"].permute(0, 2, 1)
@@ -754,6 +882,9 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             "residual_flow_action": residual_flow_action,
             "corr_flow_action": corr_flow_action,
             "corr_points_action": corr_points_action,
+            "act_down_sample": (
+                None if act_down_sample is None else act_down_sample.permute(0, 2, 1)
+            ),
         }
 
         if "P_A" in head_action_output:
@@ -761,13 +892,17 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             outputs["original_points_action"] = original_points_action
             outputs["sampled_ixs_action"] = head_action_output["A_ixs"]
 
+        del head_action_output
+
         if self.cycle:
             anchor_attn = anchor_attn.mean(dim=1)
             head_anchor_output = self.head_anchor(
                 anchor_embedding_tf,
-                action_embedding_tf,
+                action_embedding,
                 anchor_points,
                 action_points,
+                anch_down_sample,
+                act_down_sample,
                 scores=anchor_attn,
             )
             flow_anchor = head_anchor_output["full_flow"].permute(0, 2, 1)
@@ -781,16 +916,23 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 "residual_flow_anchor": residual_flow_anchor,
                 "corr_flow_anchor": corr_flow_anchor,
                 "corr_points_anchor": corr_points_anchor,
+                "anch_down_sample": (
+                    None
+                    if anch_down_sample is None
+                    else anch_down_sample.permute(0, 2, 1)
+                ),
             }
 
             if "P_A" in head_anchor_output:
                 original_points_anchor = head_anchor_output["P_A"].permute(0, 2, 1)
                 outputs["original_points_anchor"] = original_points_anchor
                 outputs["sampled_ixs_anchor"] = head_anchor_output["A_ixs"]
-        #  *************************DEBUG*************************
-        outputs.update(attns=action_attn, corr_points=corr_points_action)
-        return outputs
 
+            del head_anchor_output
+        #  *************************DEBUG*************************
+        outputs.update(attns=action_attn)
+        return outputs
+       
 
 class ModelConfig(Protocol):
     model_type: str
@@ -801,11 +943,10 @@ class ResidualFlowDiffEmbTransformerConfig:
     model_type: ClassVar[str] = "residual_flow_diff_emb_transformer"
 
     encoder: Any
+    head: Any
 
     cycle: bool
     center_feature: bool
-    pred_weight: bool
-    residual_on: bool
     freeze_embnn: bool
     return_attn: bool
 
@@ -818,7 +959,6 @@ class ResidualFlowDiffEmbTransformerConfig:
     feature_channels: int
     conditional: bool
 
-    head_norm: str
     dropout: float
 
 
@@ -838,10 +978,9 @@ def create_network(cfg: ModelConfig) -> nn.Module:
         r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
         network: nn.Module = ResidualFlow_DiffEmbTransformer(
             encoder_cfg=r_cfg.encoder,
+            head_cfg=r_cfg.head,
             cycle=r_cfg.cycle,
             center_feature=r_cfg.center_feature,
-            pred_weight=r_cfg.pred_weight,
-            residual_on=r_cfg.residual_on,
             freeze_embnn=r_cfg.freeze_embnn,
             return_attn=r_cfg.return_attn,
             multilaterate=r_cfg.multilaterate,
@@ -849,9 +988,43 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             mlat_nkps=r_cfg.mlat_nkps,
             feature_channels=r_cfg.feature_channels,
             conditional=r_cfg.conditional,
-            head_norm=cfg.head_norm,
-            dropout=cfg.dropout,
-            head_bias=cfg.head_bias,
+            dropout=r_cfg.dropout,
+            pos_encoding=cfg.pos_encoding,
+        )
+    elif cfg.model_type == "residual_flow_diff_emb_transformer_multi_block":
+        r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
+        network: nn.Module = ResidualFlow_DiffEmbTransformer_MultiBlock(
+            n_blocks=cfg.n_blocks,
+            encoder_cfg=r_cfg.encoder,
+            head_cfg=r_cfg.head,
+            cycle=r_cfg.cycle,
+            center_feature=r_cfg.center_feature,
+            freeze_embnn=r_cfg.freeze_embnn,
+            return_attn=r_cfg.return_attn,
+            multilaterate=r_cfg.multilaterate,
+            mlat_sample=r_cfg.mlat_sample,
+            mlat_nkps=r_cfg.mlat_nkps,
+            feature_channels=r_cfg.feature_channels,
+            conditional=r_cfg.conditional,
+            dropout=r_cfg.dropout,
+            pos_encoding=cfg.pos_encoding,
+        )
+    elif cfg.model_type == "direct_correspondence_points_prediction":
+        r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
+        network: nn.Module = Flow_DiffEmbTransformer(
+            encoder_cfg=r_cfg.encoder,
+            head_cfg=r_cfg.head,
+            cycle=r_cfg.cycle,
+            center_feature=r_cfg.center_feature,
+            freeze_embnn=r_cfg.freeze_embnn,
+            return_attn=r_cfg.return_attn,
+            multilaterate=r_cfg.multilaterate,
+            mlat_sample=r_cfg.mlat_sample,
+            mlat_nkps=r_cfg.mlat_nkps,
+            feature_channels=r_cfg.feature_channels,
+            conditional=r_cfg.conditional,
+            dropout=r_cfg.dropout,
+            pos_encoding=cfg.pos_encoding,
         )
     elif cfg.model_type == "correspondence_flow_diff_emb_mlp":
         c_cfg = cast(CorrespondenceFlowDiffEmbMLPConfig, cfg)
@@ -864,37 +1037,3 @@ def create_network(cfg: ModelConfig) -> nn.Module:
         raise ValueError(f"Unknown model type: {cfg.model_type}")
 
     return network
-
-
-def normalize(points, eps=1e-8):
-    """
-    points: (B, N, 3) 点云batch
-    returns:
-        normalized: (B, N, 3) 归一化后的点云
-        center: (B, 1, 3) 每个样本的重心
-        radius: (B, 1, 1) 每个样本的缩放半径（最大距离）
-    """
-    # 计算重心 (B, 1, 3)
-    center = points.mean(dim=1, keepdim=True)  # [B,1,3]
-    # 平移至重心
-    centered = points - center  # [B,N,3]
-    # 计算每个点到原点的距离 (B, N)
-    distances = torch.norm(centered, dim=2, keepdim=False)  # [B,N]
-    # 最大距离作为半径 (B,1,1)
-    radius = distances.max(dim=1, keepdim=True)[0].unsqueeze(-1)  # [B,1,1]
-    # 避免除零，若半径为0则置为1
-    radius = torch.where(radius < eps, torch.ones_like(radius), radius)
-    # 归一化
-    normalized = centered / radius  # [B,N,3]
-    return normalized, center, radius
-
-def denormalize(normalized_points, center, radius):
-    """
-    将归一化后的点云恢复到原始坐标空间
-    normalized_points: (B, N, 3)
-    center: (B, 1, 3)
-    radius: (B, 1, 1)
-    returns:
-        original_points: (B, N, 3)
-    """
-    return normalized_points * radius + center

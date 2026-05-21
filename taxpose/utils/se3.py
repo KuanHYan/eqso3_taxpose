@@ -13,6 +13,11 @@ from pytorch3d.transforms import (
 from pytorch3d.loss import chamfer_distance
 from torch.nn import functional as F
 from torch.cuda.amp.autocast_mode import autocast
+import open3d as o3d
+import open3d.core as o3c
+import open3d.t.geometry as o3t_geom
+import open3d.t.pipelines.registration as o3t_reg
+from pytorch3d.ops import iterative_closest_point
 
 
 class PointCloudLoss(nn.Module):
@@ -31,8 +36,7 @@ class PointCloudLoss(nn.Module):
         if self.type_key in ["CD", "cd"]:
             loss = chamfer_distance(
                 x, y,
-                point_reduction=self.reduction,
-                single_directional=True)[0]
+                point_reduction=self.reduction)[0]
         else:
             bz = x.shape[0]
             loss = F.mse_loss(x, y, reduction=self.reduction) / bz
@@ -282,6 +286,8 @@ def dualflow2pose(
     return_transform3d=False,
     normalization_scehme="l1",
     temperature=1,
+    training=False,
+    max_iter=100,
 ):
     raw_dtype = xyz_src.dtype
     if raw_dtype in [torch.float16, torch.bfloat16]:
@@ -350,9 +356,148 @@ def dualflow2pose(
     # if R.dtype != raw_dtype:
     #     R = R.to(raw_dtype)
     #     t = t.to(raw_dtype)
+    if not training:
+        try:
+            init_transform = (R, t, torch.ones_like(t)[:, 0])
+            icp_res = iterative_closest_point(
+                xyz_src, xyz_tgt, init_transform, max_iterations=max_iter)
+            R = icp_res.RTs.R
+            t = icp_res.RTs.T
+            print(f"ICP result: {icp_res.rmse}, ite count: {len(icp_res.t_history)}, converged: {icp_res.converged}")
+        except Exception as ex:
+            print(f"ICP failed: {ex}")
+            print(f"debug: {xyz_src.shape},{xyz_tgt.shape},{R},{t}")
+
     if return_transform3d:
         return Rotate(R).translate(t)
     return R, t
+
+
+def batch_icp(src_batch, tgt, init_batch, max_correspondence_distance=0.1):
+    """
+    src_batch: (B, N, 3)  GPU tensor
+    tgt:        (M, 3)    GPU tensor（单目标）或 (B, M, 3)
+    init_batch: (B, 4, 4) GPU tensor
+    """
+    B = src_batch.shape[0]
+    transformations = []
+    aligned_list = []
+    for i in range(B):
+        tgt_i = tgt[i] if tgt.dim() == 3 else tgt
+        trans, aligned = icp_open3d(
+            src_batch[i], tgt_i, init_batch[i],
+            max_correspondence_distance
+        )
+        transformations.append(trans)
+        aligned_list.append(aligned)
+    # 堆叠回 batch 张量
+    transformations = torch.stack(transformations)
+    aligned_batch = torch.stack(aligned_list)
+    return transformations, aligned_batch
+
+
+def icp_open3d(src_pts, tgt_pts, tran_init, max_correspondence_distance=0.1):
+    """
+    使用 Open3D 进行 ICP 配准，支持 GPU 原生加速（带 CPU 回退）。
+
+    Parameters
+    ----------
+    src_pts : torch.Tensor
+        源点云，shape (N, 3)，GPU 上的 float32/float64 张量。
+    tgt_pts : torch.Tensor
+        目标点云，shape (M, 3)，GPU 上的 float32/float64 张量。
+    tran_init : torch.Tensor
+        初始变换矩阵，shape (4, 4)，GPU 上的 float32/float64 张量。
+    max_correspondence_distance : float
+        ICP 最大对应点距离阈值。
+
+    Returns
+    -------
+    transformation : torch.Tensor
+        最终 4x4 变换矩阵，保持与输入相同设备。
+    aligned_src : torch.Tensor
+        变换后的源点云，shape (N, 3)，与输入相同设备。
+    """
+    device = src_pts.device
+    assert tgt_pts.device == device and tran_init.device == device, "所有输入必须位于同一设备"
+
+    # ── 1. 尝试 GPU 原生路径（零拷贝） ──
+    if device.type == 'cuda':
+        try:
+            # 将 torch 张量转换为 Open3D tensor，共享内存（DLPack）
+            src_o3d = o3c.Tensor.from_dlpack(
+                torch.as_tensor(src_pts, dtype=torch.float32).contiguous().detach().to('cuda')
+            )
+            tgt_o3d = o3c.Tensor.from_dlpack(
+                torch.as_tensor(tgt_pts, dtype=torch.float32).contiguous().detach().to('cuda')
+            )
+            init_o3d = o3c.Tensor.from_dlpack(
+                torch.as_tensor(tran_init, dtype=torch.float32).contiguous().detach().to('cuda')
+            )
+
+            # 构建 tensor point cloud
+            src_pcd = o3t_geom.PointCloud(src_o3d)
+            tgt_pcd = o3t_geom.PointCloud(tgt_o3d)
+
+            # ICP 参数
+            criteria = o3t_reg.ICPConvergenceCriteria(
+                relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=30
+            )
+            estimation = o3t_reg.TransformationEstimationPointToPoint()
+
+            # 执行 ICP（整个计算留在 GPU 上）
+            reg_result = o3t_reg.icp(
+                source=src_pcd, target=tgt_pcd,
+                max_correspondence_distance=max_correspondence_distance,
+                init=init_o3d, estimation_method=estimation, criteria=criteria
+            )
+
+            # 结果张量转回 torch（同样零拷贝）
+            transformation = torch.utils.dlpack.from_dlpack(
+                reg_result.transformation.to_dlpack()
+            ).to(device=device, dtype=torch.float32)
+
+            # 应用变换得到对齐后的点云
+            ones = torch.ones(src_pts.shape[0], 1, device=device, dtype=src_pts.dtype)
+            src_hom = torch.cat([src_pts, ones], dim=1)
+            aligned_src = (transformation @ src_hom.T).T[:, :3]
+
+            return transformation, aligned_src
+
+        except Exception as e:
+            print(f"GPU ICP 失败（可能 Open3D 未启用 CUDA）: {e}，回退到 CPU。")
+
+    # ── 2. CPU 回退路径 ──
+    # 将数据移到 CPU，转为 NumPy
+    src_cpu = src_pts.cpu().detach().numpy().astype('float64')
+    tgt_cpu = tgt_pts.cpu().detach().numpy().astype('float64')
+    init_cpu = tran_init.cpu().detach().numpy().astype('float64')
+
+    src_pcd = o3d.geometry.PointCloud()
+    src_pcd.points = o3d.utility.Vector3dVector(src_cpu)
+    tgt_pcd = o3d.geometry.PointCloud()
+    tgt_pcd.points = o3d.utility.Vector3dVector(tgt_cpu)
+
+    # 传统 ICP
+    reg_result = o3d.pipelines.registration.registration_icp(
+        source=src_pcd, target=tgt_pcd,
+        max_correspondence_distance=max_correspondence_distance,
+        init=init_cpu,
+        estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        criteria=o3d.pipelines.registration.ICPConvergenceCriteria(
+            relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=30
+        )
+    )
+
+    transformation_cpu = reg_result.transformation
+    transformation = torch.tensor(transformation_cpu, device=device, dtype=src_pts.dtype)
+
+    # 对齐
+    ones = torch.ones(src_pts.shape[0], 1, device=device, dtype=src_pts.dtype)
+    src_hom = torch.cat([src_pts, ones], dim=1)
+    aligned_src = (transformation @ src_hom.T).T[:, :3]
+
+    return transformation, aligned_src
 
 
 def dualflow2translation(

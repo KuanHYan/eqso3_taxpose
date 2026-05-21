@@ -3,7 +3,6 @@ import math
 
 import torch
 from torch import nn
-from torch.nn import MultiheadAttention as torch_MultiheadAttention
 
 from taxpose.nets.dgcnn_gc import DGCNN_GC
 from taxpose.nets.pointnet import PointNet
@@ -14,9 +13,9 @@ from third_party.dcp.model import (
     Encoder,
     EncoderDecoder,
     EncoderLayer,
-    MultiHeadedAttention,
     PositionwiseFeedForward,
 )
+from taxpose.nets.huggingface_tf import MHAttention
 
 
 class CustomTransformer(nn.Module):
@@ -45,7 +44,7 @@ class CustomTransformer(nn.Module):
         self.return_attn = return_attn
         self.bidirectional = bidirectional
         c = copy.deepcopy
-        attn = MultiHeadedAttention(
+        attn = MHAttention(
             self.n_heads,
             self.emb_dims,
             dropout=self.dropout,
@@ -62,6 +61,15 @@ class CustomTransformer(nn.Module):
             nn.Sequential(),
             nn.Sequential(),
         )
+
+    def get_attn_scores(self, query_emb, tgt_emb, seq_dim=1):
+        if seq_dim == 2:
+            query_emb = query_emb.transpose(2, 1).contiguous()  # (batch, seq, channels)
+            tgt_emb = tgt_emb.transpose(2, 1).contiguous()
+
+        _ = self.model.forward(query_emb, tgt_emb, None, None)
+        src_attn = self.model.decoder.layers[-1].src_attn.attn
+        return src_attn.mean(dim=1)  # B, H, N, M --> B, N, M
 
     def forward(self, *input):
         src = input[0]

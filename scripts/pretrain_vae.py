@@ -13,11 +13,11 @@ from taxpose.datasets.pretraining_point_cloud_data_module import (
 )
 from taxpose.nets.transformer_flow import EquivariantFeatureEmbeddingNetwork
 from taxpose.utils.load_model import get_weights_path
-from taxpose.training.equivariant_feature_pretraining_module import (
+from taxpose.training.equivariant_feature_pretraining_debug import (
     EquivariancePreTrainingModule,
 )
 from taxpose.utils.dup_stdout_manager import DupStdoutFileManager
-
+from taxpose.nets.raw_dgcnn import DGCNN_VAE
 
 @hydra.main(version_base="1.1", config_path="../configs", config_name="pretraining")
 def main(cfg):
@@ -124,7 +124,7 @@ def main(cfg):
         num_workers=cfg.resources.num_workers,
     )
 
-    network = EquivariantFeatureEmbeddingNetwork(encoder_cfg=cfg.encoder)
+    network = DGCNN_VAE(cfg.encoder, cfg.training.pos_encoding)
     if TESTING:
         print(network)
     scheduler_cfg = {

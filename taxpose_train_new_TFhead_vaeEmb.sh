@@ -4,7 +4,8 @@ TEST_MODE=$2
 SCHED=$3
 WANDB_NAME=$4
 CONFIG=$5
-RESUME_CKPT=$6
+EVAL=$6
+RESUME_CKPT=$7
 ## use ./launch.sh local 0 $command to run on local machine
 ROOT_DIR=/home/yan/pose_estimation/taxpose/
 cd $ROOT_DIR
@@ -15,20 +16,20 @@ export PYTEST_CURRENT_TEST=$TEST_MODE
 
 ENCODEING=False
 
-# train taxpose network
+
 bash "./launch.sh" local $GPU_INDEX \
     python "./scripts/train_residual_flow.py" \
-    --config-name $CONFIG \
+    --config-name train_ndf \
     job_type="train_taxpose" \
     data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=44 \
-    training.lr=0.00013 \
-    training.min_lr=0.000013 \
+    training.batch_size=16 \
+    training.lr=0.00015 \
+    training.min_lr=0.000015 \
     training.warmup_ratio=0.05 \
     training.precision='32' \
-    training.scheduler=$SCHED \
+    training.scheduler=linear \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \
     dm.train_dset.dataset_size=6400 \
@@ -46,9 +47,10 @@ bash "./launch.sh" local $GPU_INDEX \
     model.head.head_bias=False \
     model.head.residual_on=True \
     model.head.pred_weight=True \
-    wandb.name=$WANDB_NAME \
+    wandb.name=256_query_act_in_head \
     'model.pretraining.action.ckpt_path="logs/pretrain_embedding/best_cpkg/VAE_dgcnn.ckpt"' \
     'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/best_cpkg/VAE_dgcnn.ckpt"' \
     wandb.offline=True \
     debug=False \
+    eval=$EVAL \
     resume_ckpt=$RESUME_CKPT

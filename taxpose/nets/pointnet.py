@@ -1,6 +1,7 @@
 import torch.nn.functional as F
 from torch import nn
 import torch
+from .gemo_fea import ManualPointWiseGemoFea
 
 
 class NormWrapper(nn.Module):
@@ -124,7 +125,8 @@ class ResidualPointNet(nn.Module):
         # 可训练缩放因子
         if init_scale > 0:
             self.scale = nn.Parameter(torch.ones(1) * init_scale)
-
+        if pos_encoding:
+            self.pos_encoder = ManualPointWiseGemoFea(project=False)
         self._init_weights()
 
     def _init_weights(self):
@@ -140,13 +142,20 @@ class ResidualPointNet(nn.Module):
         # 输出层若使用 bias，可以初始化为 0，scale 已提提供整体尺度
 
     def forward(self, x, coarse_points=None):
-        # x: (B, C_in, N)
+        """
+        x: (B, C_in, N)
+        coarse_points: (B, 3, N_coarse)
+        return: (B, 3, N)
+        """
+        cat_fea = [x]
         if coarse_points is not None and self.use_coarse_ps:
-            cat_fea = [x, coarse_points]
-            if self.pos_encoding:
-                pe = self.positional_encoding(coarse_points)  # (B, pos_enc_dim, N)
-                cat_fea += [pe]
+            cat_fea += [coarse_points]
+        if self.pos_encoding:
+            pe = self.positional_encoding(coarse_points)  # (B, pos_enc_dim, N)
+            cat_fea += [pe]
+        if len(cat_fea) > 1:
             x = torch.cat(cat_fea, dim=1)
+        del cat_fea
         assert x.shape[1] == self.first_conv_channel
         feat = self.blocks(x)          # (B, C_mid, N)
         out = self.output(feat)        # (B, 3, N)
@@ -155,12 +164,8 @@ class ResidualPointNet(nn.Module):
         return out
 
     def positional_encoding(self, coords):
-        """对坐标做正余弦位置编码"""
-        B, _, M = coords.shape
-        # coords: (B,3,M)
-        pe = []
-        for i in range(4):  # 4个频段
-            for fn in [torch.sin, torch.cos]:
-                pe.append(fn(coords * (2.0**i)))
-        pe = torch.cat(pe, dim=1)  # (B, 3*8, M) 这里实际是24维，可控制
-        return pe[:, :self.pos_enc_dim, :]  # 截取设定维度
+        """对坐标做正余弦位置编码
+        coords: (B, 3, N)
+        """
+        return self.pos_encoder.get_geom_fea(coords, downsample_num=coords.shape[2])
+

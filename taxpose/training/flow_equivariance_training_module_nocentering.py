@@ -15,12 +15,12 @@ from taxpose.utils.se3 import (
     flow2pose,
     get_degree_angle,
     get_translation,
-    mse_criterion
+    mse_criterion,
 )
 
 import matplotlib.cm as cm
 import numpy as np
-
+import open3d as o3d
 to_tensor = ToTensor()
 
 
@@ -29,13 +29,22 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         self,
         model=None,
         lr=1e-3,
-        lr_cfg: dict = {'scheduler': 'constant', 'max_steps': 400, 'warmup_ratio': 0.1, 'min_lr': 1e-5, 'by_epoch': True},
+        lr_cfg: dict = {
+            "scheduler": "constant",
+            "max_steps": 400,
+            "warmup_ratio": 0.1,
+            "min_lr": 1e-5,
+            "by_epoch": True,
+        },
         image_log_period=500,
         action_weight=1,
         anchor_weight=1,
         displace_loss_weight=1,
         consistency_loss_weight=0.1,
         direct_correspondence_loss_weight=1,
+        indirect_correspondence_loss_weight=1.0,
+        res_smooth_loss_weight=1.0,
+        start_res_flow_epoch=0,
         return_flow_component=False,
         weight_normalize="l1",
         sigmoid_on=False,
@@ -44,7 +53,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         tr_super_time_ratio=0.0,
         point_cloud_loss: str = "MSE",
         tensorboard_writer=None,
-        optimization_mode: str = 'auto'
+        optimization_mode: str = "auto",
     ):
         super().__init__(
             model=model,
@@ -78,6 +87,10 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         self.rotate_frobenius_loss_weight = 0.0
         self.tr_super_time_ratio = tr_super_time_ratio
 
+        self.indirect_correspondence_loss_weight = indirect_correspondence_loss_weight
+        self.res_smooth_loss_weight = res_smooth_loss_weight
+        self.res_smooth_start_epoch = start_res_flow_epoch
+
     def compute_loss(self, model_output, batch, log_values={}, loss_prefix=""):
         x_action = model_output["flow_action"]
         x_anchor = model_output["flow_anchor"]
@@ -85,10 +98,11 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         # The original point clouds from the demonstration.
         points_action = batch["points_action"]  # action point clouds
         points_anchor = batch["points_anchor"]  # anchor point clouds
-
         # The point clouds transformed by the ground truth transforms.
         points_trans_action = batch["points_action_trans"]  # T0 -> action point clouds
         points_trans_anchor = batch["points_anchor_trans"]  # T1 -> anchor point clouds
+        input_act_pts = points_trans_action
+        inputs_anch_pts = points_trans_anchor
 
         # If we've applied some sampling, we need to extract the predictions too...
         if "sampled_ixs_action" in model_output:
@@ -122,10 +136,14 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         pred_flow_action, pred_w_action = self.extract_flow_and_weight(x_action)
         pred_flow_anchor, pred_w_anchor = self.extract_flow_and_weight(x_anchor)
 
+        if points_trans_action.shape[1] != pred_flow_action.shape[1]:
+            input_act_pts = model_output["act_down_sample"]
+            inputs_anch_pts = model_output["anch_down_sample"]
+
         if self.flow_supervision == "both":
             pred_T_action = dualflow2pose(
-                xyz_src=points_trans_action,
-                xyz_tgt=points_trans_anchor,
+                xyz_src=input_act_pts,
+                xyz_tgt=inputs_anch_pts,
                 flow_src=pred_flow_action,
                 flow_tgt=pred_flow_anchor,
                 weights_src=pred_w_action,
@@ -133,73 +151,79 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
                 return_transform3d=True,
                 normalization_scehme=self.weight_normalize,
                 temperature=self.softmax_temperature,
+                training=True  # self.training,
             )
 
-            induced_flow_action = (
-                pred_T_action.transform_points(points_trans_action)
-                - points_trans_action
-            ).detach()
-            pred_points_action = pred_T_action.transform_points(points_trans_action)
-
-            # pred_T_action=T1T0^-1
-            gt_T_action = T0.inverse().compose(T1)
-            points_action_target = T1.transform_points(points_action)
-            
             error_R_max, error_R_min, error_R_mean = get_degree_angle(
                 T0.inverse().compose(T1).compose(pred_T_action.inverse())
             )
-
             error_t_max, error_t_min, error_t_mean = get_translation(
                 T0.inverse().compose(T1).compose(pred_T_action.inverse())
             )
 
             # Loss associated with ground truth transform
+            pred_points_action = pred_T_action.transform_points(points_trans_action)
+            points_action_target = T1.transform_points(points_action)
             point_loss_action = mse_criterion(pred_points_action, points_action_target)
 
+            # ##
+            # pa = points_action_target.detach()
+            # pb = points_trans_anchor.detach()
+            # matrix_pb_pbt = pb @ pb.transpose(1,2)
+            # w_a2b = pa @ pb.transpose(1,2) @ matrix_pb_pbt.inverse()
+            # w_a2b_row = w_a2b.sum(dim=2, keepdim=True)
+            # print(f"debug row sum: {w_a2b_row[0, 0:10]}")
+
             # Loss associated flow vectors matching a consistent rigid transform
+            induced_flow_action = (
+                pred_T_action.transform_points(input_act_pts) - input_act_pts
+            ).detach()
             smoothness_loss_action = mse_criterion(
                 pred_flow_action, induced_flow_action
             )
+            # loss associated with dense flow
+            # pred_T_action=T1T0^-1
+            gt_T_action = T0.inverse().compose(T1)
             dense_loss_action = dense_flow_loss(
-                points=points_trans_action,
+                points=input_act_pts,
                 flow_pred=pred_flow_action,
                 trans_gt=gt_T_action,
             )
 
             pred_T_anchor = pred_T_action.inverse()
-
-            induced_flow_anchor = (
-                pred_T_anchor.transform_points(points_trans_anchor)
-                - points_trans_anchor
-            ).detach()
-            pred_points_anchor = pred_T_anchor.transform_points(points_trans_anchor)
-
-            # pred_T_action=T1T0^-1
-            gt_T_anchor = T1.inverse().compose(T0)
-            points_anchor_target = T0.transform_points(points_anchor)
-
             # Loss associated with ground truth transform
+            pred_points_anchor = pred_T_anchor.transform_points(points_trans_anchor)
+            points_anchor_target = T0.transform_points(points_anchor)
             point_loss_anchor = mse_criterion(
                 pred_points_anchor,
                 points_anchor_target,
             )
 
             # Loss associated flow vectors matching a consistent rigid transform
+            induced_flow_anchor = (
+                pred_T_anchor.transform_points(inputs_anch_pts) - inputs_anch_pts
+            ).detach()
             smoothness_loss_anchor = mse_criterion(
                 pred_flow_anchor,
                 induced_flow_anchor,
             )
+
+            # loss associated with dense flow
+            # pred_T_action=T1T0^-1
+            gt_T_anchor = T1.inverse().compose(T0)
             dense_loss_anchor = dense_flow_loss(
-                points=points_trans_anchor,
+                points=inputs_anch_pts,
                 flow_pred=pred_flow_anchor,
                 trans_gt=gt_T_anchor,
             )
+
             self.action_weight = (self.action_weight) / (
                 self.action_weight + self.anchor_weight
             )
             self.anchor_weight = (self.anchor_weight) / (
                 self.action_weight + self.anchor_weight
             )
+
         elif self.flow_supervision == "action2anchor":
             pred_T_action = flow2pose(
                 xyz=points_trans_action,
@@ -323,16 +347,67 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         loss = (
             self.displace_loss_weight * point_loss,
             self.consistency_loss_weight * smoothness_loss,
-            self.direct_correspondence_loss_weight * dense_loss
+            self.direct_correspondence_loss_weight * dense_loss,
         )
 
-        if self.rotate_frobenius_loss_weight > 0.:
+        if self.rotate_frobenius_loss_weight > 0.0:
             R_delta = gt_T_action.get_matrix() - pred_T_action.get_matrix()
             loss_tr = (
-                self.rotate_frobenius_loss_weight * (R_delta**2).sum(dim=(-1, -2)).mean()
+                self.rotate_frobenius_loss_weight
+                * (R_delta**2).sum(dim=(-1, -2)).mean()
             )
             log_values[loss_prefix + "tr_loss"] = loss_tr.detach()
-            loss += (loss_tr)
+            loss += (loss_tr,)
+
+        if self.indirect_correspondence_loss_weight > 0.0:
+            with torch.no_grad():
+                act_perm = torch.randperm(input_act_pts.shape[1])
+                action_points = input_act_pts[:, act_perm, :]
+
+                anch_perm = torch.randperm(inputs_anch_pts.shape[1])
+                anchor_points = inputs_anch_pts[:, anch_perm, :]
+
+                shuffled_output = self.model(
+                    action_points,
+                    anchor_points,
+                )
+                inv_perm_a = torch.argsort(act_perm)
+                inv_perm_b = torch.argsort(anch_perm)
+                shuffled_act_corr = shuffled_output["flow_action"][:, :, :3][
+                    :, inv_perm_a
+                ]
+                shuffled_anch_corr = shuffled_output["flow_anchor"][:, :, :3][
+                    :, inv_perm_b
+                ]
+            ww = self.indirect_correspondence_loss_weight
+            loss_indirect = ww * mse_criterion(
+                pred_flow_action, shuffled_act_corr
+            ) + ww * mse_criterion(pred_flow_anchor, shuffled_anch_corr)
+            loss += (loss_indirect,)
+            log_values[loss_prefix + "indirect_loss"] = loss_indirect.detach()
+            del shuffled_output, shuffled_act_corr, shuffled_anch_corr
+            del act_perm, anch_perm, inv_perm_a, inv_perm_b
+            torch.cuda.empty_cache()  # 清空缓存
+
+        if (
+            self.res_smooth_loss_weight > 0.0
+            and self.current_epoch >= self.res_smooth_start_epoch
+        ):
+            act_res_smooth_loss = self.compute_res_smoothness_loss(
+                model_output["residual_flow_action"], input_act_pts
+            )
+            anch_res_smooth_loss = self.compute_res_smoothness_loss(
+                model_output["residual_flow_anchor"], inputs_anch_pts
+            )
+            loss_res = (
+                self.res_smooth_loss_weight * act_res_smooth_loss
+                + self.res_smooth_loss_weight * anch_res_smooth_loss
+            )
+            loss += (loss_res,)
+            log_values[loss_prefix + "res_smooth_loss"] = loss_res.detach()
+
+        if "act_emb_similarity" in model_output:
+            loss += (self.compute_emb_sim_loss(model_output, log_values, loss_prefix),)
 
         log_values[loss_prefix + "point_loss"] = self.displace_loss_weight * point_loss
         log_values[loss_prefix + "smoothness_loss"] = (
@@ -342,7 +417,9 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             self.direct_correspondence_loss_weight * dense_loss
         )
         centered_pred_ps_A = pred_points_action.detach()
-        centered_pred_ps_A = centered_pred_ps_A - centered_pred_ps_A.mean(dim=1, keepdim=True)
+        centered_pred_ps_A = centered_pred_ps_A - centered_pred_ps_A.mean(
+            dim=1, keepdim=True
+        )
         centered_gt_ps = points_action_target.detach()
         centered_gt_ps = centered_gt_ps - centered_gt_ps.mean(dim=1, keepdim=True)
         # log_values[loss_prefix + "only_Rotate_L2_pcs_distance"] = \
@@ -378,6 +455,32 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             pred_w = None
         return pred_flow, pred_w
 
+    def compute_emb_sim_loss(self, model_output, log_values, loss_prefix):
+        anch_emb_sim = model_output["anch_emb_similarity"]
+        act_emb_sim = model_output["act_emb_similarity"]
+        loss = (1 - act_emb_sim).mean() * 0.5 + (1 - anch_emb_sim).mean() * 0.5
+        log_values[loss_prefix + "emb_sim_loss"] = loss
+        log_values[loss_prefix + "emb_sim"] = act_emb_sim.detach().mean()
+        return loss
+
+    def compute_res_smoothness_loss(self, pred_res_flow, points_trans_action, k=16):
+        b, n, c = pred_res_flow.shape
+        device = pred_res_flow.device
+        with torch.no_grad():
+            pts = points_trans_action
+            pair_dis = torch.cdist(pts, pts)
+            top_k_idx = pair_dis.topk(k, largest=False)[1]
+            batch_offset = torch.arange(b, device=device).view(b, 1, 1) * n
+            idx = top_k_idx + batch_offset  # (B, M, k)
+            idx_flat = idx.reshape(-1, k)
+            delta = pred_res_flow.detach()
+            gathered_feat = delta.reshape(-1, c)[idx_flat, :].view(b, n, k, -1)
+
+        loss_smooth = mse_criterion(
+            pred_res_flow.unsqueeze(2).expand(-1, -1, k, -1), gathered_feat
+        )
+        return loss_smooth
+
     def module_step(self, batch, batch_idx):
         points_trans_action = batch["points_action_trans"]
         points_trans_anchor = batch["points_anchor_trans"]
@@ -387,9 +490,6 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         anchor_features = (
             batch["anchor_features"] if "anchor_features" in batch else None
         )
-
-        T0 = Transform3d(matrix=batch["T0"])
-        T1 = Transform3d(matrix=batch["T1"])
 
         if "phase_onehot" in batch:
             phase_onehot = batch["phase_onehot"]
@@ -408,14 +508,19 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         loss, log_values = self.compute_loss(
             model_output, batch, log_values=log_values, loss_prefix=""
         )
-        log_values.update(lr=self._optimizer_.param_groups[0]["lr"])
         return loss, log_values
 
     def on_train_epoch_start(self) -> None:
-        if self.current_epoch >= self.tr_super_time_ratio * self.end_lr_steps and \
-                self.rotate_frobenius_loss_weight == 0.0:
+        if (
+            self.current_epoch >= self.tr_super_time_ratio * self.end_lr_steps
+            and self.rotate_frobenius_loss_weight == 0.0
+        ):
             self.rotate_frobenius_loss_weight = 1.0
             self.print("rotate_frobenius_loss_weight = 1.0")
+        # if self.current_epoch >= self.res_smooth_start_epoch:
+        #     self.model.set_residual_on(True)
+        # else:
+        #     self.model.set_residual_on(False)
         return super().on_train_epoch_start()
 
     def forward(
@@ -478,6 +583,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             return_transform3d=True,
             normalization_scehme=self.weight_normalize,
             temperature=self.softmax_temperature,
+            training=self.training,
         )
 
         pred_points_action = pred_T_action.transform_points(points_trans_action)
@@ -503,7 +609,9 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         points_anchor = batch["points_anchor"]
         # points_trans = batch['points_trans']
         points_trans_action = batch["points_action_trans"]
+        input_act_pts = points_trans_action
         points_trans_anchor = batch["points_anchor_trans"]
+        inputs_anch_pts = points_trans_anchor
         action_features = (
             batch["action_features"] if "action_features" in batch else None
         )
@@ -530,6 +638,9 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         )
         x_action = model_output["flow_action"]
         x_anchor = model_output["flow_anchor"]
+        if x_action.shape[1] != points_trans_action.shape[1]:
+            input_act_pts = model_output["act_down_sample"]
+            inputs_anch_pts = model_output["anch_down_sample"]
 
         # If we've applied some sampling, we need to extract the predictions too...
         if "sampled_ixs_action" in model_output:
@@ -579,8 +690,8 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             pred_w_anchor = None
         if self.flow_supervision == "both":
             pred_T_action = dualflow2pose(
-                xyz_src=points_trans_action,
-                xyz_tgt=points_trans_anchor,
+                xyz_src=input_act_pts,
+                xyz_tgt=inputs_anch_pts,
                 flow_src=pred_flow_action,
                 flow_tgt=pred_flow_anchor,
                 weights_src=pred_w_action,
@@ -709,7 +820,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             xyzrgb = torch.cat([action_xyzrgb, anchor_xyzrgb], dim=0)
             res_images["symmetry_vis"] = wandb.Object3D(xyzrgb.cpu().numpy())
 
-        batch_0_attn = model_output['attns'][0].detach().cpu()
+        batch_0_attn = model_output["attns"][0].detach().cpu()
         attns_for_anchor = batch_0_attn.sum(dim=0)  # [N, N] -> N, 1
         # mean_entropy = -torch.sum(batch_0_attn * torch.log(batch_0_attn + 1e-8), dim=-1)
         # idx = torch.randint(0, len(attns_for_anchor), (40,)).to(device=batch_0_attn.device)
@@ -720,16 +831,24 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         # print(f"DEBUG: shape {attns_for_anchor}, min {w_min}, max {w_max}, mean entropy {mean_entropy[idx]}")
 
         # 使用 coolwarm (蓝-白-红) 映射
-        color_dist = (255 * cm.coolwarm(w_norm.cpu().numpy())[:, :3])  # [N, 3], ignore alpha
-        attns_action = np.concatenate([points_trans_anchor[0].cpu().numpy(), color_dist], axis=1)
-        res_images['attns_action'] = wandb.Object3D(attns_action)
-        
-        corr_points = model_output['corr_points'][0].detach().cpu()
+        color_dist = (
+            255 * cm.coolwarm(w_norm.cpu().numpy())[:, :3]
+        )  # [N, 3], ignore alpha
+        vis_pts = points_trans_anchor[0].detach().cpu()
+        if vis_pts.shape[0] != color_dist.shape[0]:
+            vis_pts = model_output["anch_down_sample"][0].detach().cpu()
+        attns_action = np.concatenate([vis_pts.numpy(), color_dist], axis=1)
+        res_images["attns_action"] = wandb.Object3D(attns_action)
+
+        corr_points = model_output["corr_points_action"][0].detach().cpu()
         corr_points = get_color(
-            tensor_list=[points_trans_anchor[0], corr_points,
-                         corr_points+model_output['residual_flow_action'][0].detach().cpu()],
+            tensor_list=[
+                points_trans_anchor[0],
+                corr_points,
+                corr_points + model_output["residual_flow_action"][0].detach().cpu(),
+            ],
             color_list=["blue", "red", "green"],
         )
-        res_images['corr_points_action'] = wandb.Object3D(corr_points)
+        res_images["corr_points_action"] = wandb.Object3D(corr_points)
 
         return res_images

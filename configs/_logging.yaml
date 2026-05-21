@@ -32,3 +32,4 @@ wandb:
   artifact_dir: ${hydra:runtime.cwd}/wandb_artifacts
   offline: False
   name: ???
+  run_id_override: null

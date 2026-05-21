@@ -3,7 +3,6 @@ defaults:
 
 name: taxpose
 
-# original code uses BN
-head_norm: BN
 dropout: 0.0
-head_bias: False
+pos_encoding: False
+n_blocks: 2

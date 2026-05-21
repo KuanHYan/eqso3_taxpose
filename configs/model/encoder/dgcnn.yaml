@@ -3,3 +3,5 @@ emb_dims: 512
 knn: 20
 dropout: 0.3
 norm: BN
+output_num: 512
+pos_encoding: False

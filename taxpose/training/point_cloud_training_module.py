@@ -2,8 +2,8 @@ import pytorch_lightning as pl
 import torch
 import wandb
 from torchvision.transforms import ToTensor
-from torch.optim import lr_scheduler
 from taxpose.utils.lr import MilestoneScheduler, LinearAnnealingWarmup
+from taxpose.nets.head import TransformerHead
 to_tensor = ToTensor()
 
 
@@ -41,30 +41,35 @@ class PointCloudTrainingModule(pl.LightningModule):
         if getattr(self, "tensorboard_writer", None) is not None:
             self.tensorboard_writer.flush()
         return super().on_train_end()
+    
+    def on_train_epoch_start(self) -> None:
+        print(f"Epoch: {self.current_epoch}, LR: {self._optimizer_.param_groups[0]['lr']:1.2e}")
+        return super().on_train_epoch_start()
 
-    # def on_after_backward(self) -> None:
-    #     # 尝试获取self.writer，如果没有或者是None，则返回
-    #     if getattr(self, "tensorboard_writer", None) is None:
-    #         return super().on_after_backward()
-    #     for name, param in self.model.named_parameters():
-    #         if param.grad is not None:
-    #             self.tensorboard_writer.add_histogram(
-    #                 f"grad/{name}", param.grad, self.global_step)
-    #             grad_norm = param.grad.norm(2)
-    #             weight_norm = param.data.norm(2)
-    #             self.tensorboard_writer.add_scalar(
-    #                 f"grad_norm/{name}", grad_norm, self.global_step)
-    #             self.tensorboard_writer.add_scalar(
-    #                 f"Ratio (Grad/Weight)/{name}", grad_norm / (weight_norm + 1e-8),
-    #                 self.global_step
-    #             )
-    #     return super().on_after_backward()
+    def on_after_backward(self) -> None:
+        # 尝试获取self.writer，如果没有或者是None，则返回
+        if getattr(self, "tensorboard_writer", None) is None:
+            return super().on_after_backward()
+        for name, param in self.model.named_parameters():
+            if param.grad is not None:
+                self.tensorboard_writer.add_histogram(
+                    f"grad/{name}", param.grad, self.global_step)
+                grad_norm = param.grad.norm(2)
+                weight_norm = param.data.norm(2)
+                self.tensorboard_writer.add_scalar(
+                    f"grad_norm/{name}", grad_norm, self.global_step)
+                self.tensorboard_writer.add_scalar(
+                    f"Ratio (Grad/Weight)/{name}", grad_norm / (weight_norm + 1e-8),
+                    self.global_step
+                )
+        return super().on_after_backward()
 
     def on_before_zero_grad(self, optimizer) -> None:
-        if getattr(self, "tensorboard_writer", None) is None:
+        if getattr(self, "tensorboard_writer", None) is None or \
+                getattr(self, "_ori_losses", None) is None:
             return
         grad_list = []
-        for l in self._ori_loss:
+        for l in self._ori_losses:
             optimizer.zero_grad()
             l.backward(retain_graph=True)
             grad_A = [p.grad.clone().view(-1) for p in self.shared_params if p.grad is not None]
@@ -81,7 +86,9 @@ class PointCloudTrainingModule(pl.LightningModule):
         return
 
     def training_step(self, batch, batch_idx):
+        self.train()
         loss, log_values = self.module_step(batch, batch_idx)
+        log_values.update(lr=self._optimizer_.param_groups[0]["lr"])
         if isinstance(loss, tuple):
             self._ori_losses = loss
             loss = sum(loss)
@@ -108,9 +115,9 @@ class PointCloudTrainingModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
+        self.eval()
         loss, log_values = self.module_step(batch, batch_idx)
         if isinstance(loss, tuple):
-            self._ori_loss = loss
             loss = sum(loss)
         for key, val in log_values.items():
             self.log("val_" + key, val, logger=True)
@@ -137,9 +144,9 @@ class PointCloudTrainingModule(pl.LightningModule):
         return loss
 
     def test_step(self, batch, batch_idx):
+        self.eval()
         loss, log_values = self.module_step(batch, batch_idx)
         if isinstance(loss, tuple):
-            self._ori_loss = loss
             loss = sum(loss)
         for key, val in log_values.items():
             self.log(key, val, logger=True)
@@ -172,14 +179,24 @@ class PointCloudTrainingModule(pl.LightningModule):
         #         # multiple of "trainer.check_val_every_n_epoch".
         #     },
         # }
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        # 1. 收集需要更新的参数（排除特征提取器）
+        if getattr(self.model, "emb_nn_action", None) is not None and \
+                isinstance(self.model.emb_nn_action, TransformerHead):
+            feat_params = set(self.model.emb_nn_action.parameters())
+            feat_params2 = set(self.model.emb_nn_anchor.parameters())
+            learned_params = [p for p in self.model.parameters() if p not in feat_params and p not in feat_params2]
+        else:
+            learned_params = self.parameters()
+
+        optimizer = torch.optim.AdamW(learned_params, lr=self.lr, weight_decay=1e-4)
         self._optimizer_ = optimizer
         if self.warmup_steps <= 0:
             return optimizer
         # optimizer = torch.optim.SGD(self.parameters(), lr=self.lr, momentum=0.9)
         if self.lr_scheduler == 'constant':
             milestones = [self.end_lr_steps]
-            scheduler = MilestoneScheduler(
+            # use MilestoneScheduler with warmup rather than constant lr
+            self.scheduler = scheduler = MilestoneScheduler(
                 optimizer,
                 milestones=milestones,
                 gamma=1.0,
@@ -193,7 +210,7 @@ class PointCloudTrainingModule(pl.LightningModule):
             }
         elif self.lr_scheduler == 'milestone':
             milestones = [int(self.end_lr_steps * stone) for stone in [0.5, 0.75, 0.9]]
-            scheduler = MilestoneScheduler(
+            self.scheduler = scheduler = MilestoneScheduler(
                 optimizer,
                 milestones=milestones,
                 gamma=0.5,
@@ -206,7 +223,7 @@ class PointCloudTrainingModule(pl.LightningModule):
                 'lr_scheduler': {'scheduler': scheduler, 'interval': 'epoch' if self.by_epoch else 'step'}
             }
         elif self.lr_scheduler == 'linear':
-            scheduler = LinearAnnealingWarmup(
+            self.scheduler = scheduler = LinearAnnealingWarmup(
                 optimizer,
                 total_steps=self.end_lr_steps,
                 max_lr=self.lr,

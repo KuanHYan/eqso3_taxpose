@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
-import numpy as np
+
 
 # -------------------- 基础工具：FPS、query ball、索引 --------------------
 def farthest_point_sample(xyz, npoint):
@@ -48,6 +47,7 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     group_idx[mask] = group_first[mask]    # 将 padding 点替换为第一个点
     return group_idx
 
+
 # -------------------- Set Abstraction (编码层) --------------------
 class SetAbstraction(nn.Module):
     def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all=False):
@@ -81,17 +81,18 @@ class SetAbstraction(nn.Module):
 
         if points is not None:
             grouped_points = index_points(points, idx) if not self.group_all else points.view(B, 1, N, -1)
-            new_points = torch.cat([grouped_xyz_norm, grouped_points], dim=-1)
+            new_points_fea = torch.cat([grouped_xyz_norm, grouped_points], dim=-1)
         else:
-            new_points = grouped_xyz_norm
+            new_points_fea = grouped_xyz_norm
 
         # 卷积 + 最大池化
-        new_points = new_points.permute(0, 3, 1, 2).contiguous()  # [B, C+3, npoint, nsample]
+        new_points_fea = new_points_fea.permute(0, 3, 1, 2).contiguous()  # [B, C+3, npoint, nsample]
         for conv, bn in zip(self.mlp_convs, self.mlp_bns):
-            new_points = F.relu(bn(conv(new_points)))
-        new_points = torch.max(new_points, -1)[0]   # [B, C_out, npoint]
+            new_points_fea = F.relu(bn(conv(new_points_fea)))
+        new_points_fea = torch.max(new_points_fea, -1)[0]   # [B, C_out, npoint]
         new_xyz = new_xyz if not self.group_all else xyz[:, :1, :]
-        return new_xyz, new_points.permute(0, 2, 1)
+        return new_xyz, new_points_fea.permute(0, 2, 1)
+
 
 # -------------------- Feature Propagation (解码层) --------------------
 class FeaturePropagation(nn.Module):
@@ -105,20 +106,20 @@ class FeaturePropagation(nn.Module):
             self.mlp_bns.append(nn.BatchNorm1d(out_channel))
             last_channel = out_channel
 
-    def forward(self, xyz1, xyz2, points1, points2):
+    def forward(self, xyz1, xyz2, points_fea1, points_fea2):
         """
         将 points2 (来自 xyz2) 传播到 xyz1 并与 points1 (skip connection) 融合
         xyz1: 目标点云 (高分辨率), xyz2: 源点云 (低分辨率)
         points1: 对应 xyz1 的特征 (来自编码器同级，可为 None)
         points2: 对应 xyz2 的特征
         """
-        if points2 is not None:
+        if points_fea2 is not None:
             # 基于距离的插值：k=3, 权重=1/d
             B, N, C = xyz1.shape
             _, S, _ = xyz2.shape
             if S == 1:
                 # 直接复制
-                interpolated_points = points2.repeat(1, N, 1)
+                interpolated_points = points_fea2.repeat(1, N, 1)
             else:
                 dists = torch.sum((xyz1.view(B, N, 1, -1) - xyz2.view(B, 1, S, -1)) ** 2, -1)
                 dists, idx = dists.sort(dim=-1)
@@ -126,13 +127,13 @@ class FeaturePropagation(nn.Module):
                 dist_recip = 1.0 / (dists + 1e-8)
                 norm = torch.sum(dist_recip, dim=2, keepdim=True)
                 weight = dist_recip / norm
-                interpolated_points = torch.sum(index_points(points2, idx) * weight.view(B, N, 3, 1), dim=2)
+                interpolated_points = torch.sum(index_points(points_fea2, idx) * weight.view(B, N, 3, 1), dim=2)
         else:
             interpolated_points = None
 
-        if points1 is not None:
+        if points_fea1 is not None:
             # 与跳跃连接拼接
-            new_points = torch.cat([points1, interpolated_points], dim=-1)
+            new_points = torch.cat([points_fea1, interpolated_points], dim=-1)
         else:
             new_points = interpolated_points
 

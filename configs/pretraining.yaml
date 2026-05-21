@@ -29,7 +29,7 @@ training:
 
   # Bookkeeping
   check_val_every_n_epoch: 5
-  image_logging_period: 3000
+  image_logging_period: 100
 
   precision: 32
 

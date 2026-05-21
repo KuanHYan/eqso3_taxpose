@@ -9,7 +9,8 @@ RESUME_CKPT=$6
 ROOT_DIR=/home/yan/pose_estimation/taxpose/
 cd $ROOT_DIR
 
-export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
+export WANDB_SSL_VERIFY=0
+# export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
 
 # train taxpose network
@@ -18,33 +19,26 @@ bash "./launch.sh" local $GPU_INDEX \
     --config-name $CONFIG \
     job_type="train_taxpose" \
     data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
-    training.image_logging_period=1000 \
-    training.log_every_n_steps=100 \
+    training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.max_epochs=502 \
-    training.end_lr_ratio=1.0 \
-    training.batch_size=16 \
-    training.lr=0.0001 \
-    training.min_lr=0.00001 \
-    training.warmup_ratio=0.05 \
+    training.batch_size=32 \
+    training.lr=0.0002 \
+    training.min_lr=0.00002 \
+    training.warmup_ratio=0.01 \
     training.precision='32' \
     training.scheduler=$SCHED \
-    training.consistency_loss_weight=0.1 \
-    training.res_smooth_loss_weight=0.0 \
+    training.start_res_flow_epoch=0 \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \
-    dm.train_dset.dataset_size=3200 \
+    dm.train_dset.dataset_size=32000 \
     model.freeze_embnn=True \
-    model.dropout=0.1 \
-    model.pos_encoding=False \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \
     model.head.head_norm=LN \
     model.head.head_bias=False \
-    model.head.head_type=transformer \
-    model.head.residual_on=True \
+    model.head.use_coarse_soft=True \
+    model.dropout=0.1 \
     wandb.name=$WANDB_NAME \
-    wandb.entity=yankunh27-zhejiang-university \
     'model.pretraining.action.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
     'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
     wandb.offline=False \

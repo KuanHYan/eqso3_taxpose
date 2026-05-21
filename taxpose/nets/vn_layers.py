@@ -2,16 +2,11 @@
 # Provides the baseline architectures for the VNN model.
 # Only changes:
 # - Add this comment.
-import os
-import sys
-import copy
-import math
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 EPS = 1e-6
+
 
 class VNLinear(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -89,9 +84,11 @@ class VNLinearAndLeakyReLU(nn.Module):
         self.leaky_relu = VNLeakyReLU(out_channels, share_nonlinearity=share_nonlinearity, negative_slope=negative_slope)
         
         # BatchNorm
-        self.use_batchnorm = norm is not None
-        if self.use_batchnorm:
-            self.batchnorm = VNBatchNorm(out_channels, dim=dim)
+        self.use_norm = norm is not None
+        if self.use_norm:
+            assert isinstance(norm, VNBatchNorm) or \
+                isinstance(norm, VNLayerNorm)
+            self.norm = norm
     
     def forward(self, x):
         '''
@@ -100,15 +97,20 @@ class VNLinearAndLeakyReLU(nn.Module):
         # Conv
         x = self.linear(x)
         # InstanceNorm
-        if self.use_batchnorm != 'none':
-            x = self.batchnorm(x)
+        if self.use_norm:
+            x = self.norm(x)
         # LeakyReLU
         x_out = self.leaky_relu(x)
         return x_out
 
 
 class VNBatchNorm(nn.Module):
-    def __init__(self, num_features, dim):
+    def __init__(self, num_features, dim, knn_n=-1):
+        """
+        num_features: BN channel
+        dim: BN1d or 2d
+        knn_n: Not uesd. Only for unvisiting params
+        """
         super(VNBatchNorm, self).__init__()
         self.dim = dim
         if dim == 3 or dim == 4:
@@ -126,8 +128,27 @@ class VNBatchNorm(nn.Module):
         norm = norm.unsqueeze(2)
         norm_bn = norm_bn.unsqueeze(2)
         x = x / norm * norm_bn
-        
+
         return x
+
+
+class VNLayerNorm(nn.Module):
+    def __init__(self, num_features, dim, knn_n=16) -> None:
+        super(VNLayerNorm, self).__init__()
+        self.dim = dim
+        if dim == 3 or dim == 4:
+            self.norm = nn.LayerNorm([3, num_features])
+        elif dim == 5:
+            self.norm = nn.LayerNorm([3, num_features, knn_n])
+
+    def forward(self, x):
+        """
+        Input: x, point features of shape [B, N_feat, 3, N_samples, ...]
+        Return: 
+        """
+        x = x.transpose(1, 3)  # B, N, 3, N_feat, ...
+        x = self.norm(x)
+        return x.transpose(1, 3)
 
 
 class VNMaxPool(nn.Module):

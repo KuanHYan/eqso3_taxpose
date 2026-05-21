@@ -6,6 +6,7 @@ import torch
 import wandb
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from pytorch3d.transforms import Rotate, random_rotations
+from pytorch3d.loss import chamfer_distance
 from torch import nn
 from torch.nn import functional as F
 from torchvision.transforms import ToTensor
@@ -17,6 +18,7 @@ from taxpose.utils.emb_losses import (
     mean_geo_diff,
     mean_order,
 )
+from taxpose.utils.color_utils import get_color
 
 mse_criterion = nn.MSELoss(reduction="sum")
 to_tensor = ToTensor()
@@ -81,7 +83,7 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
         points_trans_centered = points_trans - points_trans.mean(dim=1, keepdims=True)
         # B, num_points, 3
 
-        phi, pts = self.model(points_centered.transpose(-1, -2))
+        phi, pts = self.model(points_centered.transpose(-1, -2))  # B, emb_dim, num_points and B, num_points, 3
         phi_trans, pts_trans = self.model(points_trans_centered.transpose(-1, -2))
 
         # ****************DEBUG***********************
@@ -112,16 +114,19 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
             w = None
 
         contrastive_loss, similarity = infonce_loss(
-            phi, phi_trans, weights=w, temperature=self.temperature
+            phi_trans, phi, weights=w, temperature=self.temperature
         )
+        vae_loss = 0.5 * chamfer_distance(pts_trans, points_centered, point_reduction="sum")[0] \
+            + 0.5 * chamfer_distance(pts, points_centered, point_reduction="sum")[0]
 
-        loss = contrastive_loss
+        loss = contrastive_loss + vae_loss
 
         mean_order_error = mean_order(similarity)
         mean_geo_error = mean_geo_diff(similarity, points)
 
         log_values = {}
         log_values["contrastive_loss"] = contrastive_loss
+        log_values["vae_loss"] = vae_loss
         # log_values['loss'] = loss
         log_values["mean_geo_diff"] = mean_geo_error
         log_values["mean_order"] = mean_order_error
@@ -181,7 +186,7 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
             return pca_norm, colors
 
         phi_pca, color = pca_colors(phi)          # [N, 3]
-        phi_trans_pca,color_trans = pca_colors(phi_trans)  # [N, 3]
+        phi_trans_pca, color_trans = pca_colors(phi_trans)  # [N, 3]
 
         # 合并点云坐标与颜色，用于 wandb 3D 可视化
         if points.shape[1] != phi.shape[2]:
@@ -189,7 +194,7 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
         points_np = points[0].detach().cpu().numpy()
         points_emb = np.concatenate([points_np, color], axis=-1)
         points_trans_emb = np.concatenate([points_np, color_trans], axis=-1)
-
+        vis_vae = get_color([points[0], pts[0]], ['blue', 'green'])
         # ---------- 相似度颜色映射（归一化 + colormap） ----------
         diag_sim = similarity[0].diagonal().detach().cpu().numpy()  # [N]
         sim_min = diag_sim.min()
@@ -206,6 +211,7 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
             "points_emb": wandb.Object3D(points_emb),
             "points_trans_emb": wandb.Object3D(points_trans_emb),
             "points_comp_disp": wandb.Object3D(points_comp_disp),
-            "sim_geo_distance": self.similarity_geo_distance(similarity, points)
+            "sim_geo_distance": self.similarity_geo_distance(similarity, points),
+            "vis_vae": wandb.Object3D(vis_vae),
         }
         return res_viz

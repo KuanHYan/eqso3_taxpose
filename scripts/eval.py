@@ -16,6 +16,8 @@ from taxpose.training.flow_equivariance_training_module_nocentering import (
 )
 from taxpose.utils.load_model import get_weights_path
 
+GPU_VISIBLE = torch.cuda.is_available()
+
 
 def load_emb_weights(checkpoint_reference, wandb_cfg=None, run=None):
     if checkpoint_reference.startswith(wandb_cfg.entity):
@@ -32,7 +34,9 @@ def load_emb_weights(checkpoint_reference, wandb_cfg=None, run=None):
         weights = {k.replace("model.emb_nn.", ""): v for k, v in weights.items()}
         return weights
     else:
-        net_ws = torch.load(hydra.utils.to_absolute_path(checkpoint_reference))[
+        net_ws = torch.load(
+            hydra.utils.to_absolute_path(checkpoint_reference),
+            map_location="cpu" if not GPU_VISIBLE else None)[
             "state_dict"  # BUG: saved checkpoints don't contain key "embnn_state_dict"
         ]
         # BUG: the dict keys of saved checkpoints using original pretrain_embedding.py is:
@@ -167,7 +171,6 @@ def main(cfg):
         'min_lr': cfg.training.min_lr,
         'by_epoch': cfg.training.lr_scheduler_by_epoch,
     }
-    print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_ratio: {cfg.training.warmup_ratio}")
     if cfg.debug:
         from torch.utils.tensorboard.writer import SummaryWriter
         tensorboard_writer = SummaryWriter()
@@ -192,59 +195,11 @@ def main(cfg):
         point_cloud_loss=cfg.training.point_cloud_loss,
         tensorboard_writer=tensorboard_writer
     )
-
-    model.cuda()
-    model.train()
-    if cfg.training.load_from_checkpoint:
-        print("loaded checkpoint from")
-        print(cfg.training.checkpoint_file)
-        model.load_state_dict(
-            torch.load(hydra.utils.to_absolute_path(cfg.training.checkpoint_file))[
-                "state_dict"
-            ]
-        )
-
-    else:
-        # Might be empty and not have those keys defined.
-        # TODO: move this pretraining into the model itself.
-        # TODO: figure out if we can get rid of the dictionary and make it null.
-        if "pretraining" in cfg.model:
-            if cfg.model.pretraining.action.ckpt_path is not None:
-                # # Check to see if it's a wandb checkpoint.
-                # TODO: need to retrain a few things... checkpoint didn't stick...
-                emb_nn_action_state_dict = load_emb_weights(
-                    cfg.model.pretraining.action.ckpt_path, cfg.wandb, logger.experiment
-                )
-                # checkpoint_file_fn = maybe_load_from_wandb(
-                #     cfg.pretraining.checkpoint_file_action, cfg.wandb, logger.experiment.run
-                # )
-
-                model.model.emb_nn_action.load_state_dict(emb_nn_action_state_dict)
-                print(
-                    "-----------------------Pretrained EmbNN Action Model Loaded!-----------------------"
-                )
-                print(
-                    "Loaded Pretrained EmbNN Action: {}".format(
-                        cfg.model.pretraining.action.ckpt_path
-                    )
-                )
-            if cfg.model.pretraining.anchor.ckpt_path is not None:
-                emb_nn_anchor_state_dict = load_emb_weights(
-                    cfg.model.pretraining.anchor.ckpt_path, cfg.wandb, logger.experiment
-                )
-                model.model.emb_nn_anchor.load_state_dict(emb_nn_anchor_state_dict)
-                print(
-                    "-----------------------Pretrained EmbNN Anchor Model Loaded!-----------------------"
-                )
-                print(
-                    "Loaded Pretrained EmbNN Anchor: {}".format(
-                        cfg.model.pretraining.anchor.ckpt_path
-                    )
-                )
-    if not cfg.eval:
-        trainer.fit(model, dm, ckpt_path=resume_ckpt)
+    if torch.cuda.is_available():
+        model.cuda()
     model.eval()
-    trainer.validate(model, dm, ckpt_path=resume_ckpt)
+
+    _ = trainer.validate(model, dm, ckpt_path=resume_ckpt)
 
     # Print he run id of the current run
     print("Run ID: {} ".format(logger.experiment.id))

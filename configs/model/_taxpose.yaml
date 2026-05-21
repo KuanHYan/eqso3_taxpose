@@ -5,10 +5,8 @@ defaults:
   - encoder: dgcnn
   - _self_
 
-pred_weight: True
 center_feature: True
 inital_sampling_ratio: 1
-residual_on: True
 cycle: True
 freeze_embnn: False
 return_attn: True
@@ -17,6 +15,16 @@ return_attn: True
 multilaterate: False
 mlat_sample: null
 mlat_nkps: null
+head:
+  head_type: residual
+  pred_weight: True
+  residual_on: True
+  head_norm: BN
+  head_bias: False
+  use_coarse_soft: False
+  project_corrs: False
+  project_corrs_mode: mlp
+  up_sample: False
 
 # By default, the number of additional feature channels will be 0.
 # But these could be RGB, symmetry features, etc.

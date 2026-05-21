@@ -33,11 +33,11 @@ bash "./launch.sh" local $GPU_INDEX \
     dm.train_dset.demo_dset.num_demo=1024 \
     dm.train_dset.dataset_size=1024 \
     model.freeze_embnn=True \
+    model.dropout=0.0 \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \
-    model.head_norm=LN \
-    model.head_bias=False \
-    model.dropout=0.0 \
+    model.head.head_norm=LN \
+    model.head.head_bias=False \
     wandb.name=$WANDB_NAME \
     'model.pretraining.action.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
     'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \

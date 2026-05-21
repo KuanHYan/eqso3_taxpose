@@ -11,19 +11,23 @@ export PYTEST_CURRENT_TEST=$TEST_MODE
 
 # Pretrain embeddings network
 bash "./launch.sh" local $GPU_INDEX \
-    python "./scripts/pretrain_embedding.py" \
+    python "./scripts/pretrain_vae.py" \
     --config-name "pretraining" \
     job_type="pretrain_embedding" \
     data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
     training.batch_size=32 \
-    training.lr=2e-4 \
+    training.lr=1e-4 \
     training.precision=32 \
     training.scheduler='constant' \
-    training.epochs=600 \
+    training.epochs=200 \
     encoder.name=raw_dgcnn \
+    encoder.emb_dims=256 \
+    encoder.knn=20 \
+    encoder.output_num=1024 \
+    encoder.pos_encoding=True \
     wandb.name=$WANDB_NAME \
     dataset=custom_dataset \
-    dataset.train_dset.data_size=10000 \
+    dataset.train_dset.data_size=12800 \
     wandb.offline=False \
     # resume_ckpt=$CKPT_PATH \
     # wandb.project="tax-pose" \
