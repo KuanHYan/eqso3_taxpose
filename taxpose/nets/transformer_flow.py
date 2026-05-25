@@ -480,13 +480,15 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 n_kps=mlat_nkps,
             )
         else:
-            norm: nn.Module = self.head_norm[head_cfg.head_norm]
-            head_cfg = OmegaConf.to_container(head_cfg, resolve=True)
-            head_cfg.pop("head_norm")
-            cfg = HeadConfig(
-                **head_cfg,
-                norm=norm, emb_dims=emb_dims, pos_encoding=pos_encoding)
-            print(type(cfg))
+            if not isinstance(head_cfg, HeadConfig):
+                norm: nn.Module = self.head_norm.get(head_cfg.norm, nn.LayerNorm)
+                head_cfg = OmegaConf.to_container(head_cfg, resolve=True)
+                head_cfg.pop("norm")
+                cfg = HeadConfig(
+                    **head_cfg,
+                    norm=norm, emb_dims=emb_dims, pos_encoding=pos_encoding)
+            else:
+                cfg = head_cfg
             self.head_action: nn.Module = create_head(
                 cfg, dgcnn=self.emb_nn_action
             )
@@ -515,13 +517,11 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         if pos_encoding:
             self.pos_encoder = ManualPointWiseGemoFea(True, emb_dims)
 
-    def forward(self, *input):
+    def _embedding(self, *input):
         action_points = input[0].permute(0, 2, 1)[:, :3]  # B,3,num_points
         anchor_points = input[1].permute(0, 2, 1)[:, :3]
-
         action_points_dmean = action_points - action_points.mean(dim=2, keepdim=True)
         anchor_points_dmean = anchor_points - anchor_points.mean(dim=2, keepdim=True)
-
         # mean center point cloud before DGCNN
         if not self.center_feature:
             action_points_dmean = action_points
@@ -581,11 +581,20 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
 
         # tilde_phi, phi are both B,512,N
         # Get the new cross-attention embeddings.
+        action_pt_pos, anchor_pt_pos = None, None
         if self.pos_encoding:
             action_pt_pos = self.pos_encoder(action_points)  # B,C,N
             anchor_pt_pos = self.pos_encoder(anchor_points)
             action_embedding += F.normalize(action_pt_pos)
             anchor_embedding += F.normalize(anchor_pt_pos)
+        return (
+            action_points, anchor_points,
+            action_embedding, anchor_embedding,
+            action_pt_pos, anchor_pt_pos,
+            act_down_sample, anch_down_sample,
+        )
+
+    def _backbone(self, action_embedding, anchor_embedding, action_pt_pos, anchor_pt_pos):
         transformer_action_outputs = self.transformer_action(
             action_embedding, anchor_embedding
         )
@@ -604,15 +613,32 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         # action_embedding_tf = action_embedding + F.normalize(action_embedding_tf, dim=1)
         # anchor_embedding_tf = anchor_embedding + F.normalize(anchor_embedding_tf, dim=1)
 
-        if action_attn is not None:
+        if self.return_attn:
             action_attn = action_attn.mean(dim=1)  # b, h，N, M -> b, N, M
+            anchor_attn = anchor_attn.mean(dim=1)
 
         if self.pos_encoding:
             action_embedding_tf += action_pt_pos
             anchor_embedding_tf += anchor_pt_pos
 
         del transformer_action_outputs, transformer_anchor_outputs
-        
+        return action_embedding_tf, anchor_embedding_tf, action_attn, anchor_attn
+
+    def forward(self, *input):
+        (
+            action_points, anchor_points,
+            action_embedding, anchor_embedding,
+            action_pt_pos, anchor_pt_pos,
+            act_down_sample, anch_down_sample
+        ) = self._embedding(*input)
+
+        (
+            action_embedding_tf,
+            anchor_embedding_tf,
+            action_attn,
+            anchor_attn
+        ) = self._backbone(action_embedding, anchor_embedding, action_pt_pos, anchor_pt_pos)
+
         head_action_output = self.head_action(
             action_embedding_tf,
             action_embedding,
@@ -645,7 +671,6 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         del head_action_output
 
         if self.cycle:
-            anchor_attn = anchor_attn.mean(dim=1)
             head_anchor_output = self.head_anchor(
                 anchor_embedding_tf,
                 anchor_embedding,

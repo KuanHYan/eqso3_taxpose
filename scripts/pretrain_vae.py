@@ -13,7 +13,7 @@ from taxpose.datasets.pretraining_point_cloud_data_module import (
 )
 from taxpose.nets.transformer_flow import EquivariantFeatureEmbeddingNetwork
 from taxpose.utils.load_model import get_weights_path
-from taxpose.training.equivariant_feature_pretraining_debug import (
+from taxpose.training.equivariant_feature_pretraining_vae import (
     EquivariancePreTrainingModule,
 )
 from taxpose.utils.dup_stdout_manager import DupStdoutFileManager
@@ -79,7 +79,7 @@ def main(cfg):
         offline=cfg.wandb.offline,
         save_code=True,
         log_model=not cfg.wandb.offline,
-        id=resume_run_id,
+        id=cfg.wandb.name if resume_run_id is None else resume_run_id,
         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
     )
 
@@ -124,7 +124,7 @@ def main(cfg):
         num_workers=cfg.resources.num_workers,
     )
 
-    network = DGCNN_VAE(cfg.encoder, cfg.training.pos_encoding)
+    network = DGCNN_VAE(cfg.encoder, cfg.encoder.pos_encoding)
     if TESTING:
         print(network)
     scheduler_cfg = {

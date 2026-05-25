@@ -30,7 +30,7 @@ bash "./launch.sh" local $GPU_INDEX \
     dm.train_dset.dataset_size=1024 \
     model.freeze_embnn=True \
     model.encoder.name=dgcnn \
-    model.head_norm=LN \
+    model.norm=LN \
     model.head_bias=False \
     model.dropout=0.0 \
     wandb.name=$WANDB_NAME \

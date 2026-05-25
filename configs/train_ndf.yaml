@@ -29,6 +29,14 @@ defaults:
   - task/${benchmark}/${task}/task@task
   - task/${benchmark}/${task}/phase/${phase}@task.phase
 
+rl:
+  reward_model_path: ???
+  base_model_path: ???
+  group: 32
+  update_base_every: 5
+  kl_coef: 1.0
+  clip_eps: 0.2
+
 training:
   batch_size: 8
   max_epochs: 500

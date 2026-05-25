@@ -83,35 +83,6 @@ class VN_DGCNN_eqSO3(nn.Module):
         self.conv6 = VNLinearAndLeakyReLU(
             64 // 3 * 3, 1024 // 3, dim=4, share_nonlinearity=True, norm=VNLayerNorm(1024 // 3, 4, self.n_knn)
         )
-        self.std_feature = VNStdFeature(1024 // 3 * 2, dim=4, normalize_frame=False)
-
-        # # The fllowing is for classification, which is not used for SO3 equivariant training.
-        # f_dim = 2299 if self.gc else 2235
-        # self.conv8 = nn.Sequential(
-        #     nn.Conv1d(f_dim, 256, kernel_size=1, bias=False),
-        #     self.bn8,
-        #     nn.LeakyReLU(negative_slope=0.2),
-        # )
-        # if self.gc:
-        #     self.conv7 = nn.Sequential(
-        #         nn.Conv1d(num_gc_classes, 64, kernel_size=1, bias=False),
-        #         self.bn7,
-        #         nn.LeakyReLU(negative_slope=0.2),
-        #     )
-
-        # self.dp1 = nn.Dropout(p=0.5)
-        # self.conv9 = nn.Sequential(
-        #     nn.Conv1d(256, 256, kernel_size=1, bias=False),
-        #     self.bn9,
-        #     nn.LeakyReLU(negative_slope=0.2),
-        # )
-        # self.dp2 = nn.Dropout(p=0.5)
-        # self.conv10 = nn.Sequential(
-        #     nn.Conv1d(256, 128, kernel_size=1, bias=False),
-        #     self.bn10,
-        #     nn.LeakyReLU(negative_slope=0.2),
-        # )
-        # self.conv11 = nn.Conv1d(128, num_part, kernel_size=1, bias=True)
 
     def forward(self, x, l=None):
         """

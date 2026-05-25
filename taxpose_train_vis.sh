@@ -14,7 +14,7 @@ python "./vis_taxpose.py" \
     job_type="train_taxpose" \
     model.freeze_embnn=True \
     model.encoder.name=dgcnn \
-    model.head_norm=LN \
+    model.norm=LN \
     wandb.name='vis_taxpose' \
     'model.pretraining.action.ckpt_path="logs/pretrain_embedding/2026-04-09/18-15-28/checkpoints/epoch=369-step=23310-train_loss=0.54-weights-only.ckpt"' \
     'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/2026-04-09/18-15-28/checkpoints/epoch=369-step=23310-train_loss=0.54-weights-only.ckpt"' \

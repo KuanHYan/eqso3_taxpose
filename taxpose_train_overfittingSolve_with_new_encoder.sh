@@ -38,7 +38,7 @@ bash "./launch.sh" local $GPU_INDEX \
     model.encoder.emb_dims=256 \
     model.encoder.knn=16 \
     model.encoder.output_num=512 \
-    model.head.head_norm=LN \
+    model.head.norm=LN \
     model.head.head_bias=False \
     model.head.pred_weight=True \
     model.head.up_sample=False \

@@ -6,8 +6,6 @@
 @File: model.py
 @Time: 2018/10/13 6:35 PM
 """
-
-
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
@@ -28,7 +26,6 @@ def knn(x, k):
     inner = -2*torch.matmul(x.transpose(2, 1), x)
     xx = torch.sum(x**2, dim=1, keepdim=True)
     pairwise_distance = -xx - inner - xx.transpose(2, 1)
- 
     idx = pairwise_distance.topk(k=k, dim=-1)[1]   # (batch_size, num_points, k)
     return idx
 
@@ -46,16 +43,14 @@ def get_graph_feature(x, k=20, idx=None):
     idx = idx + idx_base
 
     idx = idx.view(-1)
- 
+
     _, num_dims, _ = x.size()
 
     x = x.transpose(2, 1).contiguous()   # (batch_size, num_points, num_dims)  -> (batch_size*num_points, num_dims) #   batch_size * num_points * k + range(0, batch_size*num_points)
     feature = x.view(batch_size*num_points, -1)[idx, :]
     feature = feature.view(batch_size, num_points, k, num_dims) 
     x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
-    
     feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 1, 2).contiguous()
-  
     return feature
 
 
@@ -238,6 +233,7 @@ class DGCNN(nn.Module):
 
 @dataclass
 class DGCNNArgs:
+    name: str = 'raw_dgcnn'
     knn: int = 20
     emb_dims: int = 512
     dropout: float = 0.3
@@ -247,7 +243,7 @@ class DGCNNArgs:
 class DGCNN4TaxPose(DGCNN):
     def __init__(self, emb_dims=512, knn_n=20, dropout=0.1, norm='BN', output_c=1):
         super().__init__(
-            DGCNNArgs(knn_n, emb_dims, dropout, norm), output_c)
+            DGCNNArgs('raw_dgcnn', knn_n, emb_dims, dropout, norm), output_c)
         self.linear1 = None
         del self.linear1
         self.bn6 = None
@@ -310,6 +306,11 @@ class DGCNN_VAE(nn.Module):
         """
         if self.eval():
             return self.inference(x)
+        fea = self.encoder(x)
+        pts = self.decoder(fea, x)
+        return fea, pts.transpose(-1, -2)
+
+    def process(self, x):
         fea = self.encoder(x)
         pts = self.decoder(fea, x)
         return fea, pts.transpose(-1, -2)

@@ -20,7 +20,6 @@ from taxpose.utils.se3 import (
 
 import matplotlib.cm as cm
 import numpy as np
-import open3d as o3d
 to_tensor = ToTensor()
 
 

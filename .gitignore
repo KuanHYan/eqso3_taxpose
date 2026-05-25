@@ -369,8 +369,8 @@ cython_debug/
 .idea/
 
 /checkpoints/
-data/
-logs/
+data/*
+logs/*
 mug_place/
 outputs/
 results/
@@ -393,5 +393,4 @@ wandb.yaml
 
 Pointnet2_PyTorch
 
-data.zip
-taxpose.zip
+*.zip

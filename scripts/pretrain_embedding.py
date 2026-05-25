@@ -79,7 +79,7 @@ def main(cfg):
         offline=cfg.wandb.offline,
         save_code=True,
         log_model=not cfg.wandb.offline,
-        id=resume_run_id,
+        id=cfg.wandb.name if resume_run_id is None else resume_run_id,
         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
     )
 
@@ -115,7 +115,7 @@ def main(cfg):
             ]
             if not TESTING else []
         ),
-        fast_dev_run=5 if TESTING else False,
+        fast_dev_run=20 if TESTING else False,
     )
 
     dm = PretrainingMultiviewDataModule(

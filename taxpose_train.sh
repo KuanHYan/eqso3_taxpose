@@ -39,7 +39,7 @@ bash "./launch.sh" local $GPU_INDEX \
     model.pos_encoding=False \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \
-    model.head.head_norm=LN \
+    model.head.norm=LN \
     model.head.head_bias=False \
     model.head.head_type=transformer \
     model.head.residual_on=True \

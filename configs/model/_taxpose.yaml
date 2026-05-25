@@ -19,7 +19,7 @@ head:
   head_type: residual
   pred_weight: True
   residual_on: True
-  head_norm: BN
+  norm: BN
   head_bias: False
   use_coarse_soft: False
   project_corrs: False

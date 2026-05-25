@@ -29,7 +29,7 @@ bash "./launch.sh" local $GPU_INDEX \
     training.scheduler=$SCHED \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \
-    dm.train_dset.dataset_size=32000 \
+    dm.train_dset.dataset_size=6400 \
     model.freeze_embnn=True \
     model.dropout=0.1 \
     model.encoder.name=raw_dgcnn \
@@ -39,7 +39,7 @@ bash "./launch.sh" local $GPU_INDEX \
     model.head.head_type=residual \
     model.head.project_corrs=True \
     model.head.project_corrs_mode="vn" \
-    model.head.head_norm=LN \
+    model.head.norm=LN \
     model.head.head_bias=False \
     model.head.residual_on=True \
     model.head.pred_weight=True \

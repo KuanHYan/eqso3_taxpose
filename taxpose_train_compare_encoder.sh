@@ -14,34 +14,40 @@ export PYTEST_CURRENT_TEST=$TEST_MODE
 
 # train taxpose network
 bash "./launch.sh" local $GPU_INDEX \
-    python "./scripts/train_residual_flow_CAGrad.py" \
+    python "./scripts/train_residual_flow.py" \
     --config-name $CONFIG \
     job_type="train_taxpose" \
     data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
     training.max_epochs=500 \
+    training.check_val_every_n_epoch=1 \
     training.batch_size=32 \
-    training.lr=0.0004 \
-    training.min_lr=0.000004 \
-    training.warmup_ratio=0.02 \
+    training.lr=0.0001 \
+    training.min_lr=0.00001 \
+    training.warmup_ratio=0.05 \
     training.precision='32' \
     training.scheduler=$SCHED \
-    training.optimization_mode='auto' \
-    training.displace_loss_weight=1.0 \
-    training.direct_correspondence_loss_weight=1.0 \
-    training.consistency_loss_weight=1.0 \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \
-    dm.train_dset.dataset_size=1024 \
+    dm.train_dset.dataset_size=6400 \
     model.freeze_embnn=True \
-    model.dropout=0.0 \
+    model.dropout=0.1 \
     model.encoder.name=raw_dgcnn \
+    model.encoder.emb_dims=256 \
     model.encoder.norm=BN \
+    model.encoder.output_num=1024 \
+    model.encoder.knn=20 \
+    model.head.head_type=residual \
+    model.head.project_corrs=True \
+    model.head.project_corrs_mode="vn" \
     model.head.norm=LN \
     model.head.head_bias=False \
+    model.head.residual_on=True \
+    model.head.pred_weight=True \
     wandb.name=$WANDB_NAME \
-    'model.pretraining.action.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
-    'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
-    wandb.offline=False \
+    'model.pretraining.action.ckpt_path="logs/pretrain_embedding/2026-05-23/14-04-04/checkpoints/epoch=359-step=144000-train_loss=0.90-weights-only.ckpt"' \
+    'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/2026-05-23/14-04-04/checkpoints/epoch=359-step=144000-train_loss=0.90-weights-only.ckpt"' \
+    wandb.offline=True \
+    debug=False \
     resume_ckpt=$RESUME_CKPT \
     # wandb.project="tax-pose" \
     # wandb.save_dir="${ROOT_DIR}pretrain_embedding" \

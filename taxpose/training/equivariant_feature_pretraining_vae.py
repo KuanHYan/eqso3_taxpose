@@ -82,9 +82,8 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
         points_trans = transforms.transform_points(points)
         points_trans_centered = points_trans - points_trans.mean(dim=1, keepdims=True)
         # B, num_points, 3
-
-        phi, pts = self.model(points_centered.transpose(-1, -2))  # B, emb_dim, num_points and B, num_points, 3
-        phi_trans, pts_trans = self.model(points_trans_centered.transpose(-1, -2))
+        phi, pts = self.model.process(points_centered.transpose(-1, -2))  # B, emb_dim, num_points and B, num_points, 3
+        phi_trans, pts_trans = self.model.process(points_trans_centered.transpose(-1, -2))
 
         # ****************DEBUG***********************
         # 在训练循环中加入监控
@@ -153,8 +152,8 @@ class EquivariancePreTrainingModule(PointCloudTrainingModule):
         points_trans_centered = points_trans - points_trans.mean(dim=1, keepdims=True)
 
         # 提取特征，形状：[B, C, N]
-        phi, pts = self.model(points_centered.transpose(-1, -2))
-        phi_trans, _ = self.model(points_trans_centered.transpose(-1, -2))
+        phi, pts = self.model.process(points_centered.transpose(-1, -2))
+        phi_trans, _ = self.model.process(points_trans_centered.transpose(-1, -2))
         if self.normalize_features:
             phi = F.normalize(phi, dim=1)
             phi_trans = F.normalize(phi_trans, dim=1)

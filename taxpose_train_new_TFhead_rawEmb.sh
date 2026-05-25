@@ -33,6 +33,8 @@ bash "./launch.sh" local $GPU_INDEX \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \
     dm.train_dset.dataset_size=6400 \
+    dm.train_dset.anchor_rot_sample_method=axis_angle \
+    dm.train_dset.anchor_rotation_variance=3.141592653589793 \
     model.freeze_embnn=True \
     model.dropout=0.1 \
     model.pos_encoding=$ENCODEING \
@@ -44,7 +46,7 @@ bash "./launch.sh" local $GPU_INDEX \
     model.head.head_type=transformer \
     model.head.project_corrs=False \
     model.head.project_corrs_mode="mlp" \
-    model.head.head_norm=LN \
+    model.head.norm=LN \
     model.head.head_bias=False \
     model.head.residual_on=True \
     model.head.pred_weight=True \

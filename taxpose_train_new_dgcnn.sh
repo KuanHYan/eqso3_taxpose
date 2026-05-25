@@ -42,7 +42,7 @@ bash "./launch.sh" local $GPU_INDEX \
     model.encoder.output_num=1024 \
     model.head.head_type=residual \
     model.head.project_corrs=True \
-    model.head.head_norm=LN \
+    model.head.norm=LN \
     model.head.head_bias=False \
     model.head.residual_on=True \
     model.head.pred_weight=True \

@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Normal
 from torch.nn.utils import weight_norm
 from taxpose.nets.pointnet import ResidualPointNet, PointwiseMLP
 from taxpose.nets.huggingface_tf import Transformer
@@ -696,7 +697,6 @@ class Emb_dim_256_ResidualMLPHead(nn.Module):
             # NOTE: 1_dim is for channel dim, 2_dim is for points dim
             action_points = input[4]
             anchor_points = input[5]
-        print(f"input shape: {action_embedding.shape}, {action_points.shape}")
         if scores is None:
             if len(input) <= 4:
                 action_query = action_embedding
@@ -812,6 +812,81 @@ class Coarse_Res_Head(nn.Module):
         }
 
 
+class ResidualMLPHead4RL(ResidualMLPHead):
+    def __init__(
+        self,
+        emb_dims=512,
+        pred_weight=True,
+        residual_on=True,
+        norm=nn.BatchNorm1d,
+        bias=False,
+        use_coarse_ps=False,
+        project_corrs=False,
+        project_corrs_mode='mlp',
+        output_num=1024,
+    ):
+        super().__init__(
+            emb_dims, pred_weight, 
+            residual_on, norm, bias, 
+            use_coarse_ps, project_corrs, 
+            project_corrs_mode, output_num
+        )
+        self.corr_pts_std = PointwiseMLP(
+            [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
+        )
+
+    def forward(self, *input, scores, return_embedding=False):
+        """
+        input:
+          action_embedding: B,512,N
+          anchor_embedding: B,512,N
+          action_points: B,3,N
+          anchor_points: B,3,N
+          scores: B,N,N, if needed, use this instead of calculating scores
+        return:
+          dict with keys:
+          full_flow: B,3,N
+          residual_flow: B,3,N
+          corr_flow: B,3,N
+          corr_points: B,3,N
+          scores: B,N,N
+        """
+        output = super(ResidualMLPHead4RL, self).forward(*input, scores=scores)
+        if self.training:
+            action_embedding = input[0]
+            flow = output["full_flow"][:, :-1, :]
+            std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
+            pt = Normal(flow, std)
+            output["distribution"] = pt
+
+        return output
+
+    def sample(self, *input, scores, return_embedding=False):
+        """
+        input:
+          action_embedding: B,512,N
+          anchor_embedding: B,512,N
+          action_points: B,3,N
+          anchor_points: B,3,N
+          scores: B,N,N, if needed, use this instead of calculating scores
+        return:
+          dict with keys:
+          full_flow: B,3,N
+          residual_flow: B,3,N
+          corr_flow: B,3,N
+          corr_points: B,3,N
+          scores: B,N,N
+        """
+        output = super(ResidualMLPHead4RL, self).forward(*input, scores=scores)
+        action_embedding = input[0]
+        flow = output["full_flow"][:, :-1, :]
+        std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
+        pt = Normal(flow, std)
+        output["distribution"] = pt
+
+        return output
+
+
 @dataclass
 class HeadConfig:
     norm: nn.Module = nn.BatchNorm1d
@@ -864,6 +939,18 @@ def create_head(cfg: HeadConfig, dgcnn=None) -> nn.Module:
     #         cfg.project_corrs,
     #         cfg.output_num
     #     )
+    if cfg.head_type == "rl_residual":
+        return ResidualMLPHead4RL(
+            cfg.emb_dims,
+            cfg.pred_weight,
+            cfg.residual_on,
+            cfg.norm,
+            cfg.head_bias,
+            cfg.use_coarse_soft,
+            cfg.project_corrs,
+            cfg.project_corrs_mode,
+            cfg.output_num,
+        )
     return ResidualMLPHead(
         cfg.emb_dims,
         cfg.pred_weight,

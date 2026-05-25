@@ -29,7 +29,7 @@ bash "./launch.sh" local $GPU_INDEX \
     model.freeze_embnn=True \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \
-    model.head_norm=LN \
+    model.norm=LN \
     model.head_bias=False \
     model.dropout=0.3 \
     wandb.name=$WANDB_NAME \

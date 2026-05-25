@@ -34,7 +34,7 @@ bash "./launch.sh" local $GPU_INDEX \
     model.freeze_embnn=True \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \
-    model.head.head_norm=LN \
+    model.head.norm=LN \
     model.head.head_bias=False \
     model.head.use_coarse_soft=True \
     model.dropout=0.1 \
