@@ -56,11 +56,12 @@ class MOELayer(nn.Module):
         self.fea_pool = nn.AdaptiveAvgPool1d(1)  # d, N_pts --> d, 1
         self.top_k = top_k
 
-    def forward(self, x, fea):
+    def forward(self, x):
         """Args
             x: points with shape of (B, 3, N)
             fea: features with shape of (B, C, N)
         """
+        x, fea = x[0], x[1]
         batch_size, _, pts_n = x.size()
         pool_fea = self.fea_pool(fea) # 展平：(B, hidden_size)
         # 路由器为每个token选择top-k个专家及对应权重

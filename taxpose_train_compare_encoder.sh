@@ -32,8 +32,8 @@ bash "./launch.sh" local $GPU_INDEX \
     model.freeze_embnn=True \
     model.dropout=0.1 \
     model.encoder.name=raw_dgcnn \
-    model.encoder.emb_dims=256 \
-    model.encoder.norm=BN \
+    model.encoder.emb_dims=512 \
+    model.encoder.norm=LN \
     model.encoder.output_num=1024 \
     model.encoder.knn=20 \
     model.head.head_type=residual \
@@ -44,10 +44,9 @@ bash "./launch.sh" local $GPU_INDEX \
     model.head.residual_on=True \
     model.head.pred_weight=True \
     wandb.name=$WANDB_NAME \
-    'model.pretraining.action.ckpt_path="logs/pretrain_embedding/2026-05-23/14-04-04/checkpoints/epoch=359-step=144000-train_loss=0.90-weights-only.ckpt"' \
-    'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/2026-05-23/14-04-04/checkpoints/epoch=359-step=144000-train_loss=0.90-weights-only.ckpt"' \
     wandb.offline=True \
     debug=False \
+    eval=True \
     resume_ckpt=$RESUME_CKPT \
     # wandb.project="tax-pose" \
     # wandb.save_dir="${ROOT_DIR}pretrain_embedding" \

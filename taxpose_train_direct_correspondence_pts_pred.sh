@@ -18,7 +18,8 @@ bash "./launch.sh" local $GPU_INDEX \
     python "./scripts/train_residual_flow.py" \
     --config-name $CONFIG \
     job_type="train_taxpose" \
-    data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
+    seed=0 \
+    data_root="/data/yan/pose_dataset/pair_models" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
     training.batch_size=32 \
@@ -29,6 +30,8 @@ bash "./launch.sh" local $GPU_INDEX \
     training.scheduler=$SCHED \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \
+    dm.train_dset.anchor_rot_sample_method=axis_angle_uniform_z \
+    dm.train_dset.anchor_rotation_variance=1e-5 \
     dm.train_dset.dataset_size=6400 \
     model.freeze_embnn=True \
     model.dropout=0.1 \
@@ -46,9 +49,9 @@ bash "./launch.sh" local $GPU_INDEX \
     wandb.name=$WANDB_NAME \
     'model.pretraining.action.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
     'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
-    wandb.offline=True \
+    wandb.offline=False \
     debug=False \
-    eval=False \
+    eval=True \
     resume_ckpt=$RESUME_CKPT \
     # wandb.project="tax-pose" \
     # wandb.save_dir="${ROOT_DIR}pretrain_embedding" \

@@ -1,17 +1,14 @@
 # export WANDB_DISABLED=true
 GPU_INDEX=$1
 TEST_MODE=$2
-SCHED=$3
-WANDB_NAME=$4
-CONFIG=$5
-EVAL=$6
-RESUME_CKPT=$7
+WANDB_NAME=$3
+EVAL=$4
+RESUME_CKPT=$4
 ## use ./launch.sh local 0 $command to run on local machine
 ROOT_DIR=/home/yan/pose_estimation/taxpose/
 cd $ROOT_DIR
 
-export WANDB_SSL_VERIFY=0
-export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
+export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:256
 export PYTEST_CURRENT_TEST=$TEST_MODE
 
 ENCODEING=False
@@ -21,7 +18,7 @@ bash "./launch.sh" local $GPU_INDEX \
     python "./scripts/train_residual_flow.py" \
     --config-name train_ndf \
     job_type="train_taxpose" \
-    data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
+    data_root="/data/yan/pose_dataset/pair_models" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
     training.batch_size=16 \
@@ -53,7 +50,7 @@ bash "./launch.sh" local $GPU_INDEX \
     wandb.name=$WANDB_NAME \
     'model.pretraining.action.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
     'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
-    wandb.offline=True \
+    wandb.offline=False \
     debug=False \
     eval=$EVAL \
     resume_ckpt=$RESUME_CKPT

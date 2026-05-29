@@ -356,8 +356,42 @@ class VN_DGCNN(nn.Module):
 
 
 if __name__ == '__main__':
-    x = torch.rand(10, 3, 1024)
-    model = DGCNN_VAE(DGCNNArgs(norm='LN'))
-    y = model(x)
-    print(y[0].shape)
-    print(y[1].shape)
+    torch.cuda.manual_seed(0)
+    x = torch.rand(4, 3, 512).cuda()
+    score = torch.rand(4, 512, 512).cuda().requires_grad_(True)
+    score = F.softmax(score, dim=1)
+    score.retain_grad()
+    # model = DGCNN_VAE(DGCNNArgs(norm='LN'))
+    # y = model(x)
+    # print(y[0].shape)
+    # print(y[1].shape)
+    model = DGCNN4TaxPose().cuda()
+    params = torch.load('./taxpose/logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt')['state_dict']
+    model.load_state_dict({k.replace('model.emb_nn.', ''): v for k, v in params.items()})
+    model.train()
+
+    # wrong case: no_grad
+    # sc = x @ score
+    # with torch.no_grad():
+    #     y = model.forward(sc)
+    # loss = (y**2).mean()
+    # loss.backward()
+    # print(score.grad)
+
+    # case2: requires_grad_(False)
+    # model.requires_grad_(False)
+    # sc = x @ score
+    # y = model.forward(sc)
+    # loss = (y**2).mean()
+    # loss.backward()
+
+    # case3: detach
+    sc = x @ score
+    y = model.forward(sc)
+    print(y.shape)
+    loss = (y**2).mean()
+    loss.backward()
+    
+    
+    print(score.grad.shape)
+

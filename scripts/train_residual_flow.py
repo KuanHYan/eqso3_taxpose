@@ -16,6 +16,7 @@ from taxpose.training.flow_equivariance_training_module_nocentering import (
 )
 from taxpose.utils.load_model import get_weights_path
 
+torch.cuda.set_per_process_memory_fraction(0.8)
 
 def load_emb_weights(checkpoint_reference, wandb_cfg=None, run=None):
     if checkpoint_reference.startswith(wandb_cfg.entity):
@@ -130,8 +131,8 @@ def main(cfg):
                 # This checkpoint will get saved to WandB. The Callback mechanism in lightning is poorly designed, so we have to put it last.
                 ModelCheckpoint(
                     dirpath=cfg.lightning.checkpoint_dir,
-                    filename="{epoch}-{step}-{train_loss:.2f}-weights-only",
-                    monitor="val_loss",
+                    filename="{epoch}-{step}-{point_loss:.2f}-weights-only",
+                    monitor="val_point_loss",
                     mode="min",
                     save_weights_only=True,
                 ),

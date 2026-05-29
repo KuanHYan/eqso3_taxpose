@@ -14,6 +14,7 @@ from third_party.dcp.model import (
     EncoderDecoder,
     EncoderLayer,
     PositionwiseFeedForward,
+    MultiHeadedAttention
 )
 from taxpose.nets.huggingface_tf import MHAttention
 

@@ -7,7 +7,7 @@ defaults:
 
 train_folder: train_data
 test_folder: test_data
-root: /home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud
+root: ${..data_root}
 dataset_type: "asm_pair"
 
 train_dset:
