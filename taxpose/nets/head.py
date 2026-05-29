@@ -9,7 +9,7 @@ from taxpose.nets.pointnet import ResidualPointNet, PointwiseMLP
 from taxpose.nets.huggingface_tf import Transformer
 from taxpose.nets.transformer_flow_pm import CustomTransformer
 from taxpose.nets.vn_dgcnn import VN4Head
-import gc
+from taxpose.nets.moe_wab import MOELayer
 
 
 def normalize(points, eps=1e-8):
@@ -353,10 +353,10 @@ class TransformerHead(nn.Module):
         self.score = nn.Conv1d(emb_dims + pos_enc_dim, 1, 1)
         self.head_tf = CustomTransformer(
             emb_dims=emb_dims,
-            n_blocks=1,
+            n_blocks=2,
             dropout=0.1,
-            ff_dims=1024,
-            n_heads=4,
+            ff_dims=4*emb_dims,
+            n_heads=8,
             return_attn=True,
             bidirectional=False,
         )
@@ -372,8 +372,10 @@ class TransformerHead(nn.Module):
         self.project_corrs = project_corrs
         if project_corrs and project_corrs_mode == 'mlp':
             self.project_pts = weight_norm(nn.Linear(output_num, output_num, bias=False))
+            self.project_bias = weight_norm(nn.Linear(output_num, output_num, bias=False))
         elif project_corrs and project_corrs_mode == 'vn':
-            self.project_pts = VN4Head(output_num)
+            self.project_pts = MOELayer(emb_dims, output_num, 8, 2)
+            self.project_bias = MOELayer(emb_dims, output_num, 8, 2)
 
     def pt_embedding(self, points):
         self.point_encoder.eval()
@@ -391,7 +393,11 @@ class TransformerHead(nn.Module):
         corr_points = torch.matmul(anchor_points, scores)
         if self.project_corrs:
             corr_points_center = corr_points.mean(dim=2, keepdim=True)
-            corr_points = self.project_pts(corr_points-corr_points_center)
+            if not isinstance(self.project_pts, MOELayer):
+                inputs = corr_points-corr_points_center
+            else:
+                inputs = (corr_points-corr_points_center, action_embedding)
+            corr_points = self.project_pts(inputs)
             corr_points += corr_points_center
 
         # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
@@ -405,15 +411,16 @@ class TransformerHead(nn.Module):
         global_pt = global_pt.expand_as(anchor_points)
 
         corr_points_emb = self.pt_embedding(corr_points)
-        scores_for_bias = self.head_tf.get_attn_scores(
-            action_embedding_raw, corr_points_emb, seq_dim=2).transpose(2, 1).contiguous()  # B, N, M
+        scores_for_bias, emb_2 = self.head_tf.get_attn_scores(
+            action_embedding_raw, corr_points_emb, seq_dim=2)
+        scores_for_bias = scores_for_bias.transpose(2, 1).contiguous()  # B, N, M
         residual_flow = torch.einsum("bcn,bnm->bcm", corr_points, scores_for_bias) - global_pt  # B, 3, N
-        ########### debug #########
-        # with torch.no_grad():
-        #     gt = torch.einsum("bcn,bnm->bcm", global_pt, scores_for_bias)
-        #     print(f"ori: {gt[0, :, 0]}, {global_pt[0, :, 0]}, col weight: {scores_for_bias[0, :, 0].sum()}, row weight: {scores_for_bias[0, 0, :].sum()}")
-        #     gt = global_pt @ (scores_for_bias.transpose(2, 1).contiguous())
-        #     print(f"no transpose: {gt[0, :, 0]}, {global_pt[0, :, 0]}, row weight: {scores_for_bias.transpose(2, 1).contiguous()[0, :, 0].sum()}, col weight: {scores_for_bias.transpose(2, 1).contiguous()[0, 0, :].sum()}")
+        if self.project_corrs:
+            if not isinstance(self.project_pts, MOELayer):
+                inputs = residual_flow
+            else:
+                inputs = (residual_flow, emb_2)
+            residual_flow = self.project_bias(inputs)
         
         if self.residual_on:
             flow = residual_flow + corr_flow
@@ -430,7 +437,7 @@ class TransformerHead(nn.Module):
             del weight
         else:
             corr_flow_weight = flow
-        gc.collect()
+
         return {
             "full_flow": corr_flow_weight,
             "residual_flow": residual_flow,

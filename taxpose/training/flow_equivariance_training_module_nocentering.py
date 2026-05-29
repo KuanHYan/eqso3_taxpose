@@ -386,7 +386,6 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             log_values[loss_prefix + "indirect_loss"] = loss_indirect.detach()
             del shuffled_output, shuffled_act_corr, shuffled_anch_corr
             del act_perm, anch_perm, inv_perm_a, inv_perm_b
-            torch.cuda.empty_cache()  # 清空缓存
 
         if (
             self.res_smooth_loss_weight > 0.0

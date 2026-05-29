@@ -6,7 +6,7 @@ WANDB_NAME=$3
 ROOT_DIR=/home/yan/pose_estimation/taxpose/
 cd $ROOT_DIR
 
-export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
+# export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
 
 # Pretrain embeddings network

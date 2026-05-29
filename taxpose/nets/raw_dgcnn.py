@@ -43,7 +43,6 @@ def get_graph_feature(x, k=20, idx=None):
     idx = idx + idx_base
 
     idx = idx.view(-1)
-
     _, num_dims, _ = x.size()
 
     x = x.transpose(2, 1).contiguous()   # (batch_size, num_points, num_dims)  -> (batch_size*num_points, num_dims) #   batch_size * num_points * k + range(0, batch_size*num_points)

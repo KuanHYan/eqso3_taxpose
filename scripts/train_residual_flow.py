@@ -108,8 +108,8 @@ def main(cfg):
     # logger.log_hyperparams({"working_dir": os.getcwd()})
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
-        accelerator="auto",
-        devices="auto",
+        accelerator="gpu",
+        devices=[0],
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         # reload_dataloaders_every_n_epochs=1,
@@ -244,7 +244,8 @@ def main(cfg):
     if not cfg.eval:
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
     model.eval()
-    trainer.validate(model, dm, ckpt_path=resume_ckpt)
+    with torch.no_grad():
+        trainer.validate(model, dm, ckpt_path=resume_ckpt)
 
     # Print he run id of the current run
     print("Run ID: {} ".format(logger.experiment.id))

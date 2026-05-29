@@ -9,7 +9,6 @@ RESUME_CKPT=$6
 ROOT_DIR=/home/yan/pose_estimation/taxpose/
 cd $ROOT_DIR
 
-export WANDB_SSL_VERIFY=0
 export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
 
@@ -29,26 +28,26 @@ bash "./launch.sh" local $GPU_INDEX \
     training.scheduler=$SCHED \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \
-    dm.train_dset.dataset_size=32000 \
+    dm.train_dset.dataset_size=6400 \
     model.freeze_embnn=True \
     model.dropout=0.1 \
     model.encoder.name=raw_dgcnn \
     model.encoder.emb_dims=512 \
-    model.encoder.norm=BN \
+    model.encoder.norm=LN \
     model.encoder.output_num=1024 \
+    model.encoder.knn=16 \
     model.head.head_type=residual \
     model.head.project_corrs=True \
     model.head.project_corrs_mode="vn" \
-    model.head.norm=LN \
+    model.head.head_norm=LN \
     model.head.head_bias=False \
     model.head.residual_on=True \
     model.head.pred_weight=True \
     wandb.name=$WANDB_NAME \
-    'model.pretraining.action.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
-    'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt"' \
+    'model.pretraining.action.ckpt_path="logs/pretrain_embedding/best_cpkg/dgcnn_LN.ckpt"' \
+    'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/best_cpkg/dgcnn_LN.ckpt"' \
     wandb.offline=True \
     debug=False \
-    eval=False \
     resume_ckpt=$RESUME_CKPT \
     # wandb.project="tax-pose" \
     # wandb.save_dir="${ROOT_DIR}pretrain_embedding" \

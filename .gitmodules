@@ -5,3 +5,6 @@
 	path = third_party/ndf_robot
 	url = https://github.com/anthonysimeonov/ndf_robot.git
 	ignore = dirty
+[submodule "pytorch3d"]
+	path = pytorch3d
+	url = https://github.com/facebookresearch/pytorch3d.git

@@ -67,9 +67,9 @@ class CustomTransformer(nn.Module):
             query_emb = query_emb.transpose(2, 1).contiguous()  # (batch, seq, channels)
             tgt_emb = tgt_emb.transpose(2, 1).contiguous()
 
-        _ = self.model.forward(query_emb, tgt_emb, None, None)
+        emb = self.model.forward(query_emb, tgt_emb, None, None).transpose(2, 1).contiguous()
         src_attn = self.model.decoder.layers[-1].src_attn.attn
-        return src_attn.mean(dim=1)  # B, H, N, M --> B, N, M
+        return src_attn.mean(dim=1), emb  # B, H, N, M --> B, N, M
 
     def forward(self, *input):
         src = input[0]

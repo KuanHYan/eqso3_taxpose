@@ -394,3 +394,6 @@ wandb.yaml
 Pointnet2_PyTorch
 
 *.zip
+
+/logs_cp
+/dataset

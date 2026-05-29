@@ -434,6 +434,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         conditional: bool = False,
         dropout=0.1,
         pos_encoding=False,
+        n_blocks=1,
     ):
         super(ResidualFlow_DiffEmbTransformer, self).__init__()
         self.cycle = cycle
@@ -450,19 +451,19 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
 
         self.transformer_action = CustomTransformer(
             emb_dims=emb_dims,
-            n_blocks=1,
+            n_blocks=n_blocks,
             dropout=dropout,
-            ff_dims=1024,
-            n_heads=4,
+            ff_dims=2048,
+            n_heads=8,
             return_attn=self.return_attn,
             bidirectional=False
         )
         self.transformer_anchor = CustomTransformer(
             emb_dims=emb_dims,
-            n_blocks=1,
+            n_blocks=n_blocks,
             dropout=dropout,
-            ff_dims=1024,
-            n_heads=4,
+            ff_dims=2048,
+            n_heads=8,
             return_attn=self.return_attn,
             bidirectional=False
         )
@@ -1015,6 +1016,7 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             conditional=r_cfg.conditional,
             dropout=r_cfg.dropout,
             pos_encoding=cfg.pos_encoding,
+            n_blocks=cfg.n_blocks
         )
     elif cfg.model_type == "residual_flow_diff_emb_transformer_multi_block":
         r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
