@@ -1,7 +1,8 @@
-root: /home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud
+root: ${..data_root}
 task: custom  # This is one of the 6 tasks - depends on the action class.
 action_class: 0  # This is the action class for the task.
 train_folder: train_data
+val_folder: val_data
 test_folder: test_data
 data_fn: valid_pcs_list.txt
 
@@ -19,6 +20,19 @@ train_dset:
   shuffle_pcs: True
 
 val_dset:
+  dataset_type: ${..train_dset.dataset_type}
+  dataset_root: ${..root}/${..val_folder}
+  dataset_indices: ${..train_dset.dataset_indices}
+  cloud_type: ${..train_dset.cloud_type}
+  action_class: ${..train_dset.action_class}
+  num_points: ${..train_dset.num_points}
+  pc_aug: True
+  phase: val
+  data_fn: val_${..data_fn}
+  shuffle_pcs: False
+  data_size: 1024
+
+test_dset:
   dataset_type: ${..train_dset.dataset_type}
   dataset_root: ${..root}/${..test_folder}
   dataset_indices: ${..train_dset.dataset_indices}

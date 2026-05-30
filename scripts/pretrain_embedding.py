@@ -108,7 +108,7 @@ def main(cfg):
                 ModelCheckpoint(
                     dirpath=cfg.lightning.checkpoint_dir,
                     filename="{epoch}-{step}-{train_loss:.2f}-weights-only",
-                    monitor="train_loss",
+                    monitor="val_loss",
                     mode="min",
                     save_weights_only=True,
                 ),
@@ -151,5 +151,4 @@ if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
     torch.cuda.empty_cache()
     torch.multiprocessing.set_sharing_strategy("file_system")
-
     main()

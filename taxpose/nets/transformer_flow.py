@@ -400,7 +400,7 @@ def create_embedding_network(cfg) -> nn.Module:
     elif cfg.name == "raw_dgcnn":
         network: nn.Module = DGCNN4TaxPose(cfg.emb_dims, cfg.knn, cfg.dropout, cfg.norm)
     elif cfg.name == "dgcnn_group":
-        network = DGCNN_Grouper(cfg.emb_dims, output_num=cfg.output_num, knn=cfg.knn)
+        network = DGCNN_Grouper(cfg.emb_dims, cfg.output_num, cfg.knn, cfg.dropout, cfg.norm)
     elif cfg.name == "vae_dgcnn":
         network = DGCNN_VAE(
             cfg,

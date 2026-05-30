@@ -371,6 +371,7 @@ cython_debug/
 /checkpoints/
 data/*
 logs/
+/logs
 mug_place/
 outputs/
 results/

@@ -29,13 +29,15 @@ bash "./launch.sh" local $GPU_INDEX \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \
     dm.train_dset.dataset_size=6400 \
+    dm.train_dset.anchor_rot_sample_method=axis_angle \
+    dm.train_dset.anchor_rotation_variance=3.141592653589793 \
     model.freeze_embnn=True \
-    model.dropout=0.0 \
+    model.dropout=0.1 \
     model.encoder.name=raw_dgcnn \
     model.encoder.emb_dims=512 \
     model.encoder.norm=BN \
     model.encoder.output_num=1024 \
-    model.encoder.dropout=0.0 \
+    model.encoder.dropout=0.3 \
     model.head.head_type=rl_residual \
     model.head.project_corrs=True \
     model.head.project_corrs_mode="vn" \

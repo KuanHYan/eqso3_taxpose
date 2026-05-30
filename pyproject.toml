@@ -24,17 +24,6 @@ dependencies = [
   "opencv-python",
   "pybullet",
   "pyg_lib",
-  "pytorch3d",
-  "pytorch_lightning",
-  "rpad-partnet-mobility-utils @ git+https://github.com/r-pad/partnet_mobility_utils.git",
-  "rpad-pyg @ git+https://github.com/r-pad/pyg_libs.git",
-  "rpad-visualize-3d @ git+https://github.com/r-pad/visualize_3d.git",
-  "torch",
-  "torch_cluster",
-  "torch-geometric",
-  "torch_scatter",
-  "torch_sparse",
-  "torch_spline_conv",
   "wandb",
 ]
 
@@ -56,13 +45,6 @@ develop = [
   "types-tqdm",
 ]
 build_docs = ["mkdocs-material", "mkdocstrings[python]"]
-rlbench = [
-  # These should be installed manually...
-  # "pyrep",
-  # "rlbench @ git+https://github.com/stepjam/RLBench.git",
-  "rpad-rlbench-utils @ git+https://github.com/r-pad/rlbench_utils.git@8772cc41a9ad2ad1dacddca12b5e88748e833511",
-]
-
 
 # This is required to allow us to have notebooks/ at the top level.
 [tool.setuptools]
@@ -102,7 +84,6 @@ module = [
   "plotly.*",
   "pybullet.*",
   "pytorch3d.*",
-  "rpad.rlbench_utils.*",
   "scipy.*",
   "torch_cluster.*",
   "torch_geometric.*",

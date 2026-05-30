@@ -55,7 +55,8 @@ RUN pip install --upgrade --no-cache-dir pip && pip install --no-cache-dir wheel
 RUN pip install --no-cache-dir -r requirements-gpu.txt
 
 # Copy in the third-party directory.
-COPY third_party third_party
+COPY third_party/dcp third_party/dcp
+COPY third_party/vnn third_party/vnn
 
 # # Install the third-party libraries.
 # RUN pip install --no-cache-dir -e third_party/ndf_robot
@@ -80,6 +81,10 @@ RUN mkdir $CODING_ROOT/logs
 
 COPY ./docker/entrypoint.sh /opt/pairpose/entrypoint.sh
 ENTRYPOINT ["/opt/pairpose/entrypoint.sh"]
+
+COPY Pointnet2_PyTorch/pointnet2_ops_lib
+RUN cd Pointnet2_PyTorch/pointnet2_ops_lib && \
+    pip install .
 
 # {
 #     "iptables": false,

@@ -10,21 +10,18 @@ iopath==0.1.10
 
 torch_geometric==2.2.0
 
-# Torch.
---extra-index-url https://download.pytorch.org/whl/cu118
-torch==2.0.1
-torchvision==0.15.2
-torchaudio==2.0.2
+pytorch-lightning==2.5.6
 
 # Torch geometric.
---find-links https://data.pyg.org/whl/torch-1.13.1+cu117.html
-pyg_lib==0.3.1
+--find-links https://data.pyg.org/whl/torch-2.1.0+cu118.html
+pyg_lib==0.4.0
 torch_scatter==2.1.2
 torch_sparse==0.6.18
 torch_cluster==1.6.3
 torch_spline_conv==1.2.2
 
---find-links https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu118_pyt201/download.html
-pytorch3d
+# --find-links https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu118_pyt201/download.html
+# pytorch3d
+pytorch3d @ https://github.com/OutofAi/PyTorch3D-wheels/releases/download/0.7.8/pytorch3d-0.7.8.postHopper271126-cp310-cp310-linux_x86_64.whl
 
 transformers==4.51.3
