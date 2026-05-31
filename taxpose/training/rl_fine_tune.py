@@ -146,7 +146,7 @@ class RLTrainingModule(PointCloudTrainingModule):
         with torch.no_grad():
             self.base_model.eval()
             log_p_base = self.base_model.log_probs(state_act, state_anch, flow_act, flow_anch)
-        log_p_base = log_p_base.detach()          # [B, G]
+        # log_p_base = log_p_base.detach()          # [B, G]
 
         # ---- GRPO 策略损失 (带裁剪) ----
         log_ratio = log_p - log_p_base

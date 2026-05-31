@@ -26,25 +26,23 @@ RUN apt-get update && apt-get install -y \
     tk-dev \
     xz-utils \
     zlib1g-dev \
+    nano \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pyenv.
-RUN git clone --depth=1 https://github.com/pyenv/pyenv.git .pyenv
-ENV PYENV_ROOT=$CODING_ROOT/.pyenv
-ENV PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"
+# # Install pyenv.
+# RUN git clone --depth=1 https://github.com/pyenv/pyenv.git .pyenv
+# ENV PYENV_ROOT=$CODING_ROOT/.pyenv
+# ENV PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"
 
-# Install python.
-RUN pyenv install 3.10.0
-RUN pyenv global 3.10.0
+# # Install python.
+# RUN pyenv install 3.10.0
+# RUN pyenv global 3.10.0
 
-# Make the working directory the home directory
-RUN mkdir $CODING_ROOT/code
-WORKDIR $CODING_ROOT/code
 
 # Setup environment variables for NVIDIA and VirtualGL
-ENV NVIDIA_VISIBLE_DEVICES all
-ENV NVIDIA_DRIVER_CAPABILITIES all
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
 
 # Copy in the requirements.
 COPY requirements-gpu.txt .
@@ -53,6 +51,9 @@ RUN pip install --upgrade --no-cache-dir pip && pip install --no-cache-dir wheel
 
 # Install the requirements.
 RUN pip install --no-cache-dir -r requirements-gpu.txt
+
+# COPY pytorch3d-0.7.8.postHopper271126-cp310-cp310-linux_x86_64.whl .
+# RUN pip install ./pytorch3d-0.7.8.postHopper271126-cp310-cp310-linux_x86_64.whl
 
 # Copy in the third-party directory.
 COPY third_party/dcp third_party/dcp
@@ -72,6 +73,11 @@ RUN touch taxpose/py.typed
 # Install our project.
 RUN pip install --no-cache-dir -e ".[develop,rlbench]"
 
+COPY Pointnet2_PyTorch/pointnet2_ops_lib pointnet2_ops_lib
+WORKDIR $CODING_ROOT/pointnet2_ops_lib
+RUN python setup.py install
+
+WORKDIR $CODING_ROOT
 # Copy in the code.
 COPY . .
 
@@ -79,12 +85,10 @@ COPY . .
 RUN mkdir $CODING_ROOT/data
 RUN mkdir $CODING_ROOT/logs
 
-COPY ./docker/entrypoint.sh /opt/pairpose/entrypoint.sh
-ENTRYPOINT ["/opt/pairpose/entrypoint.sh"]
-
-COPY Pointnet2_PyTorch/pointnet2_ops_lib
-RUN cd Pointnet2_PyTorch/pointnet2_ops_lib && \
-    pip install .
+# COPY ./docker/entrypoint.sh /opt/pairpose/entrypoint.sh
+# ENTRYPOINT ["/opt/pairpose/entrypoint.sh"]
+# CMD ["wandb login $WANDB_API_KEY"]
+CMD ["sleep", "infinity"]
 
 # {
 #     "iptables": false,

@@ -6,18 +6,19 @@ WANDB_NAME=$4
 CONFIG=$5
 RESUME_CKPT=$6
 ## use ./launch.sh local 0 $command to run on local machine
-ROOT_DIR=/home/yan/pose_estimation/taxpose/
-cd $ROOT_DIR
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT_DIR="${SCRIPT_DIR}/"
+cd "$ROOT_DIR" || exit 1
 
 export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
-export PYTEST_CURRENT_TEST=$TEST_MODE
+export PYTEST_CURRENT_TEST="$TEST_MODE"
 
 # train taxpose network
 bash "./launch.sh" local $GPU_INDEX \
     python "./scripts/eval.py" \
     --config-name $CONFIG \
     job_type="train_taxpose" \
-    data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
+    data_root="${ROOT_DIR}data/pair_models" \
     training.image_logging_period=10 \
     training.log_every_n_steps=10 \
     training.check_val_every_n_epoch=1 \

@@ -20,8 +20,9 @@ torch_sparse==0.6.18
 torch_cluster==1.6.3
 torch_spline_conv==1.2.2
 
-# --find-links https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu118_pyt201/download.html
+# --find-links https://github.com/OutofAi/PyTorch3D-wheels/releases/download/0.7.8/pytorch3d-0.7.8.postHopper271126-cp310-cp310-linux_x86_64.whl
 # pytorch3d
-pytorch3d @ https://github.com/OutofAi/PyTorch3D-wheels/releases/download/0.7.8/pytorch3d-0.7.8.postHopper271126-cp310-cp310-linux_x86_64.whl
+--find-links https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu118_pyt210/download.html
+pytorch3d
 
 transformers==4.51.3

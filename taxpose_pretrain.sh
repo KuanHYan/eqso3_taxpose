@@ -3,18 +3,19 @@ GPU_INDEX=$1
 TEST_MODE=$2
 WANDB_NAME=$3
 ## use ./launch.sh local 0 $command to run on local machine
-ROOT_DIR=/home/yan/pose_estimation/taxpose/
-cd $ROOT_DIR
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT_DIR="${SCRIPT_DIR}/"
+cd "$ROOT_DIR" || exit 1
 
-# export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
-export PYTEST_CURRENT_TEST=$TEST_MODE
+export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
+export PYTEST_CURRENT_TEST="$TEST_MODE"
 
 # Pretrain embeddings network
 bash "./launch.sh" local $GPU_INDEX \
     python "./scripts/pretrain_embedding.py" \
     --config-name "pretraining" \
     job_type="pretrain_embedding" \
-    data_root="/data/yan/pose_dataset/ideal_pair_models" \
+    data_root="${ROOT_DIR}data/ideal_pair_models" \
     training.batch_size=25 \
     training.lr=1.0e-4 \
     training.precision=32 \

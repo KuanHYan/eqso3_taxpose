@@ -6,18 +6,19 @@ WANDB_NAME=$4
 CONFIG=$5
 RESUME_CKPT=$6
 ## use ./launch.sh local 0 $command to run on local machine
-ROOT_DIR=/home/yan/pose_estimation/taxpose/
-cd $ROOT_DIR
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT_DIR="${SCRIPT_DIR}/"
+cd "$ROOT_DIR" || exit 1
 
-# export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
-export PYTEST_CURRENT_TEST=$TEST_MODE
+export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
+export PYTEST_CURRENT_TEST="$TEST_MODE"
 
 # train taxpose network
 bash "./launch.sh" local $GPU_INDEX \
     python "./scripts/train_residual_flow.py" \
     --config-name $CONFIG \
     job_type="train_taxpose" \
-    data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
+    data_root="${ROOT_DIR}data/pair_models" \
     training.max_epochs=500 \
     training.batch_size=16 \
     training.lr=0.0002 \
@@ -34,8 +35,8 @@ bash "./launch.sh" local $GPU_INDEX \
     model.head_bias=False \
     model.dropout=0.0 \
     wandb.name=$WANDB_NAME \
-    'model.pretraining.action.ckpt_path="logs/pretrain_embedding/2026-04-09/18-15-28/checkpoints/epoch=369-step=23310-train_loss=0.54-weights-only.ckpt"' \
-    'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/2026-04-09/18-15-28/checkpoints/epoch=369-step=23310-train_loss=0.54-weights-only.ckpt"' \
+    model.pretraining.action.ckpt_path="${ROOT_DIR}logs/pretrain_embedding/2026-04-09/18-15-28/checkpoints/epoch=369-step=23310-train_loss=0.54-weights-only.ckpt" \
+    model.pretraining.anchor.ckpt_path="${ROOT_DIR}logs/pretrain_embedding/2026-04-09/18-15-28/checkpoints/epoch=369-step=23310-train_loss=0.54-weights-only.ckpt" \
     wandb.offline=False \
     resume_ckpt=$RESUME_CKPT \
     # wandb.project="tax-pose" \

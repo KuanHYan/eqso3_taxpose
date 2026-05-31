@@ -1,5 +1,4 @@
 import os
-
 import hydra
 import omegaconf
 import pytorch_lightning as pl
@@ -16,7 +15,6 @@ from taxpose.training.flow_equivariance_training_module_nocentering import (
 )
 from taxpose.utils.load_model import get_weights_path
 
-torch.cuda.set_per_process_memory_fraction(0.8)
 
 def load_emb_weights(checkpoint_reference, wandb_cfg=None, run=None):
     if checkpoint_reference.startswith(wandb_cfg.entity):

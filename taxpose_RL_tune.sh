@@ -6,8 +6,9 @@ WANDB_NAME=$4
 CONFIG=$5
 RESUME_CKPT=$6
 ## use ./launch.sh local 0 $command to run on local machine
-ROOT_DIR=/home/yan/pose_estimation/taxpose/
-cd $ROOT_DIR
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT_DIR="${SCRIPT_DIR}/"
+cd "$ROOT_DIR" || exit 1
 
 # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
@@ -17,10 +18,10 @@ bash "./launch.sh" local $GPU_INDEX \
     python "./scripts/train_rl_tune.py" \
     --config-name $CONFIG \
     job_type="rl_tune" \
-    data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
+    data_root="${ROOT_DIR}data/pair_models" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=6 \
+    training.batch_size=4 \
     training.lr=0.000025 \
     training.min_lr=0.0000025 \
     training.warmup_ratio=0.01 \
@@ -45,15 +46,15 @@ bash "./launch.sh" local $GPU_INDEX \
     model.head.head_bias=False \
     model.head.residual_on=True \
     model.head.pred_weight=True \
-    rl.reward_model_path="/home/yan/pose_estimation/taxpose/logs/rl_reward/2026-05-24/10-51-49/checkpoints/last.ckpt" \
-    rl.base_model_path="/home/yan/pose_estimation/taxpose/logs/train_taxpose/best_ckpt/vn_Wab_wo_TFhead_6400dz.ckpt" \
+    rl.reward_model_path="${ROOT_DIR}logs/rl_reward/2026-05-24/10-51-49/checkpoints/last.ckpt" \
+    rl.base_model_path="${ROOT_DIR}logs/train_taxpose/best_ckpt/vn_Wab_wo_TFhead_6400dz.ckpt" \
     rl.group=32 \
     rl.update_base_every=5 \
     rl.kl_coef=0.5 \
     rl.clip_eps=0.2 \
     wandb.name=$WANDB_NAME \
     wandb.entity=yankunh27-zhejiang-university \
-    wandb.offline=True \
+    wandb.offline=False \
     debug=False \
     resume_ckpt=$RESUME_CKPT \
     # wandb.project="tax-pose" \

@@ -6,13 +6,13 @@ WANDB_NAME=$4
 CONFIG=$5
 RESUME_CKPT=$6
 ## use ./launch.sh local 0 $command to run on local machine
-ROOT_DIR=/home/yan/pose_estimation/taxpose/
-cd $ROOT_DIR
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT_DIR="${SCRIPT_DIR}/"
+cd "$ROOT_DIR" || exit 1
 
-export WANDB_SSL_VERIFY=0
 export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
-export PYTEST_CURRENT_TEST=$TEST_MODE
-
+export PYTEST_CURRENT_TEST="$TEST_MODE"
+s
 ENCODEING=False
 
 # train taxpose network
@@ -20,7 +20,7 @@ bash "./launch.sh" local $GPU_INDEX \
     python "./scripts/train_residual_flow.py" \
     --config-name $CONFIG \
     job_type="train_taxpose" \
-    data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
+    data_root="${ROOT_DIR}data/pair_models" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
     training.batch_size=44 \
@@ -47,8 +47,8 @@ bash "./launch.sh" local $GPU_INDEX \
     model.head.residual_on=True \
     model.head.pred_weight=True \
     wandb.name=$WANDB_NAME \
-    'model.pretraining.action.ckpt_path="logs/pretrain_embedding/best_cpkg/VAE_dgcnn.ckpt"' \
-    'model.pretraining.anchor.ckpt_path="logs/pretrain_embedding/best_cpkg/VAE_dgcnn.ckpt"' \
+    model.pretraining.action.ckpt_path="${ROOT_DIR}logs/pretrain_embedding/best_cpkg/VAE_dgcnn.ckpt" \
+    model.pretraining.anchor.ckpt_path="${ROOT_DIR}logs/pretrain_embedding/best_cpkg/VAE_dgcnn.ckpt" \
     wandb.offline=True \
     debug=False \
     resume_ckpt=$RESUME_CKPT
