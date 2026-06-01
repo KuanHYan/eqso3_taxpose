@@ -149,7 +149,7 @@ def main(cfg):
     )
 
     dm.setup()
-
+    cfg.rl.reward_model_path = hydra.utils.to_absolute_path(cfg.rl.reward_model_path)
     network = PolicyModel(
         cfg.model.encoder,
         cfg.model.head,
@@ -191,21 +191,23 @@ def main(cfg):
         kl_coef=cfg.rl.kl_coef,
         clip_eps=cfg.rl.clip_eps,
         update_base_every=cfg.rl.update_base_every,
+        grpo_iter=cfg.rl.grpo_iter,
+        optimization_mode='manual',
         tensorboard_writer=tensorboard_writer
     )
 
     model.cuda()
     model.train()
-    print(f"loaded base model from: {cfg.rl.base_model_path}")
+    base_model_path = hydra.utils.to_absolute_path(cfg.rl.base_model_path)
+    print(f"loaded base model from: {base_model_path}")
     model.load_state_dict(
-        torch.load(hydra.utils.to_absolute_path(cfg.rl.base_model_path))[
+        torch.load(base_model_path)[
             "state_dict"
         ],
     )
-    model.eval()
-    trainer.validate(model, dm, ckpt_path=resume_ckpt)
-
     if not cfg.eval:
+        model.eval()
+        trainer.validate(model, dm, ckpt_path=resume_ckpt)
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
 
     model.eval()

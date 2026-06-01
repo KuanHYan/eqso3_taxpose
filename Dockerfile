@@ -4,11 +4,11 @@ FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/pytorch/pytorch:2.1.0-cu
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Set up the environment.
-ENV CODING_ROOT=/opt/pairpose
+ENV CODING_ROOT=/root/pairpose
 WORKDIR $CODING_ROOT
 
 # Install the dependencies.
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     # Dependencies required for python.
     build-essential \
     curl \
@@ -65,14 +65,6 @@ COPY third_party/vnn third_party/vnn
 # Install pyrep.
 # RUN pip install --no-cache-dir --no-build-isolation "pyrep @ git+https://gitee.com/zhkhhust/PyRep.git"
 
-# Copy in pyproject.toml.
-COPY pyproject.toml .
-RUN mkdir taxpose
-RUN touch taxpose/py.typed
-
-# Install our project.
-RUN pip install --no-cache-dir -e ".[develop,rlbench]"
-
 COPY Pointnet2_PyTorch/pointnet2_ops_lib pointnet2_ops_lib
 WORKDIR $CODING_ROOT/pointnet2_ops_lib
 RUN python setup.py install
@@ -80,6 +72,12 @@ RUN python setup.py install
 WORKDIR $CODING_ROOT
 # Copy in the code.
 COPY . .
+# Copy in pyproject.toml.
+COPY pyproject.toml .
+RUN touch taxpose/py.typed
+
+# Install our project.
+RUN pip install --no-cache-dir -e ".[develop,rlbench]"
 
 # Make directories for mounting.
 RUN mkdir $CODING_ROOT/data
@@ -87,28 +85,4 @@ RUN mkdir $CODING_ROOT/logs
 
 # COPY ./docker/entrypoint.sh /opt/pairpose/entrypoint.sh
 # ENTRYPOINT ["/opt/pairpose/entrypoint.sh"]
-# CMD ["wandb login $WANDB_API_KEY"]
-CMD ["sleep", "infinity"]
-
-# {
-#     "iptables": false,
-#     "bridge": "none",
-#     "ipv6": false,
-#     "runtimes": {
-#         "nvidia": {
-#             "args": [],
-#             "path": "nvidia-container-runtime"
-#         }
-#     },
-#     "registry-mirrors": [
-#         "https://dockerproxy.com",
-#         "https://docker.m.daocloud.io",
-#         "https://cr.console.aliyun.com",
-#         "https://ccr.ccs.tencentyun.com",
-#         "https://hub-mirror.c.163.com",
-#         "https://mirror.baidubce.com",
-#         "https://docker.nju.edu.cn",
-#         "https://docker.mirrors.sjtug.sjtu.edu.cn",
-#         "https://registry.docker-cn.com"
-#     ]
-# }
+CMD ["python"]

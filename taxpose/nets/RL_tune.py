@@ -25,16 +25,6 @@ class RewardModel(nn.Module):
         emb_dims = encoder_cfg.emb_dims
 
         self.center_feature = center_feature
-
-        self.transformer_action = CustomTransformer(
-            emb_dims=emb_dims,
-            n_blocks=1,
-            dropout=dropout,
-            ff_dims=emb_dims*4,
-            n_heads=emb_dims//64,
-            return_attn=False,
-            bidirectional=False
-        )
         self.transformer_action = nn.Transformer(
             d_model=emb_dims,
             nhead=emb_dims//64,

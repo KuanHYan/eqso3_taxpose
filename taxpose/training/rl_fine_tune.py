@@ -30,9 +30,10 @@ class RLTrainingModule(PointCloudTrainingModule):
         action_weight=1,
         anchor_weight=1,
         flow_supervision="both",  # ('both', 'action2anchor', 'anchor2action')
-        optimization_mode: str = "auto",
+        optimization_mode="auto",
         kl_coef: float = 0.05,      # KL 惩罚系数
         clip_eps: float = 0.2,      # PPO-style 裁剪阈值
+        grpo_iter: int = 10,        # GRPO单词迭代次数
         update_base_every: int = 5,  # base model 更新频率
         tensorboard_writer=None,
     ):
@@ -59,6 +60,7 @@ class RLTrainingModule(PointCloudTrainingModule):
         for param in self.base_model.parameters():
             param.requires_grad = False
         self.base_model.eval()
+        self.grpo_iter = grpo_iter
 
     def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False):
         # 仅加载 self.model 在 state_dict 有的参数
@@ -81,11 +83,38 @@ class RLTrainingModule(PointCloudTrainingModule):
 
     def training_step(self, batch, batch_idx):
         self.train()
-        loss, log_values = self.module_step(batch, batch_idx)
-        log_values.update(lr=self._optimizer_.param_groups[0]["lr"])
-        if isinstance(loss, tuple):
-            self._ori_losses = loss
-            loss = sum(loss)
+        opt = self.optimizers()        # 获取优化器
+        sch = self.lr_schedulers()     # 获取调度器
+        log_values = {}
+        # 采样（无梯度）
+        with torch.no_grad():
+            samples = self.model.rl_sample(
+                batch["points_action_trans"],
+                batch["points_anchor_trans"]
+            )
+        # 预先计算 log_p_old 与 log_p_base（均为 eval 或 no_grad）
+        with torch.no_grad():
+            state_act = batch["points_action_trans"]  # B,N,3
+            state_anch = batch["points_anchor_trans"]
+            flow_act = samples['flow_act']  # B, 3, N ??
+            flow_anch = samples['flow_anch']
+            samples["log_p_old"] = self.model.log_probs(
+                state_act, state_anch, flow_act, flow_anch)
+            samples["log_p_base"] = self.base_model.log_probs(
+                state_act, state_anch, flow_act, flow_anch)
+
+        total_grpo_loss = 0.0
+        for i in range(self.grpo_iter):
+            opt.zero_grad()
+            loss = self.compute_loss(samples, batch, log_values)
+            loss.backward()
+            opt.step()
+            total_grpo_loss += loss.detach()
+
+        # 每个 batch 结束才步进调度器
+        if sch is not None:
+            sch.step()
+
         for key, val in log_values.items():
             self.log(key, val, logger=True)
 
@@ -106,27 +135,18 @@ class RLTrainingModule(PointCloudTrainingModule):
                         images=[val],  # self.global_step
                     )
         self.log("mean rewrad", log_values['reward_mean'], prog_bar=True, logger=True)
-        return loss
+        # avg_loss = total_grpo_loss / self.grpo_iter
+        # self.log("train_loss", avg_loss)
 
     def module_step(self, batch, batch_idx):
         points_trans_action = batch["points_action_trans"]  # B,N,3
         points_trans_anchor = batch["points_anchor_trans"]
-
-        bz, n, _ = points_trans_action.shape
         log_values = {}
-        if self.training:
-            with torch.no_grad():
-                samples = self.model.rl_sample(points_trans_action, points_trans_anchor)
-
-            loss, log_values = self.compute_loss(
-                samples, batch, log_values=log_values, loss_prefix=""
-            )
-        else:
-            outputs = self.model(points_trans_action, points_trans_anchor)
-            loss, log_values = self.compute_error(outputs, batch, log_values)
+        outputs = self.model(points_trans_action, points_trans_anchor)
+        loss, log_values = self.compute_error(outputs, batch, log_values)
         return loss, log_values
 
-    def compute_loss(self, samples, batch, log_values={}, loss_prefix=""):
+    def compute_loss(self, samples, batch, log_values={}, loss_prefix=''):
         """
         samples: 包含
             - state_act, state_anch: 状态（点云）
@@ -138,20 +158,17 @@ class RLTrainingModule(PointCloudTrainingModule):
         state_anch = batch["points_anchor_trans"]
         flow_act = samples['flow_act']  # B, 3, N ??
         flow_anch = samples['flow_anch']
-        adv = samples['adv']                     # 形状 [B, G]，组内标准化后的优势
+        adv = samples['adv']            # 形状 [B, G]，组内标准化后的优势
+        log_p_base = samples['log_p_base']
+        log_p_old = samples['log_p_old']
 
         # ---- 当前策略的对数概率 ----
         log_p = self.model.log_probs(state_act, state_anch, flow_act, flow_anch)  # [B, G]
-        # ---- 参考策略的对数概率（冻结，无梯度） ----
-        with torch.no_grad():
-            self.base_model.eval()
-            log_p_base = self.base_model.log_probs(state_act, state_anch, flow_act, flow_anch)
-        # log_p_base = log_p_base.detach()          # [B, G]
 
         # ---- GRPO 策略损失 (带裁剪) ----
-        log_ratio = log_p - log_p_base
+        log_ratio = log_p - log_p_old
         # 安全范围，避免 exp 溢出
-        log_ratio_clamped = torch.clamp(log_ratio, min=-5.0, max=5.0)
+        log_ratio_clamped = torch.clamp(log_ratio, min=-10, max=10)
         # 稳定的 ratio 和 clipped ratio
         ratio = torch.exp(log_ratio_clamped)   # 重要性采样比率
         surr1 = adv * ratio
@@ -159,7 +176,8 @@ class RLTrainingModule(PointCloudTrainingModule):
         grpo_loss = -torch.mean(torch.min(surr1, surr2))
 
         # ---- KL 散度（reverse KL: E[log p_base - log p]） ----
-        kl = (log_p_base - log_p).mean()          # 近似 KL(policy || base)
+        ref_logp_delat = log_p_base - log_p
+        kl = (torch.exp(ref_logp_delat) - ref_logp_delat - 1).mean()  #  近似 KL(policy || base)
         # 也可用 forward KL: (log_p - log_p_base).mean()，视需要选择
 
         # ---- 总损失 ----
@@ -174,7 +192,7 @@ class RLTrainingModule(PointCloudTrainingModule):
         log_values[loss_prefix + "adv_mean"] = adv.mean()
         log_values["reward_mean"] = samples['reward'].mean()
 
-        return loss, log_values
+        return loss
 
     def compute_error(self, model_output, batch, log_values, loss_prefix=""):
         x_action = model_output["flow_action"]
