@@ -399,3 +399,6 @@ Pointnet2_PyTorch
 /dataset
 pretraining_models
 *.ipynb
+*.tar.gz
+tmp/
+*.ckpt

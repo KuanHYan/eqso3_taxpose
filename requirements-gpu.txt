@@ -1,11 +1,11 @@
 # Requirements file for specific GPU versions.
 
 # General.
-#cffi==1.14.2
-#wheel==0.40.0
+cffi==1.14.2
+wheel==0.40.0
 
 # For pytorch3d
-#fvcore==0.1.5.post20221221
+fvcore==0.1.5.post20221221
 iopath==0.1.10
 
 torch_geometric==2.2.0
@@ -25,4 +25,4 @@ torch_spline_conv==1.2.2
 --find-links https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu118_pyt210/download.html
 pytorch3d
 
-transformers==4.47.1
+transformers==4.51.3

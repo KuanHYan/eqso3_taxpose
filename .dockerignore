@@ -101,7 +101,7 @@ venv/
 artifacts/
 bensnewlogs/
 checkpoints/
-
+data/
 logs/
 outputs/
 results/
@@ -114,12 +114,6 @@ third_party/ndf_robot/src/ndf_robot/data/
 third_party/ndf_robot/src/ndf_robot/eval_data/
 third_party/ndf_robot/src/ndf_robot/descriptions/
 
-**/*.zip
+*/*.zip
 pretrain_embedding/
-Pointnet2_PyTorch/pointnet2
-Pointnet2_PyTorch/pointnet2_ops_lib/build
-Pointnet2_PyTorch/pointnet2_ops_lib/*.egg-info
-Pointnet2_PyTorch/test
-Pointnet2_PyTorch/*.*
 notebooks/
-requirements-gpu.txt

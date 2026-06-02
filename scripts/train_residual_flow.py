@@ -59,10 +59,11 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
 
 @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
 def main(cfg):
-    print(OmegaConf.to_yaml(cfg, resolve=True))
+    if __name__ == "__main__":
+        print(OmegaConf.to_yaml(cfg, resolve=True))
     # wandb.init(resume=cfg.resume_ckpt is not None)
 
-    # torch.set_float32_matmul_precision("medium")
+    torch.set_float32_matmul_precision("high")
     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
 
     if cfg.resume_ckpt:
@@ -155,14 +156,18 @@ def main(cfg):
     dm.setup()
 
     network = create_network(cfg.model)
-    if cfg.debug or TESTING:
+    if trainer.is_global_zero:
         print(network)
     if cfg.training.lr_scheduler_by_epoch:
         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio
     else:
         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio \
-            * int(len(dm.train_dataset) / cfg.training.batch_size)
+            * int(len(dm.train_dataset) / cfg.training.batch_size / device_count)
     lr_scheduler_total_steps = int(lr_scheduler_total_steps)
+
+    # For distributed training, we need to make sure that the learning rate scales with the number of GPUs.
+    cfg.training.lr = cfg.training.lr * device_count
+    cfg.training.min_lr = cfg.training.min_lr * device_count
     scheduler_cfg = {
         'scheduler': cfg.training.scheduler,
         'max_steps': lr_scheduler_total_steps,
@@ -170,7 +175,8 @@ def main(cfg):
         'min_lr': cfg.training.min_lr,
         'by_epoch': cfg.training.lr_scheduler_by_epoch,
     }
-    print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_ratio: {cfg.training.warmup_ratio}")
+    if trainer.is_global_zero:
+        print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_ratio: {cfg.training.warmup_ratio}")
     if cfg.debug:
         from torch.utils.tensorboard.writer import SummaryWriter
         tensorboard_writer = SummaryWriter()
@@ -199,8 +205,9 @@ def main(cfg):
     model.cuda()
     model.train()
     if cfg.training.load_from_checkpoint:
-        print("loaded checkpoint from")
-        print(cfg.training.checkpoint_file)
+        if trainer.is_global_zero:
+            print("loaded checkpoint from")
+            print(cfg.training.checkpoint_file)
         model.load_state_dict(
             torch.load(hydra.utils.to_absolute_path(cfg.training.checkpoint_file))[
                 "state_dict"
