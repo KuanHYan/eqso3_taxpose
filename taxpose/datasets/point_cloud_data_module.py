@@ -49,6 +49,7 @@ class MultiviewDataModule(pl.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             num_workers=num_workers,
+            pin_memory=False,
             persistent_workers=num_workers > 0,
         )
 
@@ -59,5 +60,6 @@ class MultiviewDataModule(pl.LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             num_workers=num_workers,
+            pin_memory=False,
             persistent_workers=num_workers > 0,
         )

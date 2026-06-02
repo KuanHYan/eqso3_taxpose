@@ -206,8 +206,6 @@ def main(cfg):
         ],
     )
     if not cfg.eval:
-        model.eval()
-        trainer.validate(model, dm, ckpt_path=resume_ckpt)
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
 
     model.eval()
@@ -221,4 +219,5 @@ if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
     torch.cuda.empty_cache()
     torch.multiprocessing.set_sharing_strategy("file_system")
+    torch.multiprocessing.set_start_method("spawn")
     main()

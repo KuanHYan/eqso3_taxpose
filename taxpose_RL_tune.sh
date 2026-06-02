@@ -18,13 +18,13 @@ bash ./my_launch.sh $PLATFORM $GPU_INDEX \
     python "./scripts/train_rl_tune.py" \
     --config-name train_ndf \
     job_type="rl_tune" \
-    data_root="${ROOT_DIR}data/pair_models" \
+    data_root="${ROOT_DIR}data" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=4 \
-    training.lr=0.000025 \
-    training.min_lr=0.0000025 \
-    training.warmup_ratio=0.01 \
+    training.batch_size=32 \
+    training.lr=0.00005 \
+    training.min_lr=0.0000005 \
+    training.warmup_ratio=0.1 \
     training.precision='32' \
     training.scheduler=$SCHED \
     dataset@dm=tax_pose \
@@ -47,13 +47,12 @@ bash ./my_launch.sh $PLATFORM $GPU_INDEX \
     model.head.residual_on=True \
     model.head.pred_weight=True \
     rl.reward_model_path="logs/rl_reward/2026-05-24/10-51-49/checkpoints/reward_w.ckpt" \
-    rl.base_model_path="logs/train_taxpose/2026-05-28/13-35-59/checkpoints/last.ckpt" \
-    rl.group=16 \
+    rl.base_model_path="logs/train_taxpose/best_ckpt/vn_Wab_wo_TFhead_6400dz.ckpt" \
+    rl.group=8 \
     rl.update_base_every=5 \
-    rl.kl_coef=0.5 \
+    rl.kl_coef=0.02 \
     rl.clip_eps=0.2 \
     wandb.name=$WANDB_NAME \
     wandb.offline=True \
     debug=False \
-    resume_ckpt=$RESUME_CKPT \
     eval=False

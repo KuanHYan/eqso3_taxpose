@@ -108,6 +108,7 @@ class RLTrainingModule(PointCloudTrainingModule):
             opt.zero_grad()
             loss = self.compute_loss(samples, batch, log_values)
             loss.backward()
+            self.clip_gradients(opt, 1, 'norm')
             opt.step()
             total_grpo_loss += loss.detach()
 
@@ -168,9 +169,9 @@ class RLTrainingModule(PointCloudTrainingModule):
         # ---- GRPO 策略损失 (带裁剪) ----
         log_ratio = log_p - log_p_old
         # 安全范围，避免 exp 溢出
-        log_ratio_clamped = torch.clamp(log_ratio, min=-10, max=10)
+        # log_ratio_clamped = torch.clamp(log_ratio, min=-10, max=10)
         # 稳定的 ratio 和 clipped ratio
-        ratio = torch.exp(log_ratio_clamped)   # 重要性采样比率
+        ratio = torch.exp(log_ratio)   # 重要性采样比率
         surr1 = adv * ratio
         surr2 = adv * torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps)
         grpo_loss = -torch.mean(torch.min(surr1, surr2))
