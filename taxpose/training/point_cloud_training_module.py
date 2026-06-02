@@ -45,6 +45,10 @@ class PointCloudTrainingModule(pl.LightningModule):
     def on_train_epoch_start(self) -> None:
         print(f"Epoch: {self.current_epoch}, LR: {self._optimizer_.param_groups[0]['lr']:1.2e}")
         return super().on_train_epoch_start()
+    
+    def on_train_epoch_end(self) -> None:
+        torch.cuda.empty_cache()
+        return super().on_train_epoch_end()
 
     def on_after_backward(self) -> None:
         # 尝试获取self.writer，如果没有或者是None，则返回
@@ -179,16 +183,8 @@ class PointCloudTrainingModule(pl.LightningModule):
         #         # multiple of "trainer.check_val_every_n_epoch".
         #     },
         # }
-        # 1. 收集需要更新的参数（排除特征提取器）
-        if getattr(self.model, "emb_nn_action", None) is not None and \
-                isinstance(self.model.emb_nn_action, TransformerHead):
-            feat_params = set(self.model.emb_nn_action.parameters())
-            feat_params2 = set(self.model.emb_nn_anchor.parameters())
-            learned_params = [p for p in self.model.parameters() if p not in feat_params and p not in feat_params2]
-        else:
-            learned_params = self.parameters()
-
-        optimizer = torch.optim.AdamW(learned_params, lr=self.lr, weight_decay=1e-4)
+        learned_params = self.parameters()
+        optimizer = torch.optim.AdamW(learned_params, lr=self.lr, weight_decay=1e-2)
         self._optimizer_ = optimizer
         if self.warmup_steps <= 0:
             return optimizer

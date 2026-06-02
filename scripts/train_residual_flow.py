@@ -130,8 +130,8 @@ def main(cfg):
                 # This checkpoint will get saved to WandB. The Callback mechanism in lightning is poorly designed, so we have to put it last.
                 ModelCheckpoint(
                     dirpath=cfg.lightning.checkpoint_dir,
-                    filename="{epoch}-{step}-{train_loss:.2f}-weights-only",
-                    monitor="val_loss",
+                    filename="{epoch}-{step}-{point_loss:.2f}-weights-only",
+                    monitor="val_point_loss",
                     mode="min",
                     save_weights_only=True,
                 ),

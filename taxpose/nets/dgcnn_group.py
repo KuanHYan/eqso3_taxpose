@@ -41,7 +41,7 @@ def square_distance(src, dst):
 
 
 class DGCNN_Grouper(nn.Module):
-    def __init__(self, emb_dims=256, output_num=256, knn=16, norm=nn.GroupNorm):
+    def __init__(self, emb_dims=256, output_num=256, knn=16, dropout=0.1, norm='BN'):
         super().__init__()
         '''
         K has to be 16
@@ -49,24 +49,52 @@ class DGCNN_Grouper(nn.Module):
         self.k = knn
         self.emb_dims = emb_dims
         self.norm = norm
+        if norm == 'BN':
+            norm1 = nn.BatchNorm2d(64)
+            norm2 = nn.BatchNorm2d(128)
+            norm3 = nn.BatchNorm2d(128)
+            norm4 = nn.BatchNorm2d(256)
+        elif norm == 'GN':
+            norm1 = nn.GroupNorm(4, 64)
+            norm2 = nn.GroupNorm(4, 256)
+            norm3 = nn.GroupNorm(4, 1024)
+            norm4 = nn.GroupNorm(4, 256)
+        else:
+            raise ValueError('Invalid normalization: %s' % norm)
 
         self.input_trans = nn.Conv1d(3, 8, 1)
+        # self.layer1 = nn.Sequential(nn.Conv2d(16, 64, kernel_size=1, bias=False),
+        #                             norm1,
+        #                             nn.LeakyReLU(negative_slope=0.2))
 
+        # self.layer2 = nn.Sequential(nn.Conv2d(64*2, 128, kernel_size=1, bias=False),
+        #                             norm2,
+        #                             nn.LeakyReLU(negative_slope=0.2))
+
+        # self.layer3 = nn.Sequential(nn.Conv2d(128*2, 128, kernel_size=1, bias=False),
+        #                             norm3,
+        #                             nn.LeakyReLU(negative_slope=0.2))
+
+        # self.layer4 = nn.Sequential(nn.Conv2d(128*2, 256, kernel_size=1, bias=False),
+        #                             norm4,
+        #                             nn.LeakyReLU(negative_slope=0.2))
+        
         self.layer1 = nn.Sequential(nn.Conv2d(16, 64, kernel_size=1, bias=False),
-                                    nn.GroupNorm(4, 64),
+                                    norm1,
                                     nn.LeakyReLU(negative_slope=0.2))
 
-        self.layer2 = nn.Sequential(nn.Conv2d(64*2, 128, kernel_size=1, bias=False),
-                                    nn.GroupNorm(4, 128),
+        self.layer2 = nn.Sequential(nn.Conv2d(72*2, 128, kernel_size=1, bias=False),
+                                    norm2,
                                     nn.LeakyReLU(negative_slope=0.2))
 
-        self.layer3 = nn.Sequential(nn.Conv2d(128*2, 128, kernel_size=1, bias=False),
-                                    nn.GroupNorm(4, 128),
+        self.layer3 = nn.Sequential(nn.Conv2d(128*2, 256, kernel_size=1, bias=False),
+                                    norm3,
+                                    nn.LeakyReLU(negative_slope=0.2))
+        fpn_dim = 8 + 64 + 128 + 256
+        self.layer4 = nn.Sequential(nn.Conv1d(fpn_dim, emb_dims, kernel_size=1, bias=False),
+                                    norm4,
                                     nn.LeakyReLU(negative_slope=0.2))
 
-        self.layer4 = nn.Sequential(nn.Conv2d(128*2, emb_dims, kernel_size=1, bias=False),
-                                    nn.GroupNorm(4, emb_dims),
-                                    nn.LeakyReLU(negative_slope=0.2))
         self.output_num = output_num
         self.dropout = nn.Dropout(0.3)
 
@@ -98,14 +126,13 @@ class DGCNN_Grouper(nn.Module):
         num_points_k = x_k.size(2)
         num_points_q = x_q.size(2)
 
-        with torch.no_grad():
-            # _, idx = knn(coor_k, coor_q)  # bs k np
-            idx = knn_point(k, coor_k.transpose(-1, -2).contiguous(), coor_q.transpose(-1, -2).contiguous()) # B G M
-            idx = idx.transpose(-1, -2).contiguous()
-            assert idx.shape[1] == k
-            idx_base = torch.arange(0, batch_size, device=x_q.device).view(-1, 1, 1) * num_points_k
-            idx = idx + idx_base
-            idx = idx.view(-1)
+        # _, idx = knn(coor_k, coor_q)  # bs k np
+        idx = knn_point(k, coor_k.transpose(-1, -2).contiguous(), coor_q.transpose(-1, -2).contiguous()) # B G M
+        idx = idx.transpose(-1, -2).contiguous()
+        assert idx.shape[1] == k
+        idx_base = torch.arange(0, batch_size, device=x_q.device).view(-1, 1, 1) * num_points_k
+        idx = idx + idx_base
+        idx = idx.view(-1)
         num_dims = x_k.size(1)
         x_k = x_k.transpose(2, 1).contiguous()
         feature = x_k.view(batch_size * num_points_k, -1)[idx, :]
@@ -141,6 +168,34 @@ class DGCNN_Grouper(nn.Module):
         f = self.layer4(f)
         f = self.dropout(f.max(dim=-1, keepdim=False)[0])
         coor = coor_q
+
+        f1 = self.input_trans(x)
+
+        f = self.get_graph_feature(coor, f1, coor, f1, self.k)
+        f = self.dropout(self.layer1(f))
+        f2 = f.max(dim=-1, keepdim=False)[0]  # bs, 64, np//2, k -> bs, 64, np//2
+
+        f_ = torch.cat([f1, f2], dim=1)
+
+        coor_q, f_q = self.fps_downsample(coor, f_, self.output_num)
+        f = self.get_graph_feature(coor_q, f_q, coor, f_, self.k)
+        f = self.dropout(self.layer2(f))
+        f3 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 64, onp
+        coor = coor_q
+
+        f = self.get_graph_feature(coor, f3, coor, f3, self.k)
+        f = self.dropout(self.layer3(f))
+        f4 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 128, onp
+
+        # coor_q, f_q = self.fps_downsample(coor, f, self.output_num)
+        # f = self.get_graph_feature(coor_q, f_q, coor, f)
+        # f = self.layer4(f)
+        # f = self.dropout(f.max(dim=-1, keepdim=False)[0])
+        # coor = coor_q
+
+        f = torch.cat([f_q, f3, f4], dim=1)
+        f = self.conv5(f)
+
         return (f, coor)
     
 

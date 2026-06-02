@@ -400,7 +400,7 @@ def create_embedding_network(cfg) -> nn.Module:
     elif cfg.name == "raw_dgcnn":
         network: nn.Module = DGCNN4TaxPose(cfg.emb_dims, cfg.knn, cfg.dropout, cfg.norm)
     elif cfg.name == "dgcnn_group":
-        network = DGCNN_Grouper(cfg.emb_dims, output_num=cfg.output_num, knn=cfg.knn)
+        network = DGCNN_Grouper(cfg.emb_dims, cfg.output_num, cfg.knn, cfg.dropout, cfg.norm)
     elif cfg.name == "vae_dgcnn":
         network = DGCNN_VAE(
             cfg,
@@ -443,9 +443,11 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         self.emb_nn_action = create_embedding_network(encoder_cfg)
         self.emb_nn_anchor = create_embedding_network(encoder_cfg)
         emb_dims = encoder_cfg.emb_dims
-
-        self.center_feature = center_feature
         self.freeze_embnn = freeze_embnn
+        if freeze_embnn:
+            self.emb_nn_action.requires_grad_(False)
+            self.emb_nn_anchor.requires_grad_(False)
+        self.center_feature = center_feature
         self.return_attn = return_attn
         self.conditional = conditional
 
@@ -453,8 +455,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             emb_dims=emb_dims,
             n_blocks=n_blocks,
             dropout=dropout,
-            ff_dims=2048,
-            n_heads=8,
+            ff_dims=4*emb_dims,
+            n_heads=emb_dims//64,
             return_attn=self.return_attn,
             bidirectional=False
         )
@@ -462,8 +464,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             emb_dims=emb_dims,
             n_blocks=n_blocks,
             dropout=dropout,
-            ff_dims=2048,
-            n_heads=8,
+            ff_dims=4*emb_dims,
+            n_heads=emb_dims//64,
             return_attn=self.return_attn,
             bidirectional=False
         )
@@ -482,7 +484,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             )
         else:
             if not isinstance(head_cfg, HeadConfig):
-                norm: nn.Module = self.head_norm.get(head_cfg.norm, nn.LayerNorm)
+                norm = self.head_norm.get(head_cfg.norm, nn.LayerNorm)
                 head_cfg = OmegaConf.to_container(head_cfg, resolve=True)
                 head_cfg.pop("norm")
                 cfg = HeadConfig(
@@ -491,10 +493,10 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             else:
                 cfg = head_cfg
             self.head_action: nn.Module = create_head(
-                cfg, dgcnn=self.emb_nn_action
+                cfg, embedding_fun=self._action_embedding
             )
             self.head_anchor: nn.Module = create_head(
-                cfg, dgcnn=self.emb_nn_action
+                cfg, embedding_fun=self._anchor_embedding
             )
 
         if self.conditional:
@@ -518,6 +520,20 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         if pos_encoding:
             self.pos_encoder = ManualPointWiseGemoFea(True, emb_dims)
 
+    def _action_embedding(self, points):
+        self.emb_nn_action.eval()
+        points = points - points.mean(dim=1, keepdim=True)
+        embedding = self.emb_nn_action(points)
+        embedding = F.normalize(embedding, dim=1)
+        return embedding
+
+    def _anchor_embedding(self, points):
+        self.emb_nn_anchor.eval()
+        points = points - points.mean(dim=1, keepdim=True)
+        embedding = self.emb_nn_anchor(points)
+        embedding = F.normalize(embedding, dim=1)
+        return embedding
+
     def _embedding(self, *input):
         action_points = input[0].permute(0, 2, 1)[:, :3]  # B,3,num_points
         anchor_points = input[1].permute(0, 2, 1)[:, :3]
@@ -529,71 +545,69 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             anchor_points_dmean = anchor_points
         if self.freeze_embnn:
             self.emb_nn_action.eval()
-        act_down_sample, anch_down_sample = None, None
-        # with torch.set_grad_enabled(not self.freeze_embnn):
-        action_embedding = self.emb_nn_action(action_points_dmean)
-        if isinstance(action_embedding, tuple):
-            action_embedding, pts = action_embedding
-            act_down_sample = pts + action_points.mean(dim=2, keepdim=True)
-            act_down_sample = act_down_sample
-            # action_points = pts + action_points.mean(dim=2, keepdim=True)
-        anchor_embedding = self.emb_nn_anchor(anchor_points_dmean)
-        if isinstance(anchor_embedding, tuple):
-            anchor_embedding, pts = anchor_embedding
-            anch_down_sample = pts + anchor_points.mean(dim=2, keepdim=True)
-            anch_down_sample = anch_down_sample
-            # anchor_points = pts + anchor_points.mean(dim=2, keepdim=True)
-        action_embedding = F.normalize(action_embedding, dim=1)
-        anchor_embedding = F.normalize(anchor_embedding, dim=1)
-        if self.freeze_embnn and not isinstance(self.head_action, TransformerHead):
-            action_embedding = action_embedding.detach()
-            anchor_embedding = anchor_embedding.detach()
+        with torch.set_grad_enabled(not self.freeze_embnn):
+            act_down_sample, anch_down_sample = None, None
+            # with torch.set_grad_enabled(not self.freeze_embnn):
+            action_embedding = self.emb_nn_action(action_points_dmean)
+            if isinstance(action_embedding, tuple):
+                action_embedding, pts = action_embedding
+                act_down_sample = pts + action_points.mean(dim=2, keepdim=True)
+                act_down_sample = act_down_sample
+                # action_points = pts + action_points.mean(dim=2, keepdim=True)
+            anchor_embedding = self.emb_nn_anchor(anchor_points_dmean)
+            if isinstance(anchor_embedding, tuple):
+                anchor_embedding, pts = anchor_embedding
+                anch_down_sample = pts + anchor_points.mean(dim=2, keepdim=True)
+                anch_down_sample = anch_down_sample
+                # anchor_points = pts + anchor_points.mean(dim=2, keepdim=True)
+            action_embedding = F.normalize(action_embedding, dim=1)
+            anchor_embedding = F.normalize(anchor_embedding, dim=1)
+            del action_points_dmean, anchor_points_dmean
+            if self.feature_channels > 0:
+                # Add a symmetry label to the embeddings.
+                action_features = input[2].permute(0, 2, 1)
+                anchor_features = input[3].permute(0, 2, 1)
 
-        if self.feature_channels > 0:
-            # Add a symmetry label to the embeddings.
-            action_features = input[2].permute(0, 2, 1)
-            anchor_features = input[3].permute(0, 2, 1)
+                action_embedding_stack = torch.cat(
+                    [action_embedding, action_features], axis=1
+                )
+                anchor_embedding_stack = torch.cat(
+                    [anchor_embedding, anchor_features], axis=1
+                )
 
-            action_embedding_stack = torch.cat(
-                [action_embedding, action_features], axis=1
+                action_embedding = self.feature_channel_encoder_action(
+                    action_embedding_stack
+                )
+
+                anchor_embedding = self.feature_channel_encoder_anchor(
+                    anchor_embedding_stack
+                )
+
+            if self.conditional:
+                # We first project the one-hot encoding to the embedding space.
+                onehot = input[4].float()  # B x C
+                # Extend the onehot vector so that C becomes 5.
+                onehot = F.pad(onehot, (0, 5 - onehot.shape[-1]), "constant", 0)
+                onehot_emb = self.proj_onehot(onehot)
+
+                # Then, we do a linear addition to the embeddings. This should broadcast correctly.
+                action_embedding = action_embedding + onehot_emb[..., None]
+                anchor_embedding = anchor_embedding + onehot_emb[..., None]
+
+            # tilde_phi, phi are both B,512,N
+            # Get the new cross-attention embeddings.
+            action_pt_pos, anchor_pt_pos = None, None
+            if self.pos_encoding:
+                action_pt_pos = self.pos_encoder(action_points)  # B,C,N
+                anchor_pt_pos = self.pos_encoder(anchor_points)
+                action_embedding += F.normalize(action_pt_pos)
+                anchor_embedding += F.normalize(anchor_pt_pos)
+            return (
+                action_points, anchor_points,
+                action_embedding, anchor_embedding,
+                action_pt_pos, anchor_pt_pos,
+                act_down_sample, anch_down_sample,
             )
-            anchor_embedding_stack = torch.cat(
-                [anchor_embedding, anchor_features], axis=1
-            )
-
-            action_embedding = self.feature_channel_encoder_action(
-                action_embedding_stack
-            )
-
-            anchor_embedding = self.feature_channel_encoder_anchor(
-                anchor_embedding_stack
-            )
-
-        if self.conditional:
-            # We first project the one-hot encoding to the embedding space.
-            onehot = input[4].float()  # B x C
-            # Extend the onehot vector so that C becomes 5.
-            onehot = F.pad(onehot, (0, 5 - onehot.shape[-1]), "constant", 0)
-            onehot_emb = self.proj_onehot(onehot)
-
-            # Then, we do a linear addition to the embeddings. This should broadcast correctly.
-            action_embedding = action_embedding + onehot_emb[..., None]
-            anchor_embedding = anchor_embedding + onehot_emb[..., None]
-
-        # tilde_phi, phi are both B,512,N
-        # Get the new cross-attention embeddings.
-        action_pt_pos, anchor_pt_pos = None, None
-        if self.pos_encoding:
-            action_pt_pos = self.pos_encoder(action_points)  # B,C,N
-            anchor_pt_pos = self.pos_encoder(anchor_points)
-            action_embedding += F.normalize(action_pt_pos)
-            anchor_embedding += F.normalize(anchor_pt_pos)
-        return (
-            action_points, anchor_points,
-            action_embedding, anchor_embedding,
-            action_pt_pos, anchor_pt_pos,
-            act_down_sample, anch_down_sample,
-        )
 
     def _backbone(self, action_embedding, anchor_embedding, action_pt_pos, anchor_pt_pos):
         transformer_action_outputs = self.transformer_action(

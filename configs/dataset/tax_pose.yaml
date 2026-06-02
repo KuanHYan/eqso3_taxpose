@@ -6,7 +6,7 @@ defaults:
   - ./@val_dset.demo_dset.occlusion_cfg: _augmentations
 
 train_folder: train_data
-test_folder: test_data
+test_folder: val_data
 root: ${..data_root}
 dataset_type: "asm_pair"
 

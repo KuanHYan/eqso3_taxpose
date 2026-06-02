@@ -129,14 +129,14 @@ def main(cfg):
                 ModelCheckpoint(
                     dirpath=cfg.lightning.checkpoint_dir,
                     filename="{epoch}-{step}-{train_loss:.2f}-weights-only",
-                    monitor="val_loss",
+                    monitor="val_point_loss",
                     mode="min",
                     save_weights_only=True,
                 ),
             ]
             if not TESTING else []
         ),
-        gradient_clip_val=10,
+        accumulate_grad_batches=1,
         max_epochs=cfg.training.max_epochs,
         fast_dev_run=20 if TESTING else False,
         precision=cfg.training.precision,
@@ -155,6 +155,7 @@ def main(cfg):
         cfg.model.head,
         cfg.rl.reward_model_path,
         cfg.model.cycle,
+        center_feature=cfg.model.center_feature,
         dropout=cfg.model.dropout,
         pos_encoding=cfg.model.pos_encoding,
         group=cfg.rl.group,
@@ -195,17 +196,18 @@ def main(cfg):
 
     model.cuda()
     model.train()
-    print("loaded base model from:")
-    print(cfg.rl.base_model_path)
+    print(f"loaded base model from: {cfg.rl.base_model_path}")
     model.load_state_dict(
         torch.load(hydra.utils.to_absolute_path(cfg.rl.base_model_path))[
             "state_dict"
         ],
-        strict=False
     )
+    model.eval()
+    trainer.validate(model, dm, ckpt_path=resume_ckpt)
 
     if not cfg.eval:
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
+
     model.eval()
     trainer.validate(model, dm, ckpt_path=resume_ckpt)
 

@@ -193,22 +193,22 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
 
         del head_action_output
 
-        if self.cycle:
-            head_anchor_output = self.head_anchor.sample(
-                anchor_embedding_tf,
-                anchor_embedding,
-                anchor_points,
-                action_points,
-                anch_down_sample,
-                act_down_sample,
-                scores=anchor_attn,
-            )
-            pt: torch.distributions.Normal = head_anchor_output["distribution"]
-            flow_anch = flow_anch.permute(1, 0, 3, 2).contiguous()
-            logP_anch = pt.log_prob(flow_anch).sum((-1, -2)).permute(1, 0).contiguous()
-            del head_anchor_output
+        # if self.cycle:
+        #     head_anchor_output = self.head_anchor.sample(
+        #         anchor_embedding_tf,
+        #         anchor_embedding,
+        #         anchor_points,
+        #         action_points,
+        #         anch_down_sample,
+        #         act_down_sample,
+        #         scores=anchor_attn,
+        #     )
+        #     pt: torch.distributions.Normal = head_anchor_output["distribution"]
+        #     flow_anch = flow_anch.permute(1, 0, 3, 2).contiguous()
+        #     logP_anch = pt.log_prob(flow_anch).sum((-1, -2)).permute(1, 0).contiguous()
+        #     del head_anchor_output
 
-            logP += logP_anch
+        #     logP += logP_anch
 
         return logP
 

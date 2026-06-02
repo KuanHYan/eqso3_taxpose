@@ -20,10 +20,10 @@ bash "./launch.sh" local $GPU_INDEX \
     data_root="/home/yan/EmbodiedAgent/generate_data/pair_models/point_cloud" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=4 \
-    training.lr=0.0001 \
-    training.min_lr=0.000001 \
-    training.warmup_ratio=0.05 \
+    training.batch_size=6 \
+    training.lr=0.000025 \
+    training.min_lr=0.0000025 \
+    training.warmup_ratio=0.01 \
     training.precision='32' \
     training.scheduler=$SCHED \
     dataset@dm=tax_pose \
@@ -47,7 +47,7 @@ bash "./launch.sh" local $GPU_INDEX \
     rl.base_model_path="/home/yan/pose_estimation/taxpose/logs/train_taxpose/best_ckpt/vn_Wab_wo_TFhead_6400dz.ckpt" \
     rl.group=32 \
     rl.update_base_every=5 \
-    rl.kl_coef=1.0 \
+    rl.kl_coef=0.5 \
     rl.clip_eps=0.2 \
     wandb.name=$WANDB_NAME \
     wandb.entity=yankunh27-zhejiang-university \

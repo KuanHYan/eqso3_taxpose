@@ -260,7 +260,7 @@ class AttentionHead(nn.Module):
         self.project_k = nn.Conv1d(emb_dims, emb_dims, kernel_size=1, bias=False)
         self.scale = 0.1
         self.residual_on = residual_on
-        
+
     def _simple_attn(self, query, key):
         """Simple attention
         query: (B, C, N)
@@ -328,7 +328,7 @@ class AttentionHead(nn.Module):
 class TransformerHead(nn.Module):
     def __init__(
         self,
-        point_encoder=None,
+        point_encoder_fun=None,
         emb_dims=512,
         output_num=1024,
         pos_enc_dim=0,
@@ -348,25 +348,25 @@ class TransformerHead(nn.Module):
             assert pos_enc_dim > 0
         if self.pred_weight:
             self.proj_flow_weight = PointwiseMLP(
-                [emb_dims, 4*emb_dims, emb_dims], 1, norm
+                [emb_dims, emb_dims], 1, norm=None
             )
         self.score = nn.Conv1d(emb_dims + pos_enc_dim, 1, 1)
         self.head_tf = CustomTransformer(
             emb_dims=emb_dims,
-            n_blocks=2,
+            n_blocks=1,
             dropout=0.1,
             ff_dims=4*emb_dims,
-            n_heads=8,
+            n_heads=emb_dims//64,
             return_attn=True,
             bidirectional=False,
         )
-        if point_encoder is None:
+        if point_encoder_fun is None:
             from taxpose.nets.raw_dgcnn import DGCNN4TaxPose
-            self.point_encoder = DGCNN4TaxPose(
+            self.pt_encoder_fun = DGCNN4TaxPose(
                 emb_dims, 16, 0.1
-            )
+            ).forward
         else:
-            self.point_encoder = point_encoder
+            self.pt_encoder_fun = point_encoder_fun
         
         self.residual_on = residual_on
         self.project_corrs = project_corrs
@@ -374,15 +374,11 @@ class TransformerHead(nn.Module):
             self.project_pts = weight_norm(nn.Linear(output_num, output_num, bias=False))
             self.project_bias = weight_norm(nn.Linear(output_num, output_num, bias=False))
         elif project_corrs and project_corrs_mode == 'vn':
-            self.project_pts = MOELayer(emb_dims, output_num, 8, 2)
-            self.project_bias = MOELayer(emb_dims, output_num, 8, 2)
-
-    def pt_embedding(self, points):
-        self.point_encoder.eval()
-        points = points - points.mean(dim=1, keepdim=True)
-        embedding = self.point_encoder(points)
-        embedding = F.normalize(embedding, dim=1)
-        return embedding
+            self.project_pts = VN4Head(output_num)
+            self.project_bias = VN4Head(output_num)
+        elif project_corrs and project_corrs_mode == 'moe':
+            self.project_pts = MOELayer(emb_dims, output_num, 16, 1)
+            self.project_bias = MOELayer(emb_dims, output_num, 16, 1)
 
     def forward(self, *input, scores):
         action_embedding = input[0]  # B, C, N
@@ -404,13 +400,14 @@ class TransformerHead(nn.Module):
         corr_flow = corr_points - action_points
 
         # global point is to compute relative vector
-        # anch_pt_scores = self.score(action_embedding).transpose(2, 1).contiguous()  # B, C, N --> B, N, 1
-        # global_pt = anchor_points @ anch_pt_scores  # B, 3, 1
-        global_pt = anchor_points.mean(dim=2, keepdim=True)
+        pt_scores = self.score(action_embedding).transpose(2, 1).contiguous()  # B, C, N --> B, N, 1
+        pt_scores = F.softmax(pt_scores, dim=1)
+        global_pt = corr_points @ pt_scores  # B, 3, 1
+        # global_pt = anchor_points.mean(dim=2, keepdim=True)
         # vector from anchor point to global_pt
         global_pt = global_pt.expand_as(anchor_points)
 
-        corr_points_emb = self.pt_embedding(corr_points)
+        corr_points_emb = self.pt_encoder_fun(corr_points)
         scores_for_bias, emb_2 = self.head_tf.get_attn_scores(
             action_embedding_raw, corr_points_emb, seq_dim=2)
         scores_for_bias = scores_for_bias.transpose(2, 1).contiguous()  # B, N, M
@@ -434,7 +431,6 @@ class TransformerHead(nn.Module):
         if self.pred_weight:
             weight = self.proj_flow_weight(action_embedding)
             corr_flow_weight = torch.concat([flow, weight], dim=1)
-            del weight
         else:
             corr_flow_weight = flow
 
@@ -554,7 +550,9 @@ class ResidualMLPHead(nn.Module):
             self.project_pts = weight_norm(nn.Linear(output_num, output_num, bias=False))
         elif project_corrs and project_corrs_mode == 'vn':
             self.project_pts = VN4Head(output_num)
-        
+        elif project_corrs and project_corrs_mode == 'moe':
+            self.project_pts = MOELayer(emb_dims, output_num, 8, 2)
+
         self.residual_on = residual_on
         self.use_coarse_ps = use_coarse_ps
 
@@ -575,7 +573,7 @@ class ResidualMLPHead(nn.Module):
           scores: B,N,N
         """
         action_embedding = input[0]
-        anchor_embedding = input[1]  # It's wrong
+        action_embedding_raw = input[1]  # It's wrong
         action_points = input[2]
         anchor_points = input[3]
         if action_embedding.shape[2] != action_points.shape[2]:
@@ -603,7 +601,10 @@ class ResidualMLPHead(nn.Module):
         corr_points = torch.matmul(anchor_points, scores)
         if self.project_corrs:
             corr_points_center = corr_points.mean(dim=2, keepdim=True)
-            corr_points = self.project_pts(corr_points-corr_points_center)
+            inputs = corr_points-corr_points_center
+            if isinstance(self.project_pts, MOELayer):
+                inputs = (inputs, action_embedding)
+            corr_points = self.project_pts(inputs)
             corr_points += corr_points_center
         # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
         corr_flow = corr_points - action_points
@@ -911,7 +912,7 @@ class HeadConfig:
     project_corrs_mode: str = "mlp"  # "mlp" or "vn"
 
 
-def create_head(cfg: HeadConfig, dgcnn=None) -> nn.Module:
+def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
     if cfg.up_sample:
         return Coarse_Res_Head(
             cfg.emb_dims,
@@ -925,7 +926,7 @@ def create_head(cfg: HeadConfig, dgcnn=None) -> nn.Module:
         )
     if cfg.head_type == "transformer":
         return TransformerHead(
-            point_encoder=dgcnn,
+            point_encoder_fun=embedding_fun,
             emb_dims=cfg.emb_dims,
             output_num=cfg.output_num,
             pred_weight=cfg.pred_weight,

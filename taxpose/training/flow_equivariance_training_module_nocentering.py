@@ -90,6 +90,19 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         self.res_smooth_loss_weight = res_smooth_loss_weight
         self.res_smooth_start_epoch = start_res_flow_epoch
 
+    # def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+    #     # 仅加载 self.model 在 state_dict 有的参数
+    #     model_dict = self.state_dict()
+    #     pretrained_dict = {k: v for k, v in state_dict.items()
+    #                if k in model_dict and v.shape == model_dict[k].shape}
+    #     model_dict.update(pretrained_dict)
+    #     super().load_state_dict(
+    #         model_dict,
+    #         strict=strict,
+    #         assign=assign,
+    #     )
+    #     return
+
     def compute_loss(self, model_output, batch, log_values={}, loss_prefix=""):
         x_action = model_output["flow_action"]
         x_anchor = model_output["flow_anchor"]
@@ -414,12 +427,12 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         log_values[loss_prefix + "dense_loss"] = (
             self.direct_correspondence_loss_weight * dense_loss
         )
-        centered_pred_ps_A = pred_points_action.detach()
-        centered_pred_ps_A = centered_pred_ps_A - centered_pred_ps_A.mean(
-            dim=1, keepdim=True
-        )
-        centered_gt_ps = points_action_target.detach()
-        centered_gt_ps = centered_gt_ps - centered_gt_ps.mean(dim=1, keepdim=True)
+        # centered_pred_ps_A = pred_points_action.detach()
+        # centered_pred_ps_A = centered_pred_ps_A - centered_pred_ps_A.mean(
+        #     dim=1, keepdim=True
+        # )
+        # centered_gt_ps = points_action_target.detach()
+        # centered_gt_ps = centered_gt_ps - centered_gt_ps.mean(dim=1, keepdim=True)
         # log_values[loss_prefix + "only_Rotate_L2_pcs_distance"] = \
         #     mse_criterion(centered_pred_ps_A, centered_gt_ps)
         log_values[loss_prefix + "R0_mean"] = R0_mean

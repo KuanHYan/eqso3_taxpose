@@ -73,7 +73,7 @@ class PointNet(nn.Module):
 
 
 class PointwiseMLP(nn.Module):
-    def __init__(self, layer_dims, out_dim=1, norm=nn.BatchNorm1d):
+    def __init__(self, layer_dims, out_dim=1, norm=None):
         super(PointwiseMLP, self).__init__()
 
         convs = []
@@ -84,7 +84,10 @@ class PointwiseMLP(nn.Module):
                 nn.Conv1d(layer_dims[j], layer_dims[j + 1], kernel_size=1, bias=False)
             )
             # norms.append(nn.BatchNorm1d(layer_dims[j + 1]))
-            norms.append(norm(layer_dims[j + 1]))  # B, C, H, W 对应 B, L, S
+            if norm is None:
+                norms.append(nn.Identity())
+            else:
+                norms.append(norm(layer_dims[j + 1]))  # B, C, H, W 对应 B, L, S
             # norms.append(nn.InstanceNorm1d(layer_dims[j + 1]))
 
         self.convs = nn.ModuleList(convs)

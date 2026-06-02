@@ -369,8 +369,7 @@ cython_debug/
 .idea/
 
 /checkpoints/
-data/*
-logs/*
+/logs/
 mug_place/
 outputs/
 results/
@@ -395,5 +394,4 @@ Pointnet2_PyTorch
 
 *.zip
 
-/logs_cp
 /dataset

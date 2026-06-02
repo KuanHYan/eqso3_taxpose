@@ -2,7 +2,7 @@ root: ${..data_root}
 task: custom  # This is one of the 6 tasks - depends on the action class.
 action_class: 0  # This is the action class for the task.
 train_folder: train_data
-test_folder: test_data
+test_folder: val_data
 data_fn: valid_pcs_list.txt
 
 train_dset:

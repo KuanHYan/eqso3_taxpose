@@ -169,6 +169,32 @@ def compute_demo_symmetry_features(
     )
 
 
+def is_valid_file(filename: str, min_num_points=1024) -> bool:
+    """检查 npz 文件中的点云数据是否有效（无 inf/nan 且数值范围合理）"""
+    def bad_points(points_np):
+        if np.isinf(points_np).any() or np.isinf(points_np.mean(axis=0)).any():
+            return True
+        if np.abs(points_np).max() > 1e3:
+            return True
+        if np.isnan(points_np).any() or np.isnan(points_np.mean(axis=0)).any():
+            return True
+        if points_np.shape[0] < min_num_points:
+            return True
+        return False
+    try:
+        with np.load(filename, allow_pickle=True) as point_data:
+            points_action_np = point_data['action']
+            points_anchor_np = point_data['anchor']
+            # 1. 检查是否包含 inf 或 nan
+            if bad_points(points_action_np) or \
+                    bad_points(points_anchor_np):
+                return False
+            return True
+    except Exception as e:
+        print(f"Error loading or checking file {filename}: {e}")
+        return False
+
+
 class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
     def __init__(self, cfg: CustomPointCloudDatasetConfig):
         self.dataset_root = Path(cfg.dataset_root)
@@ -196,32 +222,6 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
         self.occlusion_cfg = cfg.occlusion_cfg
         self.occlusion_fn = occlusion_fn(cfg.occlusion_cfg)
 
-    def _is_valid_file(self, filename: str) -> bool:
-        """检查 npz 文件中的点云数据是否有效（无 inf/nan 且数值范围合理）"""
-        def bad_points(points_np):
-            if np.isinf(points_np).any() or np.isinf(points_np.mean(axis=0)).any():
-                return True
-            if np.abs(points_np).max() > 1e5:
-                return True
-            if np.isnan(points_np).any() or np.isnan(points_np.mean(axis=0)).any():
-                return True
-            if points_np.shape[0] < self.min_num_points:
-                return True
-            return False
-        try:
-            # 只加载 'action' 数组，不进行任何预处理
-            with np.load(filename, allow_pickle=True) as point_data:
-                points_action_np = point_data['action']
-                points_anchor_np = point_data['anchor']
-                # 1. 检查是否包含 inf 或 nan
-                if bad_points(points_action_np) or \
-                        bad_points(points_anchor_np):
-                    return False
-                return True
-        except Exception as e:
-            print(f"Error loading or checking file {filename}: {e}")
-            return False
-
     def get_existing_data(self):
         filenames = fnmatch.filter(os.listdir(self.dataset_root), f"**_asm_**.npz")
         filenames = [
@@ -232,7 +232,7 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
         for i in range(len(filenames)):
             filename = filenames[i]
             if not os.path.exists(filename) or \
-                    not self._is_valid_file(filename):
+                    not is_valid_file(filename):
                 bad_demo_names.append(filename)
                 continue
 
@@ -394,7 +394,6 @@ class CustomPretrainingPointCloudDataset(Dataset):
         self.pc_aug = cfg.pc_aug
         # 读取预处理后的样本列表
         self.data_list = self._read_data(cfg.data_fn.format(cfg.phase))
-        print(f"Dataset length (raw): {len(self.data_list)}")
 
         # 过滤/裁剪样本（兼容原有逻辑）
         if overfit > 0:
@@ -422,37 +421,12 @@ class CustomPretrainingPointCloudDataset(Dataset):
             data_list = [line.strip() for line in f.readlines()]
         
         # 过滤存在的文件
-        data_list = [p for p in data_list if osp.exists(p) \
-                     and self._is_valid_file(p, 'part_pcs')]
+        data_list = [p for p in data_list if osp.exists(p) and is_valid_file(p)]
         
         # 缓存列表
         with open(cache_path, 'wb') as f:
             pickle.dump(data_list, f, protocol=pickle.HIGHEST_PROTOCOL)
         return data_list
-
-    def _is_valid_file(self, filename: str, pc_key: str) -> bool:
-        """检查 npz 文件中的点云数据是否有效（无 inf/nan 且数值范围合理）"""
-        try:
-            # 只加载 'action' 数组，不进行任何预处理
-            with np.load(filename, allow_pickle=True) as point_data:
-                points_action_np = point_data[pc_key]
-                mean_ = points_action_np.mean(axis=0)
-                # 1. 检查是否包含 inf 或 nan
-                if np.isinf(points_action_np).any() or np.isinf(mean_).any():
-                    return False
-                
-                # 2. 检查数值范围是否过大（阈值 1e5 可根据实际数据调整）
-                #    避免后续计算 mean 时溢出（float32 范围约 3e38，但极大会导致精度问题）
-                if np.abs(points_action_np).max() > 1e5:
-                    return False
-                
-                if np.isnan(points_action_np).any() or np.isnan(mean_).any():
-                    return False
-
-                return True
-        except Exception as e:
-            print(f"Error loading or checking file {filename}: {e}")
-            return False
 
     @staticmethod
     def _recenter_pc(pc):
@@ -551,6 +525,7 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
             os.path.join(self.data_dir, fn) for fn in filenames
         ]
         original_length = len(filenames)
+
         bad_demo_names = []
         for i in range(len(filenames)):
             filename = filenames[i]
@@ -559,8 +534,7 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
             if not os.path.exists(filename):
                 bad_demo_names.append(filename)
                 continue
-            if not self._is_valid_file(filename, 'action') or \
-                not self._is_valid_file(filename, 'anchor'):
+            if not is_valid_file(filename):
                 bad_demo_names.append(filename)
                 continue
 
@@ -568,12 +542,13 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
         if len(bad_demo_names) > 0:
             print(f"Removed from {len(bad_demo_names)} bad demos")
             filenames = [name for name in filenames if name not in bad_demo_names]
-
+        
+        print(f"Total valid files: {len(filenames)} / {original_length}")
+        assert len(filenames) > 0, "No valid files found at %s" % self.data_dir
         if self.data_size > 0 and len(filenames) < self.data_size:
             idx = np.random.choice(len(filenames), self.data_size, replace=True)
             filenames = [filenames[i] for i in idx]
 
-        print(f"Total valid files: {len(filenames)} / {original_length}")
         return filenames
 
     @functools.lru_cache(maxsize=100)

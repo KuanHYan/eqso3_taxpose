@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from taxpose.nets.vn_dgcnn import VN4Head
+from torch.nn.utils.weight_norm import weight_norm
 
 
 class ExpertNetwork(nn.Module):
@@ -30,6 +31,15 @@ class VN4ExpertNetwork(nn.Module):
 		x = x.squeeze(0)
 		return x
 
+class MLPExpertNetwork(nn.Module):
+	def __init__(self, pts_num):
+		super().__init__()
+		self.net = nn.Linear(pts_num, pts_num, bias=False)
+	def forward(self, x):
+		x = x.unsqueeze(0)
+		x = self.net(x)
+		x = x.squeeze(0)
+		return x
 
 class Router(nn.Module):
 	def __init__(self, hidden_size, expert_num, top_k):
@@ -51,7 +61,8 @@ class Router(nn.Module):
 class MOELayer(nn.Module):
     def __init__(self, fea_dim, point_num, expert_num, top_k):
         super().__init__()
-        self.experts = nn.ModuleList([VN4ExpertNetwork(point_num) for _ in range(expert_num)])
+        self.experts = nn.ModuleList([MLPExpertNetwork(point_num) for _ in range(expert_num)])
+        self.share_expert = MLPExpertNetwork(point_num)
         self.router = Router(fea_dim, expert_num, top_k) # 路由器
         self.fea_pool = nn.AdaptiveAvgPool1d(1)  # d, N_pts --> d, 1
         self.top_k = top_k
@@ -66,7 +77,7 @@ class MOELayer(nn.Module):
         pool_fea = self.fea_pool(fea) # 展平：(B, hidden_size)
         # 路由器为每个token选择top-k个专家及对应权重
         topk_weight, topk_idx = self.router(pool_fea) # 形状均为 (B, top_k)
-        output = torch.zeros_like(x)
+        output = self.share_expert(x)
         # 对每个token，累加其top-k专家的加权输出
         for i in range(batch_size):
             for j in range(self.top_k):
