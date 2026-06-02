@@ -50,6 +50,8 @@ class MultiviewDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             num_workers=num_workers,
             persistent_workers=num_workers > 0,
+            shuffle=True,
+            pin_memory=True,
         )
 
     def val_dataloader(self):

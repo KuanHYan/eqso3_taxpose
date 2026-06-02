@@ -5,4 +5,4 @@ name: taxpose
 
 dropout: 0.0
 pos_encoding: False
-n_blocks: 2
+n_blocks: 1

@@ -200,7 +200,7 @@ class DGCNN(nn.Module):
         batch_size = x.size(0)
         x = get_graph_feature(x, k=self.k)
         x = self.conv1(x)
-        x1 = x.max(dim=-1, keepdim=False)[0]
+        x1 = x.max(dim=-1, keepdim=False)[0]  # b, c, n
 
         x = get_graph_feature(x1, k=self.k)
         x = self.conv2(x)

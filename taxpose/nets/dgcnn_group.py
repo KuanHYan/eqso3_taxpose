@@ -18,6 +18,7 @@ def knn_point(nsample, xyz, new_xyz):
     _, group_idx = torch.topk(sqrdists, nsample, dim = -1, largest=False, sorted=False)
     return group_idx
 
+
 def square_distance(src, dst):
     """
     Calculate Euclid distance between each two points.
@@ -96,7 +97,6 @@ class DGCNN_Grouper(nn.Module):
                                     nn.LeakyReLU(negative_slope=0.2))
 
         self.output_num = output_num
-        self.dropout = nn.Dropout(0.3)
 
     @staticmethod
     def fps_downsample(coor, x, num_group):
@@ -117,11 +117,10 @@ class DGCNN_Grouper(nn.Module):
         return new_coor, new_x
 
     @staticmethod
-    def get_graph_feature(coor_q, x_q, coor_k, x_k):
+    def get_graph_feature(coor_q, x_q, coor_k, x_k, k=16):
 
         # coor: bs, 3, np, x: bs, c, np
 
-        k = 16
         batch_size = x_k.size(0)
         num_points_k = x_k.size(2)
         num_points_q = x_q.size(2)
@@ -144,24 +143,24 @@ class DGCNN_Grouper(nn.Module):
     def forward(self, x):
 
         # x: bs, 3, np
-
-        # bs 3 N(128)   bs C(224)128 N(128)
         coor = x
-        f = self.input_trans(x)
+        f1 = self.input_trans(x)
 
-        f = self.get_graph_feature(coor, f, coor, f)
-        f = self.layer1(f)
-        f = f.max(dim=-1, keepdim=False)[0]
+        f = self.get_graph_feature(coor, f1, coor, f1, self.k)
+        f = self.dropout(self.layer1(f))
+        f2 = f.max(dim=-1, keepdim=False)[0]  # bs, 64, np//2, k -> bs, 64, np//2
 
-        coor_q, f_q = self.fps_downsample(coor, f, 2*self.output_num)
-        f = self.get_graph_feature(coor_q, f_q, coor, f)
-        f = self.layer2(f)
-        f = f.max(dim=-1, keepdim=False)[0]
+        f_ = torch.cat([f1, f2], dim=1)
+
+        coor_q, f_q = self.fps_downsample(coor, f_, self.output_num)
+        f = self.get_graph_feature(coor_q, f_q, coor, f_, self.k)
+        f = self.dropout(self.layer2(f))
+        f3 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 64, onp
         coor = coor_q
 
-        f = self.get_graph_feature(coor, f, coor, f)
-        f = self.layer3(f)
-        f = f.max(dim=-1, keepdim=False)[0]
+        f = self.get_graph_feature(coor, f3, coor, f3, self.k)
+        f = self.dropout(self.layer3(f))
+        f4 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 128, onp
 
         coor_q, f_q = self.fps_downsample(coor, f, self.output_num)
         f = self.get_graph_feature(coor_q, f_q, coor, f)
@@ -195,13 +194,11 @@ class DGCNN_Grouper(nn.Module):
 
         f = torch.cat([f_q, f3, f4], dim=1)
         f = self.conv5(f)
-
         return (f, coor)
-    
 
 if __name__ == '__main__':
-    x = torch.rand(2, 3, 2048).cuda()
-    grouper = DGCNN_Grouper().cuda()
+    x = torch.rand(2, 3, 1024).cuda()
+    grouper = DGCNN_Grouper(emb_dims=512, output_num=512).cuda()
     coor, f = grouper(x)
     print(coor.shape)
     print(f.shape)

@@ -88,7 +88,9 @@ def main(cfg):
         resume_run_id = None
 
     print("Resume run id:", resume_run_id)
-    pl.seed_everything(cfg.seed)
+    device_count = min(torch.cuda.device_count(), cfg.training.num_gpus)
+    if device_count == 1:
+        pl.seed_everything(cfg.seed)
     logger = WandbLogger(
         name=cfg.wandb.name,
         entity=cfg.wandb.entity,
@@ -104,10 +106,13 @@ def main(cfg):
     )
     # logger.log_hyperparams(cfg)
     # logger.log_hyperparams({"working_dir": os.getcwd()})
+    
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
         accelerator="auto",
-        devices="auto",
+        strategy="auto",
+        devices=device_count,
+        sync_batchnorm=(device_count > 1),
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         # reload_dataloaders_every_n_epochs=1,
@@ -149,7 +154,7 @@ def main(cfg):
     )
 
     dm.setup()
-
+    cfg.rl.reward_model_path = hydra.utils.to_absolute_path(cfg.rl.reward_model_path)
     network = PolicyModel(
         cfg.model.encoder,
         cfg.model.head,
@@ -191,21 +196,24 @@ def main(cfg):
         kl_coef=cfg.rl.kl_coef,
         clip_eps=cfg.rl.clip_eps,
         update_base_every=cfg.rl.update_base_every,
+        grpo_iter=cfg.rl.grpo_iter,
+        optimization_mode='manual',
         tensorboard_writer=tensorboard_writer
     )
 
     model.cuda()
     model.train()
-    print(f"loaded base model from: {cfg.rl.base_model_path}")
+    base_model_path = hydra.utils.to_absolute_path(cfg.rl.base_model_path)
+    print(f"loaded base model from: {base_model_path}")
     model.load_state_dict(
-        torch.load(hydra.utils.to_absolute_path(cfg.rl.base_model_path))[
+        torch.load(base_model_path)[
             "state_dict"
         ],
     )
-    model.eval()
-    trainer.validate(model, dm, ckpt_path=resume_ckpt)
-
     if not cfg.eval:
+        model.eval()
+        trainer.validate(model, dm, ckpt_path=resume_ckpt)
+        model.train()
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
 
     model.eval()
@@ -219,4 +227,5 @@ if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
     torch.cuda.empty_cache()
     torch.multiprocessing.set_sharing_strategy("file_system")
+    torch.multiprocessing.set_start_method("spawn")
     main()

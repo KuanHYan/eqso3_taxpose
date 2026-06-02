@@ -97,9 +97,10 @@ class PointCloudTrainingModule(pl.LightningModule):
             self._ori_losses = loss
             loss = sum(loss)
         for key, val in log_values.items():
-            self.log(key, val, logger=True)
+            self.log(key, val, logger=True, sync_dist=True)
 
-        if (self.global_step % self.image_log_period) == 0:
+        if (self.global_step % self.image_log_period) == 0 and \
+                self.trainer.is_global_zero:
             results_images = self.visualize_results(batch, batch_idx)
 
             for key, val in results_images.items():
@@ -115,7 +116,7 @@ class PointCloudTrainingModule(pl.LightningModule):
                         key,
                         images=[val],  # self.global_step
                     )
-        self.log("train_loss", loss, prog_bar=True, logger=True)
+        self.log("train_loss", loss, prog_bar=True, logger=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -124,9 +125,10 @@ class PointCloudTrainingModule(pl.LightningModule):
         if isinstance(loss, tuple):
             loss = sum(loss)
         for key, val in log_values.items():
-            self.log("val_" + key, val, logger=True)
+            self.log("val_" + key, val, logger=True, sync_dist=True)
 
-        if (self.global_val_step % self.image_log_period) == 0:
+        if (self.global_val_step % self.image_log_period) == 0 and \
+                self.trainer.is_global_zero:
             results_images = self.visualize_results(batch, batch_idx)
 
             for key, val in results_images.items():
@@ -144,7 +146,7 @@ class PointCloudTrainingModule(pl.LightningModule):
                     )
         self.global_val_step += 1
 
-        self.log("val_loss", loss, logger=True)
+        self.log("val_loss", loss, logger=True, sync_dist=True)
         return loss
 
     def test_step(self, batch, batch_idx):
@@ -153,9 +155,10 @@ class PointCloudTrainingModule(pl.LightningModule):
         if isinstance(loss, tuple):
             loss = sum(loss)
         for key, val in log_values.items():
-            self.log(key, val, logger=True)
+            self.log(key, val, logger=True, sync_dist=True)
 
-        if (self.global_step % self.image_log_period) == 0:
+        if (self.global_step % self.image_log_period) == 0 and \
+                self.trainer.is_global_zero:
             results_images = self.visualize_results(batch, batch_idx)
 
             for key, val in results_images.items():
@@ -168,7 +171,7 @@ class PointCloudTrainingModule(pl.LightningModule):
                 elif self.logger is not None:
                     self.logger.log_image("test_" + key, val)
 
-        self.log("test_loss", loss, logger=True)
+        self.log("test_loss", loss, logger=True, sync_dist=True)
         return loss
 
     def configure_optimizers(self):

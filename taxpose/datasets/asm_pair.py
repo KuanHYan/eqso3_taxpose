@@ -219,8 +219,8 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
             min_num = min(len(self.filenames), self.num_demo)
             self.filenames = self.filenames[: min_num]
 
-        self.occlusion_cfg = cfg.occlusion_cfg
-        self.occlusion_fn = occlusion_fn(cfg.occlusion_cfg)
+        self.occlusion_cfg = None
+        # self.occlusion_fn = occlusion_fn(cfg.occlusion_cfg)
 
     def get_existing_data(self):
         filenames = fnmatch.filter(os.listdir(self.dataset_root), f"**_asm_**.npz")
@@ -427,6 +427,30 @@ class CustomPretrainingPointCloudDataset(Dataset):
         with open(cache_path, 'wb') as f:
             pickle.dump(data_list, f, protocol=pickle.HIGHEST_PROTOCOL)
         return data_list
+
+    # def _is_valid_file(self, filename: str, pc_key: str) -> bool:
+    #     """检查 npz 文件中的点云数据是否有效（无 inf/nan 且数值范围合理）"""
+    #     try:
+    #         # 只加载 'action' 数组，不进行任何预处理
+    #         with np.load(filename, allow_pickle=True) as point_data:
+    #             points_action_np = point_data[pc_key]
+    #             mean_ = points_action_np.mean(axis=0)
+    #             # 1. 检查是否包含 inf 或 nan
+    #             if np.isinf(points_action_np).any() or np.isinf(mean_).any():
+    #                 return False
+                
+    #             # 2. 检查数值范围是否过大（阈值 1e5 可根据实际数据调整）
+    #             #    避免后续计算 mean 时溢出（float32 范围约 3e38，但极大会导致精度问题）
+    #             if np.abs(points_action_np).max() > 1e5:
+    #                 return False
+                
+    #             if np.isnan(points_action_np).any() or np.isnan(mean_).any():
+    #                 return False
+
+    #             return True
+    #     except Exception as e:
+    #         print(f"Error loading or checking file {filename}: {e}")
+    #         return False
 
     @staticmethod
     def _recenter_pc(pc):

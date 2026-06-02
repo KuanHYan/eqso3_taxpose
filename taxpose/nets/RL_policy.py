@@ -61,7 +61,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
         mean_flow = head_res["full_flow"]
         bz, _, n = mean_flow.shape
         corr_flow = pt.sample((group,)).permute(1, 0, 3, 2)
-        flow_weight = mean_flow[:, None, -1, :].expand(-1, group, -1).permute(0, 1, 2)
+        flow_weight = mean_flow[:, None, -1, :].expand(-1, group, -1)
 
         # residual_flow_action = head_res["residual_flow"].permute(0, 2, 1)
         # corr_flow_action = head_res["corr_flow"].permute(0, 2, 1)

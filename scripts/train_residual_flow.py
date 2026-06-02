@@ -1,5 +1,4 @@
 import os
-
 import hydra
 import omegaconf
 import pytorch_lightning as pl
@@ -8,7 +7,7 @@ import wandb
 from omegaconf import OmegaConf
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
-
+from pytorch_lightning.strategies import DDPStrategy
 from taxpose.datasets.point_cloud_data_module import MultiviewDataModule
 from taxpose.nets.transformer_flow import create_network
 from taxpose.training.flow_equivariance_training_module_nocentering import (
@@ -90,7 +89,9 @@ def main(cfg):
         resume_run_id = None
 
     print("Resume run id:", resume_run_id)
-    pl.seed_everything(cfg.seed)
+    device_count = min(torch.cuda.device_count(), cfg.training.num_gpus)
+    if device_count == 1:
+        pl.seed_everything(cfg.seed)
     logger = WandbLogger(
         name=cfg.wandb.name,
         entity=cfg.wandb.entity,
@@ -108,8 +109,10 @@ def main(cfg):
     # logger.log_hyperparams({"working_dir": os.getcwd()})
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
-        accelerator="gpu",
-        devices=[0],
+        accelerator="auto",
+        strategy=DDPStrategy(find_unused_parameters=True),
+        devices=device_count,
+        sync_batchnorm=(device_count > 1),
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         # reload_dataloaders_every_n_epochs=1,
@@ -242,6 +245,9 @@ def main(cfg):
                     )
                 )
     if not cfg.eval:
+        model.eval()
+        trainer.validate(model, dm, ckpt_path=resume_ckpt)
+        model.train()
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
     model.eval()
     with torch.no_grad():
@@ -253,7 +259,8 @@ def main(cfg):
 
 if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
     torch.cuda.empty_cache()
     torch.multiprocessing.set_sharing_strategy("file_system")
+    # torch.multiprocessing.set_start_method("spawn")
     main()

@@ -36,6 +36,7 @@ rl:
   update_base_every: 5
   kl_coef: 1.0
   clip_eps: 0.2
+  grpo_iter: 10
 
 training:
   batch_size: 8
@@ -76,6 +77,7 @@ training:
   precision: 32
 
   optimization_mode: "auto"
+  num_gpus: 1
 
 seed: 0
 resume_ckpt: null
