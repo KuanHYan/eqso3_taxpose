@@ -45,7 +45,7 @@ class CustomTransformer(nn.Module):
         self.return_attn = return_attn
         self.bidirectional = bidirectional
         c = copy.deepcopy
-        attn = MultiHeadedAttention(
+        attn = MHAttention(
             self.n_heads,
             self.emb_dims,
             dropout=self.dropout,

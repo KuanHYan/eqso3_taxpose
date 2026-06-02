@@ -108,6 +108,7 @@ class RLTrainingModule(PointCloudTrainingModule):
             opt.zero_grad()
             loss = self.compute_loss(samples, batch, log_values)
             loss.backward()
+            self.clip_gradients(opt, 1.0, 'norm')
             opt.step()
             total_grpo_loss += loss.detach()
 
@@ -116,9 +117,10 @@ class RLTrainingModule(PointCloudTrainingModule):
             sch.step()
 
         for key, val in log_values.items():
-            self.log(key, val, logger=True)
+            self.log(key, val, logger=True, sync_dist=True)
 
-        if (self.global_step % self.image_log_period) == 0:
+        if (self.global_step % self.image_log_period) == 0 and \
+                self.trainer.is_global_zero:
             results_images = self.visualize_results(batch, batch_idx)
 
             for key, val in results_images.items():
@@ -134,7 +136,7 @@ class RLTrainingModule(PointCloudTrainingModule):
                         key,
                         images=[val],  # self.global_step
                     )
-        self.log("mean rewrad", log_values['reward_mean'], prog_bar=True, logger=True)
+        self.log("mean rewrad", log_values['reward_mean'], prog_bar=True, logger=True, sync_dist=True)
         # avg_loss = total_grpo_loss / self.grpo_iter
         # self.log("train_loss", avg_loss)
 
@@ -168,9 +170,9 @@ class RLTrainingModule(PointCloudTrainingModule):
         # ---- GRPO 策略损失 (带裁剪) ----
         log_ratio = log_p - log_p_old
         # 安全范围，避免 exp 溢出
-        log_ratio_clamped = torch.clamp(log_ratio, min=-10, max=10)
+        # log_ratio_clamped = torch.clamp(log_ratio, min=-10, max=10)
         # 稳定的 ratio 和 clipped ratio
-        ratio = torch.exp(log_ratio_clamped)   # 重要性采样比率
+        ratio = torch.exp(log_ratio)   # 重要性采样比率
         surr1 = adv * ratio
         surr2 = adv * torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps)
         grpo_loss = -torch.mean(torch.min(surr1, surr2))

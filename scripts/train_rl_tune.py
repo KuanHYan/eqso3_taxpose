@@ -88,7 +88,9 @@ def main(cfg):
         resume_run_id = None
 
     print("Resume run id:", resume_run_id)
-    pl.seed_everything(cfg.seed)
+    device_count = min(torch.cuda.device_count(), cfg.training.num_gpus)
+    if device_count == 1:
+        pl.seed_everything(cfg.seed)
     logger = WandbLogger(
         name=cfg.wandb.name,
         entity=cfg.wandb.entity,
@@ -104,10 +106,13 @@ def main(cfg):
     )
     # logger.log_hyperparams(cfg)
     # logger.log_hyperparams({"working_dir": os.getcwd()})
+    
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
         accelerator="auto",
-        devices="auto",
+        strategy="auto",
+        devices=device_count,
+        sync_batchnorm=(device_count > 1),
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         # reload_dataloaders_every_n_epochs=1,
@@ -208,6 +213,7 @@ def main(cfg):
     if not cfg.eval:
         model.eval()
         trainer.validate(model, dm, ckpt_path=resume_ckpt)
+        model.train()
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
 
     model.eval()
@@ -221,4 +227,5 @@ if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
     torch.cuda.empty_cache()
     torch.multiprocessing.set_sharing_strategy("file_system")
+    torch.multiprocessing.set_start_method("spawn")
     main()

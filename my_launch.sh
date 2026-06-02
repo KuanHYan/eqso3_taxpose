@@ -30,16 +30,34 @@ if [ $PLATFORM == "local-docker" ]; then
         log_dir=/root/pairpose/logs \
         data_root=/root/pairpose/data \
 
-elif [ $PLATFORM == "cloud-docker" ]; then
-    echo "Running with cloud docker"
+elif [ $PLATFORM == "cloud-featurize" ]; then
+    echo "Running with cloud-featurize docker"
     docker run -it \
         --network host \
         --gpus all \
+        --shm-size=48g \
         -e WANDB_BASE_URL=http://localhost:8080 \
         -e WANDB_API_KEY=local-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 \
-        -v /root/data/yan/pose_dataset/pair_models:/root/pairpose/data \
-        -v /root/data/yan/pose_ck_dir/taxpose/logs:/root/pairpose/logs \
-        pair-pose:v0.1 \
+        -v /home/featurize/data/data/yan/pose_dataset/pair_models:/root/pairpose/data \
+        -v /home/featurize/work/taxpose/logs:/root/pairpose/logs \
+        -v /home/featurize/work/eqso3_taxpose:/root/pairpose \
+        crpi-6he4t9ttrgr1us6h.cn-hangzhou.personal.cr.aliyuncs.com/cross-pose/docker4train:v0.2 \
+        $COMMAND \
+        log_dir=/root/pairpose/logs \
+        data_root=/root/pairpose/data \
+
+elif [ $PLATFORM == "cloud-gongji" ]; then
+    echo "Running with cloud-gongji docker"
+    docker run -it \
+        --network host \
+        --gpus all \
+        --shm-size=48g \
+        -e WANDB_BASE_URL=http://localhost:8080 \
+        -e WANDB_API_KEY=local-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 \
+        -v /home/featurize/data/data/yan/pose_dataset/pair_models:/root/pairpose/data \
+        -v /home/featurize/work/taxpose/logs:/root/pairpose/logs \
+        -v /home/featurize/work/eqso3_taxpose:/root/pairpose \
+        crpi-6he4t9ttrgr1us6h.cn-hangzhou.personal.cr.aliyuncs.com/cross-pose/docker4train:v0.2 \
         $COMMAND \
         log_dir=/root/pairpose/logs \
         data_root=/root/pairpose/data \

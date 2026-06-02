@@ -80,8 +80,14 @@ RUN touch taxpose/py.typed
 RUN pip install --no-cache-dir -e ".[develop,rlbench]"
 
 # Make directories for mounting.
-RUN mkdir $CODING_ROOT/data
+# RUN mkdir $CODING_ROOT/data
+
+# ## It's for gongji
+# COPY data data
+
 RUN mkdir $CODING_ROOT/logs
+
+COPY pretraining_models $CODING_ROOT/logs/pretraining_models
 
 # COPY ./docker/entrypoint.sh /opt/pairpose/entrypoint.sh
 # ENTRYPOINT ["/opt/pairpose/entrypoint.sh"]

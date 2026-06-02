@@ -101,7 +101,7 @@ venv/
 artifacts/
 bensnewlogs/
 checkpoints/
-data/
+
 logs/
 outputs/
 results/
