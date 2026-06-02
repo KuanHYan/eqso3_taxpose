@@ -1,0 +1,102 @@
+[project]
+name = "taxpose"
+version = "0.1.0"
+description = "TAX-Pose: Task-Specific Cross-Pose Estimation for Robot Manipulation"
+readme = "README.md"
+requires-python = ">=3.6, <3.11" # ndf_robot requires < 3.10 :(
+license = { file = "LICENSE.txt" }
+authors = [
+  { email = "chuerp@andrew.cmu.edu", name = "Chuer Pan" },
+  { email = "bokorn@andrew.cmu.edu", name = "Brian Okorn" },
+  { email = "haolunz@andrew.cmu.edu", name = "Harry Zhang" },
+  { email = "baeisner@andrew.cmu.edu", name = "Ben Eisner" },
+  { email = "dheld@andrew.cmu.edu", name = "David Held" },
+]
+dependencies = [
+  "dgl==2.1.0",
+  "dglgo==0.0.2",
+  "h5py",
+  "hydra-core",
+  "imageio",
+  "jupyterlab",
+  "open3d==0.19.0",
+  "opencv-python==4.5.4.60",
+  "wandb==0.25.1",
+]
+
+[build-system]
+requires = ["setuptools >= 62.3.2", "setuptools-scm", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project.optional-dependencies]
+develop = [
+  "autoflake == 2.1.1",
+  "black == 23.3.0",
+  "isort == 5.12.0",
+  "mypy == 1.10.0",
+  "pre-commit == 3.3.1",
+  "pylint == 2.17.4",
+  "pytest < 8",          # Currently has an issue with pytest-lazy-fixture.
+  "pytest-cov",
+  "pytest-xdist",
+  "types-tqdm",
+]
+build_docs = ["mkdocs-material", "mkdocstrings[python]"]
+
+# This is required to allow us to have notebooks/ at the top level.
+[tool.setuptools]
+packages = ["taxpose", "third_party"]
+
+[tool.setuptools.package-data]
+taxpose = ["py.typed"]
+
+[tool.black]
+exclude = "third_party/*"
+
+[tool.isort]
+known_third_party = ["wandb"]
+profile = "black"
+
+[tool.mypy]
+python_version = 3.9
+warn_return_any = true
+warn_unused_configs = true
+mypy_path = "src"
+namespace_packages = true
+explicit_package_bases = true
+
+# Uncomment this when you have imports for mypy to ignore.
+[[tool.mypy.overrides]]
+module = [
+  "chamferdist.*",
+  "cv2.*",
+  "display.*",
+  "dgl.*",
+  "h5py.*",
+  "joblib.*",
+  "matplotlib.*",
+  "ompl.*",
+  "open3d.*",
+  "pandas.*",
+  "plotly.*",
+  "pybullet.*",
+  "pytorch3d.*",
+  "scipy.*",
+  "torch_cluster.*",
+  "torch_geometric.*",
+  "torchvision.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "--ignore=third_party/ -m 'not ndf_training and not pretraining and not ablations and not rlbench_training' -n 16"
+testpaths = "tests"
+
+[tool.pylint]
+disable = [
+  "C0103", # Invalid name.
+  "C0114", # Missing module docstring.
+  "C0115", # Missing class docstring.
+  "C0116", # Missing function or method docstring.
+]
+known-third-party = ["wandb"]
