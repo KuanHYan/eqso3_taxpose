@@ -106,14 +106,20 @@ logs/
 outputs/
 results/
 rollouts/
-trained_models/
+trained_models/ndf
 wandb/
 wandb_artifacts/
 
-third_party/ndf_robot/src/ndf_robot/data/
-third_party/ndf_robot/src/ndf_robot/eval_data/
-third_party/ndf_robot/src/ndf_robot/descriptions/
+# third_party/ndf_robot/src/ndf_robot/data/
+# third_party/ndf_robot/src/ndf_robot/eval_data/
+# third_party/ndf_robot/src/ndf_robot/descriptions/
+third_party/ndf_robot
+third_party/airbot
+third_party/ravens
 
-*/*.zip
+*.zip
 pretrain_embedding/
 notebooks/
+*.tar.gz
+Dockerfile_raw
+pytorch3d

@@ -26,7 +26,7 @@ bash ./my_launch.sh $PLATFORM $GPU_INDEX \
     training.min_lr=0.000002 \
     training.warmup_ratio=0.1 \
     training.precision='32' \
-    training.num_gpus=2 \
+    training.num_gpus=1 \
     training.scheduler=$SCHED \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=1024 \

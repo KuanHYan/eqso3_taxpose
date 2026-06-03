@@ -1030,7 +1030,7 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             conditional=r_cfg.conditional,
             dropout=r_cfg.dropout,
             pos_encoding=cfg.pos_encoding,
-            n_blocks=cfg.n_blocks
+            n_blocks=int(cfg.n_blocks)
         )
     elif cfg.model_type == "residual_flow_diff_emb_transformer_multi_block":
         r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)

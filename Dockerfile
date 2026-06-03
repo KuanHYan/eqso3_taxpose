@@ -72,6 +72,7 @@ RUN python setup.py install
 WORKDIR $CODING_ROOT
 # Copy in the code.
 COPY . .
+
 # Copy in pyproject.toml.
 COPY pyproject.toml .
 RUN touch taxpose/py.typed
@@ -83,7 +84,6 @@ RUN pip install --no-cache-dir -e ".[develop,rlbench]"
 # RUN mkdir $CODING_ROOT/data
 
 # ## It's for gongji
-COPY tmp data
 
 RUN mkdir $CODING_ROOT/logs
 
@@ -91,4 +91,5 @@ RUN mkdir $CODING_ROOT/logs
 
 # COPY ./docker/entrypoint.sh /opt/pairpose/entrypoint.sh
 # ENTRYPOINT ["/opt/pairpose/entrypoint.sh"]
-CMD ["bash", "train_base_model_on_gongji.sh", "2", "gongji_training"]
+# CMD bash train_base_model_on_gongji.sh -1 gongji_training 16 0.0001 0.00001 1 && sleep infinity
+CMD ["bash"]

@@ -12,6 +12,9 @@ cd "$ROOT_DIR" || exit 1
 ENCODEING=False
 
 bash "./my_launch.sh" cloud-featurize $GPU_INDEX \
+    wandb login --relogin --host=http://localhost:8080 \
+    local-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 \
+    && \
     python "./scripts/train_residual_flow.py" \
     --config-name train_ndf \
     job_type="train_taxpose" \

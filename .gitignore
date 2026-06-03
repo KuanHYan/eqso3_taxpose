@@ -400,5 +400,5 @@ Pointnet2_PyTorch
 pretraining_models
 *.ipynb
 *.tar.gz
-tmp/
 *.ckpt
+data_default
