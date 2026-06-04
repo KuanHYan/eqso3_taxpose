@@ -55,9 +55,9 @@ class LayerNorm1d(nn.Module):
 
     def forward(self, x):
         # x: (B, C, L) -> (B, L, C) -> LN -> (B, L, C) -> (B, C, L)
-        x = x.transpose(1, 2)
+        x = x.transpose(1, 2).contiguous()
         x = self.norm(x)
-        x = x.transpose(1, 2)
+        x = x.transpose(1, 2).contiguous()
         return x
 
 
@@ -182,10 +182,10 @@ class LearnedUpsamplingHead(nn.Module):
         P_coarse = self.get_coarse_points(feat, points, target_points)     # (B, 3, M)
 
         # 2. 特征插值（kNN + 反距离加权）
-        dists, idx = self.knn(points, P_coarse.detach())    # (B, M, k)
+        dists, idx = knn(points, P_coarse.detach())    # (B, M, k)
 
         # 将特征展平：(B, C, N) -> (B*N, C)
-        feat_flat = feat.transpose(1, 2).reshape(B * N, C)
+        feat_flat = feat.transpose(1, 2).contiguous().reshape(B * N, C)
 
         # 构造展平索引
         batch_offset = torch.arange(B, device=feat.device).view(B, 1, 1) * N
@@ -198,7 +198,7 @@ class LearnedUpsamplingHead(nn.Module):
         weights = 1.0 / (dists + 1e-8)                      # (B, M, k)
         weights = weights / weights.sum(dim=2, keepdim=True) # (B, M, k)
         interpolated_feat = (gathered_feat * weights.unsqueeze(-1)).sum(dim=2)  # (B, M, C)
-        interpolated_feat = interpolated_feat.transpose(1, 2)  # (B, C, M)
+        interpolated_feat = interpolated_feat.transpose(1, 2).contiguous()  # (B, C, M)
 
         # 3. 特征上采样 MLP
         up_input = torch.cat([interpolated_feat, P_coarse], dim=1)  # (B, C+3, M)
@@ -214,16 +214,6 @@ class LearnedUpsamplingHead(nn.Module):
         if return_coarse:
             return output, P_coarse
         return output
-
-    def knn(self, xyz1, xyz2):
-        """计算 xyz1 (B,3,N) 与 xyz2 (B,3,M) 之间的 k 近邻"""
-        B, _, N = xyz1.shape
-        _, _, M = xyz2.shape
-        dist = torch.cdist(xyz1.transpose(1, 2), xyz2.transpose(1, 2))  # (B, N, M)
-        dist, idx = torch.topk(dist, self.k, dim=1, largest=False)      # (B, k, M)
-        dist = dist.transpose(1, 2)                                     # (B, M, k)
-        idx = idx.transpose(1, 2)                                       # (B, M, k)
-        return dist, idx
 
     def positional_encoding(self, coords):
         """对坐标 (B, 3, M) 生成 sin/cos 位置编码，返回 (B, pos_enc_dim, M)"""

@@ -15,10 +15,9 @@ import torch.nn.functional as F
 from taxpose.nets.pointnet import PointwiseMLP, ResidualPointNet, PointNet
 from taxpose.nets.transformer_flow_pm import CustomTransformer
 from taxpose.nets.tv_mlp import MLP as TVMLP
-from taxpose.nets.vn_dgcnn import VN_DGCNN_iqSO3, VNArgs
 from taxpose.utils.multilateration import estimate_p
 from third_party.dcp.model import DGCNN
-from taxpose.nets.raw_dgcnn import DGCNN4TaxPose, DGCNN_VAE
+from taxpose.nets.raw_dgcnn import DGCNN4TaxPose, DGCNN_VAE, VN_DGCNN, VNArgs
 from taxpose.nets.dgcnn_group import DGCNN_Grouper
 from taxpose.nets.head import create_head, HeadConfig
 from taxpose.nets.gemo_fea import ManualPointWiseGemoFea
@@ -536,8 +535,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         return embedding
 
     def _embedding(self, *input):
-        action_points = input[0].permute(0, 2, 1)[:, :3]  # B,3,num_points
-        anchor_points = input[1].permute(0, 2, 1)[:, :3]
+        action_points = input[0].permute(0, 2, 1).contiguous()[:, :3]  # B,3,num_points
+        anchor_points = input[1].permute(0, 2, 1).contiguous()[:, :3]
         action_points_dmean = action_points - action_points.mean(dim=2, keepdim=True)
         anchor_points_dmean = anchor_points - anchor_points.mean(dim=2, keepdim=True)
         # mean center point cloud before DGCNN
@@ -564,8 +563,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             del action_points_dmean, anchor_points_dmean
             if self.feature_channels > 0:
                 # Add a symmetry label to the embeddings.
-                action_features = input[2].permute(0, 2, 1)
-                anchor_features = input[3].permute(0, 2, 1)
+                action_features = input[2].permute(0, 2, 1).contiguous()
+                anchor_features = input[3].permute(0, 2, 1).contiguous()
 
                 action_embedding_stack = torch.cat(
                     [action_embedding, action_features], axis=1
@@ -662,10 +661,10 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             anch_down_sample,
             scores=action_attn,
         )
-        flow_action = head_action_output["full_flow"].permute(0, 2, 1)
-        residual_flow_action = head_action_output["residual_flow"].permute(0, 2, 1)
-        corr_flow_action = head_action_output["corr_flow"].permute(0, 2, 1)
-        corr_points_action = head_action_output["corr_points"].permute(0, 2, 1)
+        flow_action = head_action_output["full_flow"].permute(0, 2, 1).contiguous()
+        residual_flow_action = head_action_output["residual_flow"].permute(0, 2, 1).contiguous()
+        corr_flow_action = head_action_output["corr_flow"].permute(0, 2, 1).contiguous()
+        corr_points_action = head_action_output["corr_points"].permute(0, 2, 1).contiguous()
 
         outputs = {
             "flow_action": flow_action,
@@ -673,12 +672,12 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             "corr_flow_action": corr_flow_action,
             "corr_points_action": corr_points_action,
             "act_down_sample": (
-                None if act_down_sample is None else act_down_sample.permute(0, 2, 1)
+                None if act_down_sample is None else act_down_sample.permute(0, 2, 1).contiguous()
             ),
         }
 
         if "P_A" in head_action_output:
-            original_points_action = head_action_output["P_A"].permute(0, 2, 1)
+            original_points_action = head_action_output["P_A"].permute(0, 2, 1).contiguous()
             outputs["original_points_action"] = original_points_action
             outputs["sampled_ixs_action"] = head_action_output["A_ixs"]
 
@@ -694,10 +693,10 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 act_down_sample,
                 scores=anchor_attn,
             )
-            flow_anchor = head_anchor_output["full_flow"].permute(0, 2, 1)
-            residual_flow_anchor = head_anchor_output["residual_flow"].permute(0, 2, 1)
-            corr_flow_anchor = head_anchor_output["corr_flow"].permute(0, 2, 1)
-            corr_points_anchor = head_anchor_output["corr_points"].permute(0, 2, 1)
+            flow_anchor = head_anchor_output["full_flow"].permute(0, 2, 1).contiguous()
+            residual_flow_anchor = head_anchor_output["residual_flow"].permute(0, 2, 1).contiguous()
+            corr_flow_anchor = head_anchor_output["corr_flow"].permute(0, 2, 1).contiguous()
+            corr_points_anchor = head_anchor_output["corr_points"].permute(0, 2, 1).contiguous()
 
             outputs = {
                 **outputs,
@@ -708,12 +707,12 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 "anch_down_sample": (
                     None
                     if anch_down_sample is None
-                    else anch_down_sample.permute(0, 2, 1)
+                    else anch_down_sample.permute(0, 2, 1).contiguous()
                 ),
             }
 
             if "P_A" in head_anchor_output:
-                original_points_anchor = head_anchor_output["P_A"].permute(0, 2, 1)
+                original_points_anchor = head_anchor_output["P_A"].permute(0, 2, 1).contiguous()
                 outputs["original_points_anchor"] = original_points_anchor
                 outputs["sampled_ixs_anchor"] = head_anchor_output["A_ixs"]
 

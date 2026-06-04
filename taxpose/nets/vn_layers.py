@@ -17,7 +17,7 @@ class VNLinear(nn.Module):
         '''
         x: point features of shape [B, N_feat, 3, N_samples, ...]
         '''
-        x_out = self.map_to_feat(x.transpose(1,-1)).transpose(1,-1)
+        x_out = self.map_to_feat(x.transpose(1,-1)).transpose(1,-1).contiguous()
         return x_out
 
 
@@ -34,7 +34,7 @@ class VNLeakyReLU(nn.Module):
         '''
         x: point features of shape [B, N_feat, 3, N_samples, ...]
         '''
-        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1)
+        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1).contiguous()
         dotprod = (x*d).sum(2, keepdim=True)
         mask = (dotprod >= 0).float()
         d_norm_sq = (d*d).sum(2, keepdim=True)
@@ -61,11 +61,11 @@ class VNLinearLeakyReLU(nn.Module):
         x: point features of shape [B, N_feat, 3, N_samples, ...]
         '''
         # Linear
-        p = self.map_to_feat(x.transpose(1,-1)).transpose(1,-1)
+        p = self.map_to_feat(x.transpose(1,-1)).transpose(1,-1).contiguous()
         # BatchNorm
         p = self.batchnorm(p)
         # LeakyReLU
-        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1)
+        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1).contiguous()
         dotprod = (p*d).sum(2, keepdims=True)
         mask = (dotprod >= 0).float()
         d_norm_sq = (d*d).sum(2, keepdims=True)
@@ -146,9 +146,9 @@ class VNLayerNorm(nn.Module):
         Input: x, point features of shape [B, N_feat, 3, N_samples, ...]
         Return: 
         """
-        x = x.transpose(1, 3)  # B, N, 3, N_feat, ...
+        x = x.transpose(1, 3).contiguous()  # B, N, 3, N_feat, ...
         x = self.norm(x)
-        return x.transpose(1, 3)
+        return x.transpose(1, 3).contiguous()
 
 
 class VNMaxPool(nn.Module):
@@ -160,7 +160,7 @@ class VNMaxPool(nn.Module):
         '''
         x: point features of shape [B, N_feat, 3, N_samples, ...]
         '''
-        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1)
+        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1).contiguous()
         dotprod = (x*d).sum(2, keepdims=True)
         idx = dotprod.max(dim=-1, keepdim=False)[1]
         index_tuple = torch.meshgrid([torch.arange(j) for j in x.size()[:-1]]) + (idx,)
@@ -192,7 +192,7 @@ class VNStdFeature(nn.Module):
         z0 = x
         z0 = self.vn1(z0)
         z0 = self.vn2(z0)
-        z0 = self.vn_lin(z0.transpose(1, -1)).transpose(1, -1)
+        z0 = self.vn_lin(z0.transpose(1, -1)).transpose(1, -1).contiguous()
         
         if self.normalize_frame:
             # make z0 orthogonal. u2 = v2 - proj_u1(v2)
@@ -208,9 +208,9 @@ class VNStdFeature(nn.Module):
 
             # compute the cross product of the two output vectors        
             u3 = torch.cross(u1, u2)
-            z0 = torch.stack([u1, u2, u3], dim=1).transpose(1, 2)
+            z0 = torch.stack([u1, u2, u3], dim=1).transpose(1, 2).contiguous()
         else:
-            z0 = z0.transpose(1, 2)
+            z0 = z0.transpose(1, 2).contiguous()
         
         if self.dim == 4:
             x_std = torch.einsum('bijm,bjkm->bikm', x, z0)

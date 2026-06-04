@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import torch.nn as nn
 from taxpose.utils.se3 import random_se3
-from taxpose.nets.raw_dgcnn import get_graph_feature_for_vndgcnn
+from taxpose.nets.point_net_util import get_graph_feature_for_vndgcnn
 from taxpose.nets.vn_layers import (
     VNLinearLeakyReLU,
     VNLinearAndLeakyReLU,
@@ -44,10 +44,10 @@ class VN4Head(VNLinearAndLeakyReLU):
         """
         xyz: B, 3, N
         """
-        x = x.transpose(2, 1).unsqueeze(-1)  # (B, N, 3, 1)
+        x = x.transpose(2, 1).contiguous().unsqueeze(-1)  # (B, N, 3, 1)
         x = super(VN4Head, self).forward(x)
         x = self.output(x)  # (B, N, 3, 1)
-        return x.squeeze(-1).transpose(2, 1)
+        return x.squeeze(-1).transpose(2, 1).contiguous()
 
 
 class VN_DGCNN_eqSO3(nn.Module):

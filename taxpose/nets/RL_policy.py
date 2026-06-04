@@ -60,7 +60,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
         pt: torch.distributions.Normal = head_res["distribution"]
         mean_flow = head_res["full_flow"]
         bz, _, n = mean_flow.shape
-        corr_flow = pt.sample((group,)).permute(1, 0, 3, 2)
+        corr_flow = pt.sample((group,)).permute(1, 0, 3, 2).contiguous()
         flow_weight = mean_flow[:, None, -1, :].expand(-1, group, -1)
 
         # residual_flow_action = head_res["residual_flow"].permute(0, 2, 1)
@@ -76,7 +76,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
             pred_flow_anchor=None, pred_w_anchor=None
     ):
         bz, _, n = act_pts.shape
-        act_pts = act_pts.permute(0, 2, 1).unsqueeze(1).expand(-1, self.group, -1, -1).reshape(-1, n, 3)
+        act_pts = act_pts.permute(0, 2, 1).contiguous().unsqueeze(1).expand(-1, self.group, -1, -1).reshape(-1, n, 3)
         pred_flow_action = pred_flow_action.reshape(-1, n, 3)
         pred_w_action = pred_w_action.reshape(-1, n)
         if pred_flow_anchor is None:
@@ -86,7 +86,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
                 return_transform3d=True,
             )
         else:
-            anchor_pts = anchor_pts.permute(0, 2, 1).unsqueeze(1).expand(-1, self.group, -1, -1).reshape(-1, n, 3)
+            anchor_pts = anchor_pts.permute(0, 2, 1).contiguous().unsqueeze(1).expand(-1, self.group, -1, -1).reshape(-1, n, 3)
             pred_flow_anchor = pred_flow_anchor.reshape(-1, n, 3)
             pred_w_anchor = pred_w_anchor.reshape(-1, n)
             real_act = dualflow2pose(

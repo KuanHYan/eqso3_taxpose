@@ -65,8 +65,8 @@ class RewardModel(nn.Module):
         #     self.pos_encoder = ManualPointWiseGemoFea(True, emb_dims)
 
     def forward(self, *input, return_total_reward=False):
-        action_points = input[0].permute(0, 2, 1)[:, :3]  # B,3,num_points
-        anchor_points = input[1].permute(0, 2, 1)[:, :3]
+        action_points = input[0].permute(0, 2, 1).contiguous()[:, :3]  # B,3,num_points
+        anchor_points = input[1].permute(0, 2, 1).contiguous()[:, :3]
 
         # action_points_dmean = action_points - action_points.mean(dim=2, keepdim=True)
         # anchor_points_dmean = anchor_points - anchor_points.mean(dim=2, keepdim=True)
@@ -96,8 +96,8 @@ class RewardModel(nn.Module):
             action_embedding += F.normalize(action_pt_pos)
             anchor_embedding += F.normalize(anchor_pt_pos)
 
-        action_embedding = action_embedding.permute(0, 2, 1)
-        anchor_embedding = anchor_embedding.permute(0, 2, 1)
+        action_embedding = action_embedding.permute(0, 2, 1).contiguous()
+        anchor_embedding = anchor_embedding.permute(0, 2, 1).contiguous()
 
         action_embedding_tf = self.transformer_action(
             anchor_embedding, action_embedding

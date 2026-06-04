@@ -20,67 +20,7 @@ from taxpose.nets.vn_layers import (
     VNBatchNorm,
     VNLayerNorm
 )
-
-
-def knn(x, k):
-    inner = -2*torch.matmul(x.transpose(2, 1), x)
-    xx = torch.sum(x**2, dim=1, keepdim=True)
-    pairwise_distance = -xx - inner - xx.transpose(2, 1)
-    idx = pairwise_distance.topk(k=k, dim=-1)[1]   # (batch_size, num_points, k)
-    return idx
-
-
-def get_graph_feature(x, k=20, idx=None):
-    batch_size = x.size(0)
-    num_points = x.size(-1)
-    x = x.view(batch_size, -1, num_points)
-    if idx is None:
-        idx = knn(x, k=k)   # (batch_size, num_points, k)
-    device = x.device
-
-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1)*num_points
-
-    idx = idx + idx_base
-
-    idx = idx.view(-1)
-    _, num_dims, _ = x.size()
-
-    x = x.transpose(2, 1).contiguous()   # (batch_size, num_points, num_dims)  -> (batch_size*num_points, num_dims) #   batch_size * num_points * k + range(0, batch_size*num_points)
-    feature = x.view(batch_size*num_points, -1)[idx, :]
-    feature = feature.view(batch_size, num_points, k, num_dims) 
-    x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
-    feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 1, 2).contiguous()
-    return feature
-
-
-def get_graph_feature_for_vndgcnn(x, k=20, idx=None, x_coord=None):
-    batch_size = x.size(0)
-    num_points = x.size(-1)
-    x = x.view(batch_size, -1, num_points)
-    if idx is None:
-        if x_coord is None: # dynamic knn graph
-            idx = knn(x, k=k)
-        else:          # fixed knn graph with input point coordinates
-            idx = knn(x_coord, k=k)
-    device = x.device
-
-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1)*num_points
-
-    idx = idx + idx_base
-
-    idx = idx.view(-1)
- 
-    _, num_dims, _ = x.size()
-    num_dims = num_dims // 3
-
-    x = x.transpose(2, 1).contiguous()
-    feature = x.view(batch_size*num_points, -1)[idx, :]
-    feature = feature.view(batch_size, num_points, k, num_dims, 3) 
-    x = x.view(batch_size, num_points, 1, num_dims, 3).repeat(1, 1, k, 1, 1)
-    
-    feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 4, 1, 2).contiguous()
-  
-    return feature
+from taxpose.nets.point_net_util import get_graph_feature
 
 
 class LayerNorm1d(nn.Module):
@@ -92,9 +32,9 @@ class LayerNorm1d(nn.Module):
 
     def forward(self, x):
         # x: (B, C, L) -> (B, L, C) -> LN -> (B, L, C) -> (B, C, L)
-        x = x.transpose(1, 2)
+        x = x.transpose(1, 2).contiguous()
         x = self.norm(x)
-        x = x.transpose(1, 2)
+        x = x.transpose(1, 2).contiguous()
         return x
 
 
@@ -109,9 +49,9 @@ class LayerNorm2d(nn.Module):
         """ 
         x: (B, C, L) -> (B, L, C) -> LN -> (B, L, C) -> (B, C, L)
         """
-        x = x.transpose(1, 2)
+        x = x.transpose(1, 2).contiguous()
         x = self.norm(x)
-        x = x.transpose(1, 2)
+        x = x.transpose(1, 2).contiguous()
         return x
 
 
@@ -149,7 +89,7 @@ class PointNet(nn.Module):
 
 class Swapaxes(nn.Module):
     def forward(self, x):
-        return x.transpose(-1, -2)
+        return x.transpose(-1, -2).contiguous()
 
 
 class DGCNN(nn.Module):
@@ -262,6 +202,7 @@ class DGCNN4TaxPose(DGCNN):
         '''
         input: x with shape of [B, 3, N]
         '''
+        coor = x
         x = get_graph_feature(x, k=self.k)
         x = self.conv1(x)
         x1 = x.max(dim=-1, keepdim=False)[0]
@@ -308,12 +249,12 @@ class DGCNN_VAE(nn.Module):
             return self.inference(x)
         fea = self.encoder(x)
         pts = self.decoder(fea, x)
-        return fea, pts.transpose(-1, -2)
+        return fea, pts.transpose(-1, -2).contiguous()
 
     def process(self, x):
         fea = self.encoder(x)
         pts = self.decoder(fea, x)
-        return fea, pts.transpose(-1, -2)
+        return fea, pts.transpose(-1, -2).contiguous()
 
     @torch.no_grad()
     def inference(self, x):
@@ -334,6 +275,7 @@ class VNArgs:
     pooling: str = "mean"
     channel: int = 3
 
+
 class VN_DGCNN(nn.Module):
     def __init__(self, args: VNArgs, gc=False):
         super(VN_DGCNN, self).__init__()
@@ -351,7 +293,7 @@ class VN_DGCNN(nn.Module):
         """
         xyz: B, 3, N
         """
-        xyz = xyz.transpose(2, 1).unsqueeze(-1)  # (B, N, 3, 1)
+        xyz = xyz.transpose(2, 1).unsqueeze(-1).contiguous()  # (B, N, 3, 1)
         xyz = self.conv2(self.conv1(xyz), )
 
 

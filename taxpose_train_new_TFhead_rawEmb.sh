@@ -5,23 +5,24 @@ WANDB_NAME=$3
 EVAL=$4
 RESUME_CKPT=$5
 ## use ./launch.sh local 0 $command to run on local machine
-ROOT_DIR=/data/zju_YanKH/pair_pose/
-cd $ROOT_DIR
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT_DIR="${SCRIPT_DIR}/"
+cd "$ROOT_DIR" || exit 1
 
 # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
 ENCODEING=False
 
-bash "./launch.sh" local $GPU_INDEX \
+bash "./my_launch.sh" local $GPU_INDEX \
     python "./scripts/train_residual_flow.py" \
     --config-name train_ndf \
     job_type="train_taxpose" \
-    data_root="/data/zju_YanKH/pair_pose/dataset/ideal_pair_models" \
-    training.max_epochs=500 \
+    data_root="${ROOT_DIR}data/ideal_pair_models" \
+    training.max_epochs=50 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=38 \
-    training.lr=0.00013 \
-    training.min_lr=0.0000125 \
+    training.batch_size=12 \
+    training.lr=0.00005 \
+    training.min_lr=0.0000005 \
     training.warmup_ratio=0.05 \
     training.precision='32' \
     training.scheduler=linear \
@@ -32,7 +33,7 @@ bash "./launch.sh" local $GPU_INDEX \
     dm.train_dset.anchor_rot_sample_method=axis_angle \
     dm.train_dset.anchor_rotation_variance=3.141592653 \
     model.freeze_embnn=True \
-    model.dropout=0.3 \
+    model.dropout=0.1 \
     model.n_blocks=1 \
     model.pos_encoding=$ENCODEING \
     model.encoder.name=raw_dgcnn \
@@ -48,8 +49,8 @@ bash "./launch.sh" local $GPU_INDEX \
     model.head.residual_on=True \
     model.head.pred_weight=True \
     wandb.name=$WANDB_NAME \
-    'model.pretraining.action.ckpt_path="logs/best_cpkg/5000pts_dgcnn.ckpt"' \
-    'model.pretraining.anchor.ckpt_path="logs/best_cpkg/5000pts_dgcnn.ckpt"' \
+    'model.pretraining.action.ckpt_path="/home/yan/pose_estimation/taxpose/trained_models/5000pts_dgcnn.ckpt"' \
+    'model.pretraining.anchor.ckpt_path="/home/yan/pose_estimation/taxpose/trained_models/5000pts_dgcnn.ckpt"' \
     wandb.offline=False \
     debug=False \
     eval=$EVAL \

@@ -216,8 +216,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         )
 
     def forward(self, *input):
-        action_points = input[0].permute(0, 2, 1)  # B,3,num_points
-        anchor_points = input[1].permute(0, 2, 1)
+        action_points = input[0].permute(0, 2, 1).contiguous()  # B,3,num_points
+        anchor_points = input[1].permute(0, 2, 1).contiguous()
         if len(input) == 3:
             cat = input[2]
         else:
@@ -252,9 +252,9 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 scores=action_attn,
                 return_flow_component=self.return_flow_component,
             )
-            flow_action = flow_output_action["full_flow"].permute(0, 2, 1)
-            residual_flow_action = flow_output_action["residual_flow"].permute(0, 2, 1)
-            corr_flow_action = flow_output_action["corr_flow"].permute(0, 2, 1)
+            flow_action = flow_output_action["full_flow"].permute(0, 2, 1).contiguous()
+            residual_flow_action = flow_output_action["residual_flow"].permute(0, 2, 1).contiguous()
+            corr_flow_action = flow_output_action["corr_flow"].permute(0, 2, 1).contiguous()
         else:
             flow_action = self.head_action(
                 action_embedding_tf,
@@ -263,7 +263,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 anchor_points,
                 scores=action_attn,
                 return_flow_component=self.return_flow_component,
-            ).permute(0, 2, 1)
+            ).permute(0, 2, 1).contiguous()
 
         if self.cycle:
             anchor_attn = anchor_attn.mean(dim=1)
@@ -276,11 +276,11 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                     scores=anchor_attn,
                     return_flow_component=self.return_flow_component,
                 )
-                flow_anchor = flow_output_anchor["full_flow"].permute(0, 2, 1)
+                flow_anchor = flow_output_anchor["full_flow"].permute(0, 2, 1).contiguous()
                 residual_flow_anchor = flow_output_anchor["residual_flow"].permute(
                     0, 2, 1
-                )
-                corr_flow_anchor = flow_output_anchor["corr_flow"].permute(0, 2, 1)
+                ).contiguous()
+                corr_flow_anchor = flow_output_anchor["corr_flow"].permute(0, 2, 1).contiguous()
             else:
                 flow_anchor = self.head_anchor(
                     anchor_embedding_tf,
@@ -289,7 +289,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                     action_points,
                     scores=anchor_attn,
                     return_flow_component=self.return_flow_component,
-                ).permute(0, 2, 1)
+                ).permute(0, 2, 1).contiguous()
             if self.return_flow_component:
                 return {
                     "flow_action": flow_action,

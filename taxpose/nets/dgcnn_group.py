@@ -1,44 +1,8 @@
 import torch
 from torch import nn
 from pointnet2_ops import pointnet2_utils
-# from knn_cuda import KNN
+from taxpose.nets.point_net_util import get_graph_feature
 # knn = KNN(k=16, transpose_mode=False)
-
-
-def knn_point(nsample, xyz, new_xyz):
-    """
-    Input:
-        nsample: max sample number in local region
-        xyz: all points, [B, N, C]
-        new_xyz: query points, [B, S, C]
-    Return:
-        group_idx: grouped points index, [B, S, nsample]
-    """
-    sqrdists = square_distance(new_xyz, xyz)
-    _, group_idx = torch.topk(sqrdists, nsample, dim = -1, largest=False, sorted=False)
-    return group_idx
-
-
-def square_distance(src, dst):
-    """
-    Calculate Euclid distance between each two points.
-    src^T * dst = xn * xm + yn * ym + zn * zm
-    sum(src^2, dim=-1) = xn*xn + yn*yn + zn*zn;
-    sum(dst^2, dim=-1) = xm*xm + ym*ym + zm*zm;
-    dist = (xn - xm)^2 + (yn - ym)^2 + (zn - zm)^2
-         = sum(src**2,dim=-1)+sum(dst**2,dim=-1)-2*src^T*dst
-    Input:
-        src: source points, [B, N, C]
-        dst: target points, [B, M, C]
-    Output:
-        dist: per-point square distance, [B, N, M]
-    """
-    B, N, _ = src.shape
-    _, M, _ = dst.shape
-    dist = -2 * torch.matmul(src, dst.permute(0, 2, 1))
-    dist += torch.sum(src ** 2, -1).view(B, N, 1)
-    dist += torch.sum(dst ** 2, -1).view(B, 1, M)
-    return dist  
 
 
 class DGCNN_Grouper(nn.Module):
@@ -117,37 +81,13 @@ class DGCNN_Grouper(nn.Module):
 
         return new_coor, new_x
 
-    @staticmethod
-    def get_graph_feature(coor_q, x_q, coor_k, x_k, k=16):
-
-        # coor: bs, 3, np, x: bs, c, np
-
-        batch_size = x_k.size(0)
-        num_points_k = x_k.size(2)
-        num_points_q = x_q.size(2)
-
-        # _, idx = knn(coor_k, coor_q)  # bs k np
-        idx = knn_point(k, coor_k.transpose(-1, -2).contiguous(), coor_q.transpose(-1, -2).contiguous()) # B G M
-        idx = idx.transpose(-1, -2).contiguous()
-        assert idx.shape[1] == k
-        idx_base = torch.arange(0, batch_size, device=x_q.device).view(-1, 1, 1) * num_points_k
-        idx = idx + idx_base
-        idx = idx.view(-1)
-        num_dims = x_k.size(1)
-        x_k = x_k.transpose(2, 1).contiguous()
-        feature = x_k.view(batch_size * num_points_k, -1)[idx, :]
-        feature = feature.view(batch_size, k, num_points_q, num_dims).permute(0, 3, 2, 1).contiguous()
-        x_q = x_q.view(batch_size, num_dims, num_points_q, 1).expand(-1, -1, -1, k)
-        feature = torch.cat((feature - x_q, x_q), dim=1)
-        return feature
-
     def forward(self, x, down=True):
 
         # x: bs, 3, np
         coor = x
         f1 = self.input_trans(x)
 
-        f = self.get_graph_feature(coor, f1, coor, f1, self.k)
+        f = get_graph_feature(coor, f1, coor, f1, self.k)
         f = self.dropout(self.layer1(f))
         f2 = f.max(dim=-1, keepdim=False)[0]  # bs, 64, np//2, k -> bs, 64, np//2
 
@@ -158,12 +98,12 @@ class DGCNN_Grouper(nn.Module):
         else:
             coor_q, f_q = coor, f_
         
-        f = self.get_graph_feature(coor_q, f_q, coor, f_, self.k)
+        f = get_graph_feature(coor_q, f_q, coor, f_, self.k)
         f = self.dropout(self.layer2(f))
         f3 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 64, onp
         coor = coor_q
 
-        f = self.get_graph_feature(coor, f3, coor, f3, self.k)
+        f = get_graph_feature(coor, f3, coor, f3, self.k)
         f = self.dropout(self.layer3(f))
         f4 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 128, onp
 
@@ -178,6 +118,8 @@ class DGCNN_Grouper(nn.Module):
         if not down:
             return f
         return (f, coor)
+
+
 
 if __name__ == '__main__':
     x = torch.rand(2, 3, 1024).cuda()

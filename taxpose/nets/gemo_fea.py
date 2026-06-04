@@ -116,7 +116,7 @@ class ManualPointWiseGemoFea(nn.Module):
         for patches, patch_normals in zip(patches_list, patches_normals_list):
             ppfs.append(calc_ppf_gpu(pts, normal, patches, patch_normals).reshape(b, n, -1))
         
-        return torch.cat(ppfs, dim = -1)
+        return torch.cat(ppfs, dim=-1)
 
     def rotate_pts_batch(self, pts, rotation):
         pts_shape = pts.shape
@@ -133,13 +133,13 @@ class ManualPointWiseGemoFea(nn.Module):
             ppf_feature with shape of [b, c, n], default c=24
         """
         if pts.shape[1] == 3:
-            pts = pts.permute(0, 2, 1)
+            pts = pts.permute(0, 2, 1).contiguous()
         normals = self.cal_normal(pts)
         ppf_feature = self.calc_ppf(pts, normals)
         if self.project:
             ppf_feature = self.pos_project(ppf_feature)
 
-        return ppf_feature.permute(0, 2, 1)
+        return ppf_feature.permute(0, 2, 1).contiguous()
 
 
 if __name__ == "__main__":
