@@ -120,7 +120,6 @@ class DGCNN_Grouper(nn.Module):
         return (f, coor)
 
 
-
 if __name__ == '__main__':
     x = torch.rand(2, 3, 1024).cuda()
     grouper = DGCNN_Grouper(emb_dims=512, output_num=512).cuda()

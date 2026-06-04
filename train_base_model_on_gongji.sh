@@ -8,7 +8,7 @@ cd "$ROOT_DIR" || exit 1
 # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 ENCODEING=False
 
-CUDA_VISIBLE_DEVICES=[0]
+CUDA_VISIBLE_DEVICES="0"
 
 python "./scripts/train_residual_flow.py" \
     --config-name train_ndf \
