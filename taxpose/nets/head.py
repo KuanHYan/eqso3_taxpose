@@ -267,7 +267,7 @@ class TransformerHead(nn.Module):
         self.head_tf = CustomTransformer(
             emb_dims=emb_dims,
             n_blocks=1,
-            dropout=0.1,
+            dropout=0.3,
             ff_dims=4*emb_dims,
             n_heads=emb_dims//64,
             return_attn=True,
@@ -298,6 +298,10 @@ class TransformerHead(nn.Module):
         action_embedding_raw = input[1]
         action_points = input[2]     # B, 3, N
         anchor_points = input[3]
+        if action_embedding.shape[2] != action_points.shape[2]:
+            # NOTE: 1_dim is for channel dim, 2_dim is for points dim
+            action_points = input[4]
+            anchor_points = input[5]
         scores = scores.transpose(2, 1).contiguous()
         corr_points = torch.matmul(anchor_points, scores)
         if self.project_corrs:
@@ -744,6 +748,81 @@ class ResidualMLPHead4RL(ResidualMLPHead):
         return output
 
 
+class TransformerHead4RL(TransformerHead):
+    def __init__(
+        self,
+        point_encoder_fun=None,
+        emb_dims=512,
+        output_num=1024,
+        pos_enc_dim=0,
+        pred_weight=True,
+        residual_on=True,
+        pos_enc=False,
+        norm=nn.BatchNorm1d,
+        project_corrs=False,
+        project_corrs_mode='mlp'
+    ):
+        super().__init__(
+            point_encoder_fun, emb_dims, 
+            output_num, pos_enc_dim, pred_weight, 
+            residual_on, pos_enc, 
+            norm, project_corrs,project_corrs_mode 
+        )
+        self.corr_pts_std = PointwiseMLP(
+            [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
+        )
+
+    def forward(self, *input, scores, return_embedding=False):
+        """
+        input:
+          action_embedding: B,512,N
+          anchor_embedding: B,512,N
+          action_points: B,3,N
+          anchor_points: B,3,N
+          scores: B,N,N, if needed, use this instead of calculating scores
+        return:
+          dict with keys:
+          full_flow: B,3,N
+          residual_flow: B,3,N
+          corr_flow: B,3,N
+          corr_points: B,3,N
+          scores: B,N,N
+        """
+        output = super(TransformerHead4RL, self).forward(*input, scores=scores)
+        if self.training:
+            action_embedding = input[0]
+            flow = output["full_flow"][:, :-1, :]
+            std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
+            pt = Normal(flow, std)
+            output["distribution"] = pt
+
+        return output
+
+    def sample(self, *input, scores, return_embedding=False):
+        """
+        input:
+          action_embedding: B,512,N
+          anchor_embedding: B,512,N
+          action_points: B,3,N
+          anchor_points: B,3,N
+          scores: B,N,N, if needed, use this instead of calculating scores
+        return:
+          dict with keys:
+          full_flow: B,3,N
+          residual_flow: B,3,N
+          corr_flow: B,3,N
+          corr_points: B,3,N
+          scores: B,N,N
+        """
+        output = super(TransformerHead4RL, self).forward(*input, scores=scores)
+        action_embedding = input[0]
+        flow = output["full_flow"][:, :-1, :]
+        std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
+        pt = Normal(flow, std)
+        output["distribution"] = pt
+        return output
+
+
 @dataclass
 class HeadConfig:
     norm: nn.Module = nn.BatchNorm1d
@@ -807,6 +886,18 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             cfg.project_corrs,
             cfg.project_corrs_mode,
             cfg.output_num,
+        )
+    if cfg.head_type == "rl_transformer":
+        return TransformerHead4RL(
+            point_encoder_fun=embedding_fun,
+            emb_dims=cfg.emb_dims,
+            output_num=cfg.output_num,
+            pred_weight=cfg.pred_weight,
+            residual_on=cfg.residual_on,
+            pos_enc=cfg.pos_encoding,
+            project_corrs=cfg.project_corrs,
+            project_corrs_mode=cfg.project_corrs_mode,
+            norm=cfg.norm
         )
     return ResidualMLPHead(
         cfg.emb_dims,

@@ -84,7 +84,7 @@ resume_ckpt: null
 eval: False
 
 resources:
-  num_workers: 16
+  num_workers: 32
 
 wandb:
   group: Null

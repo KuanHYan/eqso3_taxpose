@@ -91,6 +91,7 @@ def main(cfg):
 
     print("Resume run id:", resume_run_id)
     device_count = min(torch.cuda.device_count(), cfg.training.num_gpus)
+    print(f"use {device_count} gpus")
     if device_count == 1:
         pl.seed_everything(cfg.seed)
     logger = WandbLogger(
@@ -110,8 +111,8 @@ def main(cfg):
     # logger.log_hyperparams({"working_dir": os.getcwd()})
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
-        accelerator="auto",
-        strategy=DDPStrategy(find_unused_parameters=True),
+        accelerator="gpu",
+        strategy=DDPStrategy(find_unused_parameters=True) if device_count > 1 else "auto",
         devices=device_count,
         sync_batchnorm=(device_count > 1),
         log_every_n_steps=cfg.training.log_every_n_steps,
@@ -163,6 +164,8 @@ def main(cfg):
     else:
         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio \
             * int(len(dm.train_dataset) / cfg.training.batch_size / device_count)
+    cfg.training.lr = cfg.training.lr * device_count
+    cfg.training.min_lr = cfg.training.min_lr * device_count    
     lr_scheduler_total_steps = int(lr_scheduler_total_steps)
 
     # For distributed training, we need to make sure that the learning rate scales with the number of GPUs.
@@ -257,8 +260,7 @@ def main(cfg):
         model.train()
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
     model.eval()
-    with torch.no_grad():
-        trainer.validate(model, dm, ckpt_path=resume_ckpt)
+    trainer.validate(model, dm, ckpt_path=resume_ckpt)
 
     # Print he run id of the current run
     print("Run ID: {} ".format(logger.experiment.id))
@@ -269,5 +271,4 @@ if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
     torch.cuda.empty_cache()
     torch.multiprocessing.set_sharing_strategy("file_system")
-    # torch.multiprocessing.set_start_method("spawn")
     main()

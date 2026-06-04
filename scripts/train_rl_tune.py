@@ -91,6 +91,7 @@ def main(cfg):
     device_count = min(torch.cuda.device_count(), cfg.training.num_gpus)
     if device_count == 1:
         pl.seed_everything(cfg.seed)
+    print(f"use {device_count} GPUs")
     logger = WandbLogger(
         name=cfg.wandb.name,
         entity=cfg.wandb.entity,
@@ -106,12 +107,11 @@ def main(cfg):
     )
     # logger.log_hyperparams(cfg)
     # logger.log_hyperparams({"working_dir": os.getcwd()})
-    
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
         accelerator="auto",
         strategy="auto",
-        devices=device_count,
+        devices=[0],
         sync_batchnorm=(device_count > 1),
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
@@ -227,5 +227,4 @@ if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
     torch.cuda.empty_cache()
     torch.multiprocessing.set_sharing_strategy("file_system")
-    torch.multiprocessing.set_start_method("spawn")
     main()

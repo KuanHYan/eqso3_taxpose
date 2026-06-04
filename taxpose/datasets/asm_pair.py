@@ -20,13 +20,13 @@ from taxpose.datasets.augmentations import (
 from taxpose.datasets.base import PlacementPointCloudData
 from taxpose.datasets.enums import ObjectClass, Phase
 from taxpose.datasets.env_mod_utils import get_random_distractor_demo  # type: ignore
-from taxpose.datasets.symmetry_utils import (
-    compute_demo_symmetry_features as new_compute_demo_symmetry_features,
-)
-from taxpose.utils.symmetry_utils import (
-    get_sym_label_pca_grasp,
-    get_sym_label_pca_place,
-)
+# from taxpose.datasets.symmetry_utils import (
+#     compute_demo_symmetry_features as new_compute_demo_symmetry_features,
+# )
+# from taxpose.utils.symmetry_utils import (
+#     get_sym_label_pca_grasp,
+#     get_sym_label_pca_place,
+# )
 
 #  0 for mug, 1 for rack, 2 for gripper
 # These are the labels used in the NDF dataset
@@ -82,91 +82,91 @@ class CustomPointCloudDatasetConfig:
     multimodal_transform_base: bool = False
 
 
-def compute_demo_symmetry_features(
-    points_action,
-    points_anchor,
-    object_type,
-    action,
-    action_class,
-    anchor_class,
-    normalize_dist,
-    skip_symmetry=False,
-):
-    # print(
-    #     f"object_type: {object_type}, action: {action}, action_class: {action_class}, anchor_class: {anchor_class}"
-    # )
-    # Handle symmetry.
-    if skip_symmetry:
-        return None, None, None, None
+# def compute_demo_symmetry_features(
+#     points_action,
+#     points_anchor,
+#     object_type,
+#     action,
+#     action_class,
+#     anchor_class,
+#     normalize_dist,
+#     skip_symmetry=False,
+# ):
+#     # print(
+#     #     f"object_type: {object_type}, action: {action}, action_class: {action_class}, anchor_class: {anchor_class}"
+#     # )
+#     # Handle symmetry.
+#     if skip_symmetry:
+#         return None, None, None, None
 
-    if object_type in {ObjectClass.BOTTLE, ObjectClass.BOWL}:
-        if action == "grasp":
-            sym_dict = get_sym_label_pca_grasp(
-                action_cloud=torch.as_tensor(points_action),
-                anchor_cloud=torch.as_tensor(points_anchor),
-                action_class=action_class,
-                anchor_class=anchor_class,
-                object_type=object_type,
-                normalize_dist=normalize_dist,
-            )
+#     if object_type in {ObjectClass.BOTTLE, ObjectClass.BOWL}:
+#         if action == "grasp":
+#             sym_dict = get_sym_label_pca_grasp(
+#                 action_cloud=torch.as_tensor(points_action),
+#                 anchor_cloud=torch.as_tensor(points_anchor),
+#                 action_class=action_class,
+#                 anchor_class=anchor_class,
+#                 object_type=object_type,
+#                 normalize_dist=normalize_dist,
+#             )
 
-        elif action == "place":
-            sym_dict = get_sym_label_pca_place(
-                action_cloud=torch.as_tensor(points_action),
-                anchor_cloud=torch.as_tensor(points_anchor),
-                action_class=action_class,
-                anchor_class=anchor_class,
-                normalize_dist=normalize_dist,
-            )
+#         elif action == "place":
+#             sym_dict = get_sym_label_pca_place(
+#                 action_cloud=torch.as_tensor(points_action),
+#                 anchor_cloud=torch.as_tensor(points_anchor),
+#                 action_class=action_class,
+#                 anchor_class=anchor_class,
+#                 normalize_dist=normalize_dist,
+#             )
 
-        symmetric_cls = sym_dict["cts_cls"]  # 1, num_points
-        symmetric_cls = symmetric_cls.unsqueeze(-1).numpy()  # 1, 1, num_points
+#         symmetric_cls = sym_dict["cts_cls"]  # 1, num_points
+#         symmetric_cls = symmetric_cls.unsqueeze(-1).numpy()  # 1, 1, num_points
 
-        # We want to color the gripper somehow...
-        if action_class == OBJECT_DEMO_LABELS[ObjectClass.GRIPPER]:
-            nonsymmetric_cls = sym_dict["cts_cls_nonsym"]  # 1, num_points
-            # 1, 1, num_points
-            nonsymmetric_cls = nonsymmetric_cls.unsqueeze(-1).numpy()
-        else:
-            nonsymmetric_cls = None
+#         # We want to color the gripper somehow...
+#         if action_class == OBJECT_DEMO_LABELS[ObjectClass.GRIPPER]:
+#             nonsymmetric_cls = sym_dict["cts_cls_nonsym"]  # 1, num_points
+#             # 1, 1, num_points
+#             nonsymmetric_cls = nonsymmetric_cls.unsqueeze(-1).numpy()
+#         else:
+#             nonsymmetric_cls = None
 
-        symmetry_xyzrgb = sym_dict["fig"]
-        if action_class == 0:
-            if nonsymmetric_cls is None:
-                nonsymmetric_cls = np.ones(
-                    (1, points_anchor.shape[1], 1), dtype=np.float32
-                )
-            action_symmetry_features = symmetric_cls
-            anchor_symmetry_features = nonsymmetric_cls
-            action_symmetry_rgb = symmetry_xyzrgb[: points_action.shape[1], 3:][None]
-            anchor_symmetry_rgb = symmetry_xyzrgb[points_action.shape[1] :, 3:][None]
-        elif anchor_class == 0:
-            if nonsymmetric_cls is None:
-                nonsymmetric_cls = np.ones(
-                    (1, points_action.shape[1], 1), dtype=np.float32
-                )
-            action_symmetry_features = nonsymmetric_cls
-            anchor_symmetry_features = symmetric_cls
-            action_symmetry_rgb = symmetry_xyzrgb[points_anchor.shape[1] :, 3:][None]
-            anchor_symmetry_rgb = symmetry_xyzrgb[: points_anchor.shape[1], 3:][None]
-        else:
-            raise ValueError("this should not happen")
-    else:
-        action_symmetry_features = np.ones(
-            (1, points_action.shape[1], 1), dtype=np.float32
-        )
-        anchor_symmetry_features = np.ones(
-            (1, points_anchor.shape[1], 1), dtype=np.float32
-        )
-        action_symmetry_rgb = np.zeros((1, points_action.shape[1], 3), dtype=np.uint8)
-        anchor_symmetry_rgb = np.zeros((1, points_anchor.shape[1], 3), dtype=np.uint8)
+#         symmetry_xyzrgb = sym_dict["fig"]
+#         if action_class == 0:
+#             if nonsymmetric_cls is None:
+#                 nonsymmetric_cls = np.ones(
+#                     (1, points_anchor.shape[1], 1), dtype=np.float32
+#                 )
+#             action_symmetry_features = symmetric_cls
+#             anchor_symmetry_features = nonsymmetric_cls
+#             action_symmetry_rgb = symmetry_xyzrgb[: points_action.shape[1], 3:][None]
+#             anchor_symmetry_rgb = symmetry_xyzrgb[points_action.shape[1] :, 3:][None]
+#         elif anchor_class == 0:
+#             if nonsymmetric_cls is None:
+#                 nonsymmetric_cls = np.ones(
+#                     (1, points_action.shape[1], 1), dtype=np.float32
+#                 )
+#             action_symmetry_features = nonsymmetric_cls
+#             anchor_symmetry_features = symmetric_cls
+#             action_symmetry_rgb = symmetry_xyzrgb[points_anchor.shape[1] :, 3:][None]
+#             anchor_symmetry_rgb = symmetry_xyzrgb[: points_anchor.shape[1], 3:][None]
+#         else:
+#             raise ValueError("this should not happen")
+#     else:
+#         action_symmetry_features = np.ones(
+#             (1, points_action.shape[1], 1), dtype=np.float32
+#         )
+#         anchor_symmetry_features = np.ones(
+#             (1, points_anchor.shape[1], 1), dtype=np.float32
+#         )
+#         action_symmetry_rgb = np.zeros((1, points_action.shape[1], 3), dtype=np.uint8)
+#         anchor_symmetry_rgb = np.zeros((1, points_anchor.shape[1], 3), dtype=np.uint8)
 
-    return (
-        action_symmetry_features,
-        anchor_symmetry_features,
-        action_symmetry_rgb,
-        anchor_symmetry_rgb,
-    )
+#     return (
+#         action_symmetry_features,
+#         anchor_symmetry_features,
+#         action_symmetry_rgb,
+#         anchor_symmetry_rgb,
+#     )
 
 
 def is_valid_file(filename: str, min_num_points=1024) -> bool:

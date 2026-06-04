@@ -402,3 +402,4 @@ pretraining_models
 *.tar.gz
 *.ckpt
 data_default
+pytorch3d

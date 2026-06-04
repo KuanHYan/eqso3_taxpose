@@ -489,6 +489,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 head_cfg.pop("norm")
                 cfg = HeadConfig(
                     **head_cfg,
+                    output_num=encoder_cfg.output_num,
                     norm=norm, emb_dims=emb_dims, pos_encoding=pos_encoding)
             else:
                 cfg = head_cfg
@@ -523,14 +524,14 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
     def _action_embedding(self, points):
         self.emb_nn_action.eval()
         points = points - points.mean(dim=1, keepdim=True)
-        embedding = self.emb_nn_action(points)
+        embedding = self.emb_nn_action(points, down=False)
         embedding = F.normalize(embedding, dim=1)
         return embedding
 
     def _anchor_embedding(self, points):
         self.emb_nn_anchor.eval()
         points = points - points.mean(dim=1, keepdim=True)
-        embedding = self.emb_nn_anchor(points)
+        embedding = self.emb_nn_anchor(points, down=False)
         embedding = F.normalize(embedding, dim=1)
         return embedding
 
@@ -552,13 +553,11 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             if isinstance(action_embedding, tuple):
                 action_embedding, pts = action_embedding
                 act_down_sample = pts + action_points.mean(dim=2, keepdim=True)
-                act_down_sample = act_down_sample
                 # action_points = pts + action_points.mean(dim=2, keepdim=True)
             anchor_embedding = self.emb_nn_anchor(anchor_points_dmean)
             if isinstance(anchor_embedding, tuple):
                 anchor_embedding, pts = anchor_embedding
                 anch_down_sample = pts + anchor_points.mean(dim=2, keepdim=True)
-                anch_down_sample = anch_down_sample
                 # anchor_points = pts + anchor_points.mean(dim=2, keepdim=True)
             action_embedding = F.normalize(action_embedding, dim=1)
             anchor_embedding = F.normalize(anchor_embedding, dim=1)

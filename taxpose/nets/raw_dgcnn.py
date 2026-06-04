@@ -258,7 +258,7 @@ class DGCNN4TaxPose(DGCNN):
         self.linear3 = None
         del self.linear3
 
-    def forward(self, x):
+    def forward(self, x, down=False):
         '''
         input: x with shape of [B, 3, N]
         '''
