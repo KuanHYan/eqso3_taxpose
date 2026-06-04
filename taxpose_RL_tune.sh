@@ -18,7 +18,7 @@ bash ./my_launch.sh $PLATFORM $GPU_INDEX \
     python "./scripts/train_rl_tune.py" \
     --config-name train_ndf \
     job_type="rl_tune" \
-    data_root="${ROOT_DIR}data/pair_models" \
+    data_root="${ROOT_DIR}data" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
     training.batch_size=12 \
@@ -56,5 +56,4 @@ bash ./my_launch.sh $PLATFORM $GPU_INDEX \
     wandb.name=$WANDB_NAME \
     wandb.offline=True \
     debug=False \
-    resume_ckpt=$RESUME_CKPT \
     eval=False
