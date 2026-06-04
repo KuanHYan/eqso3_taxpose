@@ -238,7 +238,6 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
 
         # remove bad filenames in bad_demo
         if len(bad_demo_names) > 0:
-            print(f"Removed from {bad_demo_names} bad demos")
             filenames = [name for name in filenames if name not in bad_demo_names]
         print(f"{len(filenames)} / {original_length} demos left")
         return filenames
@@ -564,7 +563,6 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
 
         # remove bad filenames in bad_demo
         if len(bad_demo_names) > 0:
-            print(f"Removed from {len(bad_demo_names)} bad demos")
             filenames = [name for name in filenames if name not in bad_demo_names]
         
         print(f"Total valid files: {len(filenames)} / {original_length}")

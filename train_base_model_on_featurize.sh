@@ -12,29 +12,26 @@ cd "$ROOT_DIR" || exit 1
 ENCODEING=False
 
 bash "./my_launch.sh" cloud-featurize $GPU_INDEX \
-    wandb login --relogin --host=http://localhost:8080 \
-    local-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 \
-    && \
     python "./scripts/train_residual_flow.py" \
     --config-name train_ndf \
     job_type="train_taxpose" \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
     training.max_epochs=500 \
-    training.check_val_every_n_epoch=1 \
-    training.batch_size=7 \
-    training.lr=0.0001 \
-    training.min_lr=0.00001 \
-    training.warmup_ratio=0.05 \
+    training.check_val_every_n_epoch=2 \
+    training.batch_size=10 \
+    training.lr=0.000035 \
+    training.min_lr=0.0000035 \
+    training.warmup_ratio=0.02 \
     training.precision='32' \
     training.scheduler=linear \
     training.num_gpus=$GPU_NUM \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=6000 \
-    dm.train_dset.dataset_size=32000 \
+    dm.train_dset.dataset_size=64000 \
     dm.train_dset.anchor_rot_sample_method=axis_angle \
     dm.train_dset.anchor_rotation_variance=3.141592653 \
     model.freeze_embnn=True \
-    model.dropout=0.1 \
+    model.dropout=0.3 \
     model.n_blocks=1 \
     model.pos_encoding=$ENCODEING \
     model.encoder.name=raw_dgcnn \
@@ -52,6 +49,5 @@ bash "./my_launch.sh" cloud-featurize $GPU_INDEX \
     wandb.name=$WANDB_NAME \
     model.pretraining.action.ckpt_path="logs/5000pts_dgcnn.ckpt" \
     model.pretraining.anchor.ckpt_path="logs/5000pts_dgcnn.ckpt" \
-    wandb.offline=False \
-    debug=False \
-    resume_ckpt=$RESUME_CKPT
+    wandb.offline=True \
+    debug=False
