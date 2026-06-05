@@ -43,7 +43,7 @@ class PointCloudTrainingModule(pl.LightningModule):
         return super().on_train_end()
     
     def on_train_epoch_start(self) -> None:
-        print(f"Epoch: {self.current_epoch}, LR: {self._optimizer_.param_groups[0]['lr']:1.2e}")
+        self.print(f"Epoch: {self.current_epoch}, LR: {self._optimizer_.param_groups[0]['lr']:1.2e}")
         return super().on_train_epoch_start()
     
     def on_train_epoch_end(self) -> None:

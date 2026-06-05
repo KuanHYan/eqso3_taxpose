@@ -61,15 +61,14 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
 
 @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
 def main(cfg):
-    print(OmegaConf.to_yaml(cfg, resolve=True))
+    # print(OmegaConf.to_yaml(cfg, resolve=True))
     # wandb.init(resume=cfg.resume_ckpt is not None)
 
     torch.set_float32_matmul_precision("medium")
     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
 
     if cfg.resume_ckpt:
-        print("Resuming from checkpoint")
-        print(cfg.resume_ckpt)
+        print("Resuming from checkpoint", cfg.resume_ckpt)
         resume_ckpt = get_weights_path(cfg.resume_ckpt, cfg.wandb)
         # 判断resume_ckpt是否绝对路径
         if not resume_ckpt.startswith('/'):
@@ -105,7 +104,7 @@ def main(cfg):
         offline=cfg.wandb.offline or TESTING or cfg.debug,
         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
     )
-    # logger.log_hyperparams(cfg)
+    logger.log_hyperparams(cfg)
     # logger.log_hyperparams({"working_dir": os.getcwd()})
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
@@ -154,7 +153,7 @@ def main(cfg):
 
     network = RewardModel(cfg.model.encoder, cfg.model.cycle, dropout=cfg.model.dropout)
     if cfg.debug or TESTING:
-        print(network)
+        logger.log_text(str(network))
     if cfg.training.lr_scheduler_by_epoch:
         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio
     else:

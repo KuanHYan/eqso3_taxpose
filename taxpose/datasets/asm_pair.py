@@ -242,7 +242,6 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
         print(f"{len(filenames)} / {original_length} demos left")
         return filenames
 
-    @functools.lru_cache(maxsize=100)
     def load_data(self, filename, action_class, anchor_class):
         point_data = np.load(filename, allow_pickle=True)
         
@@ -268,11 +267,11 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
         #     points_raw_np = points_raw_np[valid_idxs]
         #     classes_raw_np = classes_raw_np[valid_idxs]
 
-        points_action_np = point_data['action'].copy()
+        points_action_np = point_data['action']
         points_action_mean_np = points_action_np.mean(axis=0)
         points_action_np = points_action_np - points_action_mean_np
 
-        points_anchor_np = point_data['anchor'].copy()
+        points_anchor_np = point_data['anchor']
         # points_anchor_mean_np = points_anchor_np.mean(axis=0)
         # TODO: 当前猜测应该是使用同一个均值而非使用各自的均值中心化
         points_anchor_np = points_anchor_np - points_action_mean_np
@@ -399,7 +398,6 @@ class CustomPretrainingPointCloudDataset(Dataset):
             self.data_list = self.data_list[:overfit]
         if cfg.shuffle_pcs:
             random.shuffle(self.data_list)
-        print(f"Dataset length (final): {len(self.data_list)}")
 
     def __len__(self):
         return len(self.data_list)
@@ -425,31 +423,8 @@ class CustomPretrainingPointCloudDataset(Dataset):
         # 缓存列表
         with open(cache_path, 'wb') as f:
             pickle.dump(data_list, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Dataset length (final): {len(self.data_list)}")
         return data_list
-
-    # def _is_valid_file(self, filename: str, pc_key: str) -> bool:
-    #     """检查 npz 文件中的点云数据是否有效（无 inf/nan 且数值范围合理）"""
-    #     try:
-    #         # 只加载 'action' 数组，不进行任何预处理
-    #         with np.load(filename, allow_pickle=True) as point_data:
-    #             points_action_np = point_data[pc_key]
-    #             mean_ = points_action_np.mean(axis=0)
-    #             # 1. 检查是否包含 inf 或 nan
-    #             if np.isinf(points_action_np).any() or np.isinf(mean_).any():
-    #                 return False
-                
-    #             # 2. 检查数值范围是否过大（阈值 1e5 可根据实际数据调整）
-    #             #    避免后续计算 mean 时溢出（float32 范围约 3e38，但极大会导致精度问题）
-    #             if np.abs(points_action_np).max() > 1e5:
-    #                 return False
-                
-    #             if np.isnan(points_action_np).any() or np.isnan(mean_).any():
-    #                 return False
-
-    #             return True
-    #     except Exception as e:
-    #         print(f"Error loading or checking file {filename}: {e}")
-    #         return False
 
     @staticmethod
     def _recenter_pc(pc):
@@ -504,7 +479,6 @@ class CustomPretrainingPointCloudDataset(Dataset):
             pcs[i] += noise
         return pcs
 
-    @functools.lru_cache(maxsize=100)
     def load_data(self, filename) -> list:
         with open(filename, 'rb') as f:
             sample_data = pickle.load(f)
@@ -526,12 +500,6 @@ class CustomPretrainingPointCloudDataset(Dataset):
 
         cur_pts = np.concatenate(cur_pts, axis=0).astype(np.float32)
 
-        # 6. 构造返回字典（完全兼容原有格式）
-        data_dict = {
-            "part_pcs": torch.from_numpy(cur_pts),  # [N_sum, 3]
-            "n_pcs": torch.tensor(nps, dtype=torch.long),  # [max_num_part]
-            "data_id": index,
-        }
         return cur_pts
 
 
@@ -552,8 +520,6 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
         bad_demo_names = []
         for i in range(len(filenames)):
             filename = filenames[i]
-            if i == 0:
-                print(filename)
             if not os.path.exists(filename):
                 bad_demo_names.append(filename)
                 continue
@@ -573,7 +539,6 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
 
         return filenames
 
-    @functools.lru_cache(maxsize=100)
     def load_data(self, filename) -> list:
         point_data = np.load(filename, allow_pickle=True)
         if random.random() > 0.5:

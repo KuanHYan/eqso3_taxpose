@@ -55,20 +55,18 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
         ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
     else:
         ckpt_file = checkpoint_reference
+    return ckpt_file
 
 
 @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
 def main(cfg):
-    if __name__ == "__main__":
-        print(OmegaConf.to_yaml(cfg, resolve=True))
     # wandb.init(resume=cfg.resume_ckpt is not None)
 
-    torch.set_float32_matmul_precision("high")
+    torch.set_float32_matmul_precision("medium")
     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
 
     if cfg.resume_ckpt:
-        print("Resuming from checkpoint")
-        print(cfg.resume_ckpt)
+        print("Resuming from checkpoint", cfg.resume_ckpt)
         resume_ckpt = get_weights_path(cfg.resume_ckpt, cfg.wandb)
         # 判断resume_ckpt是否绝对路径
         if not resume_ckpt.startswith('/'):
@@ -89,9 +87,7 @@ def main(cfg):
         resume_ckpt = None
         resume_run_id = None
 
-    print("Resume run id:", resume_run_id)
     device_count = min(torch.cuda.device_count(), cfg.training.num_gpus)
-    print(f"use {device_count} gpus")
     if device_count == 1:
         pl.seed_everything(cfg.seed)
     logger = WandbLogger(
@@ -107,8 +103,7 @@ def main(cfg):
         offline=cfg.wandb.offline or TESTING or cfg.debug,
         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
     )
-    # logger.log_hyperparams(cfg)
-    # logger.log_hyperparams({"working_dir": os.getcwd()})
+
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
         accelerator="gpu",
@@ -147,18 +142,18 @@ def main(cfg):
         fast_dev_run=20 if TESTING else False,
         precision=cfg.training.precision,
     )
+    trainer.print(OmegaConf.to_yaml(cfg, resolve=True))
+    trainer.print(f"use {device_count} gpus")
 
     dm = MultiviewDataModule(
         batch_size=cfg.training.batch_size,
         num_workers=cfg.resources.num_workers,
         cfg=cfg.dm,
     )
-
     dm.setup()
 
     network = create_network(cfg.model)
-    if trainer.is_global_zero:
-        print(network)
+    trainer.print(network)
     if cfg.training.lr_scheduler_by_epoch:
         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio
     else:
@@ -171,6 +166,7 @@ def main(cfg):
     # For distributed training, we need to make sure that the learning rate scales with the number of GPUs.
     cfg.training.lr = cfg.training.lr * device_count
     cfg.training.min_lr = cfg.training.min_lr * device_count
+    trainer.print(f"real_lr: {cfg.training.lr}, real_min_lr: {cfg.training.min_lr}")
     scheduler_cfg = {
         'scheduler': cfg.training.scheduler,
         'max_steps': lr_scheduler_total_steps,
@@ -178,8 +174,7 @@ def main(cfg):
         'min_lr': cfg.training.min_lr,
         'by_epoch': cfg.training.lr_scheduler_by_epoch,
     }
-    if trainer.is_global_zero:
-        print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_ratio: {cfg.training.warmup_ratio}")
+    trainer.print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_step: {cfg.training.warmup_ratio*lr_scheduler_total_steps}")
     if cfg.debug:
         from torch.utils.tensorboard.writer import SummaryWriter
         tensorboard_writer = SummaryWriter()
@@ -208,9 +203,7 @@ def main(cfg):
     model.cuda()
     model.train()
     if cfg.training.load_from_checkpoint:
-        if trainer.is_global_zero:
-            print("loaded checkpoint from")
-            print(cfg.training.checkpoint_file)
+        trainer.print("loaded checkpoint from", cfg.training.checkpoint_file)
         model.load_state_dict(
             torch.load(hydra.utils.to_absolute_path(cfg.training.checkpoint_file))[
                 "state_dict"

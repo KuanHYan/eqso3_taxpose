@@ -851,12 +851,17 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         attns_action = np.concatenate([vis_pts.numpy(), color_dist], axis=1)
         res_images["attns_action"] = wandb.Object3D(attns_action)
 
-        corr_points = model_output["corr_points_action"][0].detach().cpu()
+        corr_points = model_output["corr_points_action"][0].cpu()
+        corr_points = corr_points - corr_points.mean(dim=0, keepdim=True)
+        w_0 = 100 * pred_w_action[0].unsqueeze(-1).expand(-1, 3).cpu()
+        flow = pred_flow_action[0].cpu()
+        flow = flow - flow.mean(dim=0, keepdim=True)
+        maybe_corr = w_0 * (corr_points + flow)
         corr_points = get_color(
             tensor_list=[
-                points_trans_anchor[0],
-                corr_points,
-                corr_points + model_output["residual_flow_action"][0].detach().cpu(),
+                w_0 * (points_trans_action[0].cpu() - points_trans_action[0].cpu().mean(dim=0, keepdim=True)),
+                w_0 * corr_points,
+                maybe_corr,
             ],
             color_list=["blue", "red", "green"],
         )

@@ -10,7 +10,6 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
 from taxpose.datasets.point_cloud_data_module import MultiviewDataModule
-from taxpose.nets.transformer_flow import create_network
 from taxpose.training.rl_fine_tune import RLTrainingModule
 from taxpose.nets.RL_policy import PolicyModel
 from taxpose.utils.load_model import get_weights_path
@@ -55,11 +54,13 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
         ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
     else:
         ckpt_file = checkpoint_reference
+    return ckpt_file
+
 
 @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
 def main(cfg):
-    print(OmegaConf.to_yaml(cfg, resolve=True))
-    # wandb.init(resume=cfg.resume_ckpt is not None)
+    if __name__ == "__main__":
+        print(OmegaConf.to_yaml(cfg, resolve=True))
 
     torch.set_float32_matmul_precision("medium")
     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
@@ -91,7 +92,6 @@ def main(cfg):
     device_count = min(torch.cuda.device_count(), cfg.training.num_gpus)
     if device_count == 1:
         pl.seed_everything(cfg.seed)
-    print(f"use {device_count} GPUs")
     logger = WandbLogger(
         name=cfg.wandb.name,
         entity=cfg.wandb.entity,
@@ -146,7 +146,14 @@ def main(cfg):
         fast_dev_run=20 if TESTING else False,
         precision=cfg.training.precision,
     )
-
+    validationer = pl.Trainer(
+        logger=False if TESTING else logger,
+        accelerator="auto",
+        strategy="auto",
+        devices=[0],
+        log_every_n_steps=cfg.testing.log_every_n_steps,
+    )
+    trainer.print(f"use {device_count} GPUs")
     dm = MultiviewDataModule(
         batch_size=cfg.training.batch_size,
         num_workers=cfg.resources.num_workers,
@@ -166,14 +173,16 @@ def main(cfg):
         group=cfg.rl.group,
     )
 
-    if cfg.debug or TESTING:
-        print(network)
+    trainer.print(network)
     if cfg.training.lr_scheduler_by_epoch:
         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio
     else:
         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio \
-            * int(len(dm.train_dataset) / cfg.training.batch_size)
+            * int(len(dm.train_dataset) / cfg.training.batch_size / device_count)
     lr_scheduler_total_steps = int(lr_scheduler_total_steps)
+    cfg.training.lr = cfg.training.lr * device_count
+    cfg.training.min_lr = cfg.training.min_lr * device_count
+    trainer.print(f"real_lr: {cfg.training.lr}, real_min_lr: {cfg.training.min_lr}")
     scheduler_cfg = {
         'scheduler': cfg.training.scheduler,
         'max_steps': lr_scheduler_total_steps,
@@ -181,7 +190,7 @@ def main(cfg):
         'min_lr': cfg.training.min_lr,
         'by_epoch': cfg.training.lr_scheduler_by_epoch,
     }
-    print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_ratio: {cfg.training.warmup_ratio}")
+    trainer.print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_step: {cfg.training.warmup_ratio*lr_scheduler_total_steps}")
     if cfg.debug:
         from torch.utils.tensorboard.writer import SummaryWriter
         tensorboard_writer = SummaryWriter()
@@ -204,7 +213,7 @@ def main(cfg):
     model.cuda()
     model.train()
     base_model_path = hydra.utils.to_absolute_path(cfg.rl.base_model_path)
-    print(f"loaded base model from: {base_model_path}")
+    trainer.print(f"loaded base model from: {base_model_path}")
     model.load_state_dict(
         torch.load(base_model_path)[
             "state_dict"
@@ -212,12 +221,12 @@ def main(cfg):
     )
     if not cfg.eval:
         model.eval()
-        trainer.validate(model, dm, ckpt_path=resume_ckpt)
+        validationer.validate(model, dm, ckpt_path=resume_ckpt)
         model.train()
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
 
     model.eval()
-    trainer.validate(model, dm, ckpt_path=resume_ckpt)
+    validationer.validate(model, dm, ckpt_path=resume_ckpt)
 
     # Print he run id of the current run
     print("Run ID: {} ".format(logger.experiment.id))
