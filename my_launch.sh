@@ -36,7 +36,7 @@ elif [ $PLATFORM == "cloud-featurize" ]; then
         --network host \
         --gpus all \
         --shm-size=48g \
-        -e WANDB_BASE_URL=http://localhost:8080 \
+        -e WANDB_BASE_URL=http://localhost:8765 \
         -e WANDB_API_KEY=local-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 \
         -v /home/featurize/data/ideal_pair_models:/root/pairpose/data \
         -v /home/featurize/work/taxpose/logs:/root/pairpose/logs \

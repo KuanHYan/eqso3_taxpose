@@ -64,7 +64,11 @@ def main(cfg):
 
     torch.set_float32_matmul_precision("medium")
     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
-
+    if not (cfg.wandb.offline or TESTING):
+        wandb.login(
+            key = os.environ.get("WANDB_API_KEY", None),
+            host= os.environ.get("WANDB_BASE_URL", None),
+        )
     if cfg.resume_ckpt:
         print("Resuming from checkpoint", cfg.resume_ckpt)
         resume_ckpt = get_weights_path(cfg.resume_ckpt, cfg.wandb)
@@ -159,8 +163,6 @@ def main(cfg):
     else:
         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio \
             * int(len(dm.train_dataset) / cfg.training.batch_size / device_count)
-    cfg.training.lr = cfg.training.lr * device_count
-    cfg.training.min_lr = cfg.training.min_lr * device_count    
     lr_scheduler_total_steps = int(lr_scheduler_total_steps)
 
     # For distributed training, we need to make sure that the learning rate scales with the number of GPUs.
