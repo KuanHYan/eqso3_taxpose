@@ -1,0 +1,2699 @@
+diff --git a/.gitignore b/.gitignore
+index 72119b1..2326dfb 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -401,4 +401,5 @@ pretraining_models
+ *.ipynb
+ *.tar.gz
+ *.ckpt
+-data_default
+\ No newline at end of file
++data_default
++pytorch3d
+diff --git a/configs/dataset/_augmentations.yaml b/configs/dataset/_augmentations.yaml
+index d4af7c8..0ee1e82 100644
+--- a/configs/dataset/_augmentations.yaml
++++ b/configs/dataset/_augmentations.yaml
+@@ -4,3 +4,10 @@ ball_occlusion: True
+ ball_radius: 0.1
+ occlusion_class: 0
+ occlusion_prob: 0.5
++# new augmentations
++random_dropout: True
++drop_prob: 0.1
++anisotropic_scaling: True
++scale_range: [0.98, 1.02]
++gaussian_noise: True
++noise_std: 0.005
+\ No newline at end of file
+diff --git a/configs/dataset/tax_pose.yaml b/configs/dataset/tax_pose.yaml
+index 7d98ff8..a0c1250 100644
+--- a/configs/dataset/tax_pose.yaml
++++ b/configs/dataset/tax_pose.yaml
+@@ -19,7 +19,7 @@ train_dset:
+     min_num_points: 1024
+     cloud_type: "mesh_sample"
+     action_class: 0
+-    anchor_class: 1
++    anchor_class: 0
+     min_num_cameras: 4
+     max_num_cameras: 4
+     normalize_dist: true
+diff --git a/configs/train_ndf.yaml b/configs/train_ndf.yaml
+index 10f0843..12e7b85 100644
+--- a/configs/train_ndf.yaml
++++ b/configs/train_ndf.yaml
+@@ -84,7 +84,7 @@ resume_ckpt: null
+ eval: False
+ 
+ resources:
+-  num_workers: 16
++  num_workers: 32
+ 
+ wandb:
+   group: Null
+diff --git a/my_launch.sh b/my_launch.sh
+index 4e74c55..010d060 100755
+--- a/my_launch.sh
++++ b/my_launch.sh
+@@ -36,7 +36,7 @@ elif [ $PLATFORM == "cloud-featurize" ]; then
+         --network host \
+         --gpus all \
+         --shm-size=48g \
+-        -e WANDB_BASE_URL=http://localhost:8080 \
++        -e WANDB_BASE_URL=http://localhost:8765 \
+         -e WANDB_API_KEY=local-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 \
+         -v /home/featurize/data/ideal_pair_models:/root/pairpose/data \
+         -v /home/featurize/work/taxpose/logs:/root/pairpose/logs \
+@@ -67,4 +67,4 @@ elif [ $PLATFORM == "local" ]; then
+ 
+ else
+     echo "Platform not recognized"
+-fi
+\ No newline at end of file
++fi
+diff --git a/pytorch3d b/pytorch3d
+deleted file mode 160000
+index 3145dd4..0000000
+--- a/pytorch3d
++++ /dev/null
+@@ -1 +0,0 @@
+-Subproject commit 3145dd4d16edaceb394838364b8e87a440f83c10
+diff --git a/scripts/train_residual_flow.py b/scripts/train_residual_flow.py
+index d0ba678..44be0d4 100644
+--- a/scripts/train_residual_flow.py
++++ b/scripts/train_residual_flow.py
+@@ -55,20 +55,22 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
+         ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
+     else:
+         ckpt_file = checkpoint_reference
++    return ckpt_file
+ 
+ 
+ @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
+ def main(cfg):
+-    if __name__ == "__main__":
+-        print(OmegaConf.to_yaml(cfg, resolve=True))
+     # wandb.init(resume=cfg.resume_ckpt is not None)
+ 
+-    torch.set_float32_matmul_precision("high")
++    torch.set_float32_matmul_precision("medium")
+     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
+-
++    if not (cfg.wandb.offline or TESTING):
++        wandb.login(
++            key = os.environ.get("WANDB_API_KEY", None),
++            host= os.environ.get("WANDB_BASE_URL", None),
++        )
+     if cfg.resume_ckpt:
+-        print("Resuming from checkpoint")
+-        print(cfg.resume_ckpt)
++        print("Resuming from checkpoint", cfg.resume_ckpt)
+         resume_ckpt = get_weights_path(cfg.resume_ckpt, cfg.wandb)
+         # 判断resume_ckpt是否绝对路径
+         if not resume_ckpt.startswith('/'):
+@@ -89,7 +91,6 @@ def main(cfg):
+         resume_ckpt = None
+         resume_run_id = None
+ 
+-    print("Resume run id:", resume_run_id)
+     device_count = min(torch.cuda.device_count(), cfg.training.num_gpus)
+     if device_count == 1:
+         pl.seed_everything(cfg.seed)
+@@ -106,12 +107,11 @@ def main(cfg):
+         offline=cfg.wandb.offline or TESTING or cfg.debug,
+         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
+     )
+-    # logger.log_hyperparams(cfg)
+-    # logger.log_hyperparams({"working_dir": os.getcwd()})
++
+     trainer = pl.Trainer(
+         logger=False if TESTING else logger,
+-        accelerator="auto",
+-        strategy=DDPStrategy(find_unused_parameters=True),
++        accelerator="gpu",
++        strategy=DDPStrategy(find_unused_parameters=True) if device_count > 1 else "auto",
+         devices=device_count,
+         sync_batchnorm=(device_count > 1),
+         log_every_n_steps=cfg.training.log_every_n_steps,
+@@ -146,18 +146,18 @@ def main(cfg):
+         fast_dev_run=20 if TESTING else False,
+         precision=cfg.training.precision,
+     )
++    trainer.print(OmegaConf.to_yaml(cfg, resolve=True))
++    trainer.print(f"use {device_count} gpus")
+ 
+     dm = MultiviewDataModule(
+         batch_size=cfg.training.batch_size,
+         num_workers=cfg.resources.num_workers,
+         cfg=cfg.dm,
+     )
+-
+     dm.setup()
+ 
+     network = create_network(cfg.model)
+-    if trainer.is_global_zero:
+-        print(network)
++    trainer.print(network)
+     if cfg.training.lr_scheduler_by_epoch:
+         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio
+     else:
+@@ -168,6 +168,7 @@ def main(cfg):
+     # For distributed training, we need to make sure that the learning rate scales with the number of GPUs.
+     cfg.training.lr = cfg.training.lr * device_count
+     cfg.training.min_lr = cfg.training.min_lr * device_count
++    trainer.print(f"real_lr: {cfg.training.lr}, real_min_lr: {cfg.training.min_lr}")
+     scheduler_cfg = {
+         'scheduler': cfg.training.scheduler,
+         'max_steps': lr_scheduler_total_steps,
+@@ -175,8 +176,7 @@ def main(cfg):
+         'min_lr': cfg.training.min_lr,
+         'by_epoch': cfg.training.lr_scheduler_by_epoch,
+     }
+-    if trainer.is_global_zero:
+-        print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_ratio: {cfg.training.warmup_ratio}")
++    trainer.print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_step: {cfg.training.warmup_ratio*lr_scheduler_total_steps}")
+     if cfg.debug:
+         from torch.utils.tensorboard.writer import SummaryWriter
+         tensorboard_writer = SummaryWriter()
+@@ -205,9 +205,7 @@ def main(cfg):
+     model.cuda()
+     model.train()
+     if cfg.training.load_from_checkpoint:
+-        if trainer.is_global_zero:
+-            print("loaded checkpoint from")
+-            print(cfg.training.checkpoint_file)
++        trainer.print("loaded checkpoint from", cfg.training.checkpoint_file)
+         model.load_state_dict(
+             torch.load(hydra.utils.to_absolute_path(cfg.training.checkpoint_file))[
+                 "state_dict"
+@@ -257,8 +255,7 @@ def main(cfg):
+         model.train()
+         trainer.fit(model, dm, ckpt_path=resume_ckpt)
+     model.eval()
+-    with torch.no_grad():
+-        trainer.validate(model, dm, ckpt_path=resume_ckpt)
++    trainer.validate(model, dm, ckpt_path=resume_ckpt)
+ 
+     # Print he run id of the current run
+     print("Run ID: {} ".format(logger.experiment.id))
+@@ -269,5 +266,4 @@ if __name__ == "__main__":
+     # torch.autograd.set_detect_anomaly(True)
+     torch.cuda.empty_cache()
+     torch.multiprocessing.set_sharing_strategy("file_system")
+-    # torch.multiprocessing.set_start_method("spawn")
+     main()
+diff --git a/scripts/train_rl_reward.py b/scripts/train_rl_reward.py
+index 6cb6f6c..74c8766 100644
+--- a/scripts/train_rl_reward.py
++++ b/scripts/train_rl_reward.py
+@@ -61,15 +61,14 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
+ 
+ @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
+ def main(cfg):
+-    print(OmegaConf.to_yaml(cfg, resolve=True))
++    # print(OmegaConf.to_yaml(cfg, resolve=True))
+     # wandb.init(resume=cfg.resume_ckpt is not None)
+ 
+     torch.set_float32_matmul_precision("medium")
+     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
+ 
+     if cfg.resume_ckpt:
+-        print("Resuming from checkpoint")
+-        print(cfg.resume_ckpt)
++        print("Resuming from checkpoint", cfg.resume_ckpt)
+         resume_ckpt = get_weights_path(cfg.resume_ckpt, cfg.wandb)
+         # 判断resume_ckpt是否绝对路径
+         if not resume_ckpt.startswith('/'):
+@@ -105,7 +104,7 @@ def main(cfg):
+         offline=cfg.wandb.offline or TESTING or cfg.debug,
+         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
+     )
+-    # logger.log_hyperparams(cfg)
++    logger.log_hyperparams(cfg)
+     # logger.log_hyperparams({"working_dir": os.getcwd()})
+     trainer = pl.Trainer(
+         logger=False if TESTING else logger,
+@@ -154,7 +153,7 @@ def main(cfg):
+ 
+     network = RewardModel(cfg.model.encoder, cfg.model.cycle, dropout=cfg.model.dropout)
+     if cfg.debug or TESTING:
+-        print(network)
++        logger.log_text(str(network))
+     if cfg.training.lr_scheduler_by_epoch:
+         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio
+     else:
+diff --git a/scripts/train_rl_tune.py b/scripts/train_rl_tune.py
+index 3400c00..fb4e043 100644
+--- a/scripts/train_rl_tune.py
++++ b/scripts/train_rl_tune.py
+@@ -10,7 +10,6 @@ from pytorch_lightning.callbacks import ModelCheckpoint
+ from pytorch_lightning.loggers import WandbLogger
+ 
+ from taxpose.datasets.point_cloud_data_module import MultiviewDataModule
+-from taxpose.nets.transformer_flow import create_network
+ from taxpose.training.rl_fine_tune import RLTrainingModule
+ from taxpose.nets.RL_policy import PolicyModel
+ from taxpose.utils.load_model import get_weights_path
+@@ -55,11 +54,13 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
+         ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
+     else:
+         ckpt_file = checkpoint_reference
++    return ckpt_file
++
+ 
+ @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
+ def main(cfg):
+-    print(OmegaConf.to_yaml(cfg, resolve=True))
+-    # wandb.init(resume=cfg.resume_ckpt is not None)
++    if __name__ == "__main__":
++        print(OmegaConf.to_yaml(cfg, resolve=True))
+ 
+     torch.set_float32_matmul_precision("medium")
+     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
+@@ -106,12 +107,11 @@ def main(cfg):
+     )
+     # logger.log_hyperparams(cfg)
+     # logger.log_hyperparams({"working_dir": os.getcwd()})
+-    
+     trainer = pl.Trainer(
+         logger=False if TESTING else logger,
+         accelerator="auto",
+         strategy="auto",
+-        devices=device_count,
++        devices=[0],
+         sync_batchnorm=(device_count > 1),
+         log_every_n_steps=cfg.training.log_every_n_steps,
+         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
+@@ -146,7 +146,14 @@ def main(cfg):
+         fast_dev_run=20 if TESTING else False,
+         precision=cfg.training.precision,
+     )
+-
++    validationer = pl.Trainer(
++        logger=False if TESTING else logger,
++        accelerator="auto",
++        strategy="auto",
++        devices=[0],
++        log_every_n_steps=cfg.testing.log_every_n_steps,
++    )
++    trainer.print(f"use {device_count} GPUs")
+     dm = MultiviewDataModule(
+         batch_size=cfg.training.batch_size,
+         num_workers=cfg.resources.num_workers,
+@@ -166,14 +173,16 @@ def main(cfg):
+         group=cfg.rl.group,
+     )
+ 
+-    if cfg.debug or TESTING:
+-        print(network)
++    trainer.print(network)
+     if cfg.training.lr_scheduler_by_epoch:
+         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio
+     else:
+         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio \
+-            * int(len(dm.train_dataset) / cfg.training.batch_size)
++            * int(len(dm.train_dataset) / cfg.training.batch_size / device_count)
+     lr_scheduler_total_steps = int(lr_scheduler_total_steps)
++    cfg.training.lr = cfg.training.lr * device_count
++    cfg.training.min_lr = cfg.training.min_lr * device_count
++    trainer.print(f"real_lr: {cfg.training.lr}, real_min_lr: {cfg.training.min_lr}")
+     scheduler_cfg = {
+         'scheduler': cfg.training.scheduler,
+         'max_steps': lr_scheduler_total_steps,
+@@ -181,7 +190,7 @@ def main(cfg):
+         'min_lr': cfg.training.min_lr,
+         'by_epoch': cfg.training.lr_scheduler_by_epoch,
+     }
+-    print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_ratio: {cfg.training.warmup_ratio}")
++    trainer.print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_step: {cfg.training.warmup_ratio*lr_scheduler_total_steps}")
+     if cfg.debug:
+         from torch.utils.tensorboard.writer import SummaryWriter
+         tensorboard_writer = SummaryWriter()
+@@ -204,7 +213,7 @@ def main(cfg):
+     model.cuda()
+     model.train()
+     base_model_path = hydra.utils.to_absolute_path(cfg.rl.base_model_path)
+-    print(f"loaded base model from: {base_model_path}")
++    trainer.print(f"loaded base model from: {base_model_path}")
+     model.load_state_dict(
+         torch.load(base_model_path)[
+             "state_dict"
+@@ -212,12 +221,12 @@ def main(cfg):
+     )
+     if not cfg.eval:
+         model.eval()
+-        trainer.validate(model, dm, ckpt_path=resume_ckpt)
++        validationer.validate(model, dm, ckpt_path=resume_ckpt)
+         model.train()
+         trainer.fit(model, dm, ckpt_path=resume_ckpt)
+ 
+     model.eval()
+-    trainer.validate(model, dm, ckpt_path=resume_ckpt)
++    validationer.validate(model, dm, ckpt_path=resume_ckpt)
+ 
+     # Print he run id of the current run
+     print("Run ID: {} ".format(logger.experiment.id))
+@@ -227,5 +236,4 @@ if __name__ == "__main__":
+     # torch.autograd.set_detect_anomaly(True)
+     torch.cuda.empty_cache()
+     torch.multiprocessing.set_sharing_strategy("file_system")
+-    torch.multiprocessing.set_start_method("spawn")
+     main()
+diff --git a/taxpose/datasets/asm_pair.py b/taxpose/datasets/asm_pair.py
+index d4d39be..177cb4a 100644
+--- a/taxpose/datasets/asm_pair.py
++++ b/taxpose/datasets/asm_pair.py
+@@ -20,13 +20,13 @@ from taxpose.datasets.augmentations import (
+ from taxpose.datasets.base import PlacementPointCloudData
+ from taxpose.datasets.enums import ObjectClass, Phase
+ from taxpose.datasets.env_mod_utils import get_random_distractor_demo  # type: ignore
+-from taxpose.datasets.symmetry_utils import (
+-    compute_demo_symmetry_features as new_compute_demo_symmetry_features,
+-)
+-from taxpose.utils.symmetry_utils import (
+-    get_sym_label_pca_grasp,
+-    get_sym_label_pca_place,
+-)
++# from taxpose.datasets.symmetry_utils import (
++#     compute_demo_symmetry_features as new_compute_demo_symmetry_features,
++# )
++# from taxpose.utils.symmetry_utils import (
++#     get_sym_label_pca_grasp,
++#     get_sym_label_pca_place,
++# )
+ 
+ #  0 for mug, 1 for rack, 2 for gripper
+ # These are the labels used in the NDF dataset
+@@ -82,91 +82,91 @@ class CustomPointCloudDatasetConfig:
+     multimodal_transform_base: bool = False
+ 
+ 
+-def compute_demo_symmetry_features(
+-    points_action,
+-    points_anchor,
+-    object_type,
+-    action,
+-    action_class,
+-    anchor_class,
+-    normalize_dist,
+-    skip_symmetry=False,
+-):
+-    # print(
+-    #     f"object_type: {object_type}, action: {action}, action_class: {action_class}, anchor_class: {anchor_class}"
+-    # )
+-    # Handle symmetry.
+-    if skip_symmetry:
+-        return None, None, None, None
+-
+-    if object_type in {ObjectClass.BOTTLE, ObjectClass.BOWL}:
+-        if action == "grasp":
+-            sym_dict = get_sym_label_pca_grasp(
+-                action_cloud=torch.as_tensor(points_action),
+-                anchor_cloud=torch.as_tensor(points_anchor),
+-                action_class=action_class,
+-                anchor_class=anchor_class,
+-                object_type=object_type,
+-                normalize_dist=normalize_dist,
+-            )
+-
+-        elif action == "place":
+-            sym_dict = get_sym_label_pca_place(
+-                action_cloud=torch.as_tensor(points_action),
+-                anchor_cloud=torch.as_tensor(points_anchor),
+-                action_class=action_class,
+-                anchor_class=anchor_class,
+-                normalize_dist=normalize_dist,
+-            )
+-
+-        symmetric_cls = sym_dict["cts_cls"]  # 1, num_points
+-        symmetric_cls = symmetric_cls.unsqueeze(-1).numpy()  # 1, 1, num_points
+-
+-        # We want to color the gripper somehow...
+-        if action_class == OBJECT_DEMO_LABELS[ObjectClass.GRIPPER]:
+-            nonsymmetric_cls = sym_dict["cts_cls_nonsym"]  # 1, num_points
+-            # 1, 1, num_points
+-            nonsymmetric_cls = nonsymmetric_cls.unsqueeze(-1).numpy()
+-        else:
+-            nonsymmetric_cls = None
+-
+-        symmetry_xyzrgb = sym_dict["fig"]
+-        if action_class == 0:
+-            if nonsymmetric_cls is None:
+-                nonsymmetric_cls = np.ones(
+-                    (1, points_anchor.shape[1], 1), dtype=np.float32
+-                )
+-            action_symmetry_features = symmetric_cls
+-            anchor_symmetry_features = nonsymmetric_cls
+-            action_symmetry_rgb = symmetry_xyzrgb[: points_action.shape[1], 3:][None]
+-            anchor_symmetry_rgb = symmetry_xyzrgb[points_action.shape[1] :, 3:][None]
+-        elif anchor_class == 0:
+-            if nonsymmetric_cls is None:
+-                nonsymmetric_cls = np.ones(
+-                    (1, points_action.shape[1], 1), dtype=np.float32
+-                )
+-            action_symmetry_features = nonsymmetric_cls
+-            anchor_symmetry_features = symmetric_cls
+-            action_symmetry_rgb = symmetry_xyzrgb[points_anchor.shape[1] :, 3:][None]
+-            anchor_symmetry_rgb = symmetry_xyzrgb[: points_anchor.shape[1], 3:][None]
+-        else:
+-            raise ValueError("this should not happen")
+-    else:
+-        action_symmetry_features = np.ones(
+-            (1, points_action.shape[1], 1), dtype=np.float32
+-        )
+-        anchor_symmetry_features = np.ones(
+-            (1, points_anchor.shape[1], 1), dtype=np.float32
+-        )
+-        action_symmetry_rgb = np.zeros((1, points_action.shape[1], 3), dtype=np.uint8)
+-        anchor_symmetry_rgb = np.zeros((1, points_anchor.shape[1], 3), dtype=np.uint8)
+-
+-    return (
+-        action_symmetry_features,
+-        anchor_symmetry_features,
+-        action_symmetry_rgb,
+-        anchor_symmetry_rgb,
+-    )
++# def compute_demo_symmetry_features(
++#     points_action,
++#     points_anchor,
++#     object_type,
++#     action,
++#     action_class,
++#     anchor_class,
++#     normalize_dist,
++#     skip_symmetry=False,
++# ):
++#     # print(
++#     #     f"object_type: {object_type}, action: {action}, action_class: {action_class}, anchor_class: {anchor_class}"
++#     # )
++#     # Handle symmetry.
++#     if skip_symmetry:
++#         return None, None, None, None
++
++#     if object_type in {ObjectClass.BOTTLE, ObjectClass.BOWL}:
++#         if action == "grasp":
++#             sym_dict = get_sym_label_pca_grasp(
++#                 action_cloud=torch.as_tensor(points_action),
++#                 anchor_cloud=torch.as_tensor(points_anchor),
++#                 action_class=action_class,
++#                 anchor_class=anchor_class,
++#                 object_type=object_type,
++#                 normalize_dist=normalize_dist,
++#             )
++
++#         elif action == "place":
++#             sym_dict = get_sym_label_pca_place(
++#                 action_cloud=torch.as_tensor(points_action),
++#                 anchor_cloud=torch.as_tensor(points_anchor),
++#                 action_class=action_class,
++#                 anchor_class=anchor_class,
++#                 normalize_dist=normalize_dist,
++#             )
++
++#         symmetric_cls = sym_dict["cts_cls"]  # 1, num_points
++#         symmetric_cls = symmetric_cls.unsqueeze(-1).numpy()  # 1, 1, num_points
++
++#         # We want to color the gripper somehow...
++#         if action_class == OBJECT_DEMO_LABELS[ObjectClass.GRIPPER]:
++#             nonsymmetric_cls = sym_dict["cts_cls_nonsym"]  # 1, num_points
++#             # 1, 1, num_points
++#             nonsymmetric_cls = nonsymmetric_cls.unsqueeze(-1).numpy()
++#         else:
++#             nonsymmetric_cls = None
++
++#         symmetry_xyzrgb = sym_dict["fig"]
++#         if action_class == 0:
++#             if nonsymmetric_cls is None:
++#                 nonsymmetric_cls = np.ones(
++#                     (1, points_anchor.shape[1], 1), dtype=np.float32
++#                 )
++#             action_symmetry_features = symmetric_cls
++#             anchor_symmetry_features = nonsymmetric_cls
++#             action_symmetry_rgb = symmetry_xyzrgb[: points_action.shape[1], 3:][None]
++#             anchor_symmetry_rgb = symmetry_xyzrgb[points_action.shape[1] :, 3:][None]
++#         elif anchor_class == 0:
++#             if nonsymmetric_cls is None:
++#                 nonsymmetric_cls = np.ones(
++#                     (1, points_action.shape[1], 1), dtype=np.float32
++#                 )
++#             action_symmetry_features = nonsymmetric_cls
++#             anchor_symmetry_features = symmetric_cls
++#             action_symmetry_rgb = symmetry_xyzrgb[points_anchor.shape[1] :, 3:][None]
++#             anchor_symmetry_rgb = symmetry_xyzrgb[: points_anchor.shape[1], 3:][None]
++#         else:
++#             raise ValueError("this should not happen")
++#     else:
++#         action_symmetry_features = np.ones(
++#             (1, points_action.shape[1], 1), dtype=np.float32
++#         )
++#         anchor_symmetry_features = np.ones(
++#             (1, points_anchor.shape[1], 1), dtype=np.float32
++#         )
++#         action_symmetry_rgb = np.zeros((1, points_action.shape[1], 3), dtype=np.uint8)
++#         anchor_symmetry_rgb = np.zeros((1, points_anchor.shape[1], 3), dtype=np.uint8)
++
++#     return (
++#         action_symmetry_features,
++#         anchor_symmetry_features,
++#         action_symmetry_rgb,
++#         anchor_symmetry_rgb,
++#     )
+ 
+ 
+ def is_valid_file(filename: str, min_num_points=1024) -> bool:
+@@ -219,8 +219,8 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
+             min_num = min(len(self.filenames), self.num_demo)
+             self.filenames = self.filenames[: min_num]
+ 
+-        self.occlusion_cfg = None
+-        # self.occlusion_fn = occlusion_fn(cfg.occlusion_cfg)
++        self.occlusion_cfg = cfg.occlusion_cfg
++        self.occlusion_fn = occlusion_fn(cfg.occlusion_cfg)
+ 
+     def get_existing_data(self):
+         filenames = fnmatch.filter(os.listdir(self.dataset_root), f"**_asm_**.npz")
+@@ -238,12 +238,10 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
+ 
+         # remove bad filenames in bad_demo
+         if len(bad_demo_names) > 0:
+-            print(f"Removed from {bad_demo_names} bad demos")
+             filenames = [name for name in filenames if name not in bad_demo_names]
+         print(f"{len(filenames)} / {original_length} demos left")
+         return filenames
+ 
+-    @functools.lru_cache(maxsize=100)
+     def load_data(self, filename, action_class, anchor_class):
+         point_data = np.load(filename, allow_pickle=True)
+         
+@@ -269,11 +267,11 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
+         #     points_raw_np = points_raw_np[valid_idxs]
+         #     classes_raw_np = classes_raw_np[valid_idxs]
+ 
+-        points_action_np = point_data['action'].copy()
++        points_action_np = point_data['action']
+         points_action_mean_np = points_action_np.mean(axis=0)
+         points_action_np = points_action_np - points_action_mean_np
+ 
+-        points_anchor_np = point_data['anchor'].copy()
++        points_anchor_np = point_data['anchor']
+         # points_anchor_mean_np = points_anchor_np.mean(axis=0)
+         # TODO: 当前猜测应该是使用同一个均值而非使用各自的均值中心化
+         points_anchor_np = points_anchor_np - points_action_mean_np
+@@ -400,7 +398,6 @@ class CustomPretrainingPointCloudDataset(Dataset):
+             self.data_list = self.data_list[:overfit]
+         if cfg.shuffle_pcs:
+             random.shuffle(self.data_list)
+-        print(f"Dataset length (final): {len(self.data_list)}")
+ 
+     def __len__(self):
+         return len(self.data_list)
+@@ -426,32 +423,9 @@ class CustomPretrainingPointCloudDataset(Dataset):
+         # 缓存列表
+         with open(cache_path, 'wb') as f:
+             pickle.dump(data_list, f, protocol=pickle.HIGHEST_PROTOCOL)
++        print(f"Dataset length (final): {len(self.data_list)}")
+         return data_list
+ 
+-    # def _is_valid_file(self, filename: str, pc_key: str) -> bool:
+-    #     """检查 npz 文件中的点云数据是否有效（无 inf/nan 且数值范围合理）"""
+-    #     try:
+-    #         # 只加载 'action' 数组，不进行任何预处理
+-    #         with np.load(filename, allow_pickle=True) as point_data:
+-    #             points_action_np = point_data[pc_key]
+-    #             mean_ = points_action_np.mean(axis=0)
+-    #             # 1. 检查是否包含 inf 或 nan
+-    #             if np.isinf(points_action_np).any() or np.isinf(mean_).any():
+-    #                 return False
+-                
+-    #             # 2. 检查数值范围是否过大（阈值 1e5 可根据实际数据调整）
+-    #             #    避免后续计算 mean 时溢出（float32 范围约 3e38，但极大会导致精度问题）
+-    #             if np.abs(points_action_np).max() > 1e5:
+-    #                 return False
+-                
+-    #             if np.isnan(points_action_np).any() or np.isnan(mean_).any():
+-    #                 return False
+-
+-    #             return True
+-    #     except Exception as e:
+-    #         print(f"Error loading or checking file {filename}: {e}")
+-    #         return False
+-
+     @staticmethod
+     def _recenter_pc(pc):
+         """点云中心化（复用原有逻辑）"""
+@@ -505,7 +479,6 @@ class CustomPretrainingPointCloudDataset(Dataset):
+             pcs[i] += noise
+         return pcs
+ 
+-    @functools.lru_cache(maxsize=100)
+     def load_data(self, filename) -> list:
+         with open(filename, 'rb') as f:
+             sample_data = pickle.load(f)
+@@ -527,12 +500,6 @@ class CustomPretrainingPointCloudDataset(Dataset):
+ 
+         cur_pts = np.concatenate(cur_pts, axis=0).astype(np.float32)
+ 
+-        # 6. 构造返回字典（完全兼容原有格式）
+-        data_dict = {
+-            "part_pcs": torch.from_numpy(cur_pts),  # [N_sum, 3]
+-            "n_pcs": torch.tensor(nps, dtype=torch.long),  # [max_num_part]
+-            "data_id": index,
+-        }
+         return cur_pts
+ 
+ 
+@@ -553,8 +520,6 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
+         bad_demo_names = []
+         for i in range(len(filenames)):
+             filename = filenames[i]
+-            if i == 0:
+-                print(filename)
+             if not os.path.exists(filename):
+                 bad_demo_names.append(filename)
+                 continue
+@@ -564,7 +529,6 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
+ 
+         # remove bad filenames in bad_demo
+         if len(bad_demo_names) > 0:
+-            print(f"Removed from {len(bad_demo_names)} bad demos")
+             filenames = [name for name in filenames if name not in bad_demo_names]
+         
+         print(f"Total valid files: {len(filenames)} / {original_length}")
+@@ -575,7 +539,6 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
+ 
+         return filenames
+ 
+-    @functools.lru_cache(maxsize=100)
+     def load_data(self, filename) -> list:
+         point_data = np.load(filename, allow_pickle=True)
+         if random.random() > 0.5:
+diff --git a/taxpose/datasets/augmentations.py b/taxpose/datasets/augmentations.py
+index 353917c..46331e4 100644
+--- a/taxpose/datasets/augmentations.py
++++ b/taxpose/datasets/augmentations.py
+@@ -1,11 +1,11 @@
+ from dataclasses import dataclass
+-from typing import Callable, Optional, Tuple
++from typing import Callable, Optional, Tuple, Union
+ 
+ import numpy as np
+ import numpy.typing as npt
+ import torch
+ from pytorch3d.ops import sample_farthest_points
+-
++from functools import partial
+ from taxpose.utils.occlusion_utils import ball_occlusion, plane_occlusion
+ 
+ 
+@@ -42,7 +42,7 @@ def maybe_downsample(
+ 
+ @dataclass
+ class OcclusionConfig:
+-    occlusion_class: int
++    occlusion_class: Union[int, str]
+ 
+     # Ball occlusion.
+     ball_occlusion: bool = True
+@@ -53,32 +53,161 @@ class OcclusionConfig:
+     plane_standoff: float = 0.04
+ 
+     occlusion_prob: float = 0.5
+-
+-
+-def occlusion_fn(
+-    cfg: Optional[OcclusionConfig] = None,
+-) -> Callable[[npt.NDArray[np.float32], int, int], npt.NDArray[np.float32]]:
++    # 新增增强
++    random_dropout: bool = True
++    drop_prob: float = 0.1
++    anisotropic_scaling: bool = True
++    scale_range: Tuple[float, float] = (0.97, 1.03)
++    gaussian_noise: bool = True
++    noise_std: float = 0.01
++
++
++def random_dropout(
++    points: Union[npt.NDArray[np.float32], torch.Tensor],
++    drop_prob: float = 0.1,
++    min_keep: int = 1024
++) -> Tuple[Union[npt.NDArray[np.float32], torch.Tensor], torch.Tensor]:
++    """
++    以概率 drop_prob 随机丢弃点。
++    Args:
++        points: (N, 3) numpy 或 torch 张量
++        drop_prob: 每个点被丢弃的概率
++        min_keep: 最少保留点数，低于此值则不丢弃
++    Returns:
++        retained_points: 保留的点
++        mask: bool 张量 [N]，True 表示保留
++    """
++    is_numpy = isinstance(points, np.ndarray)
++    if is_numpy:
++        points_t = torch.from_numpy(points)
++    else:
++        points_t = points
++
++    N = points_t.shape[0]
++    keep_prob = 1.0 - drop_prob
++    mask = torch.rand(N, device=points_t.device) < keep_prob
++
++    # 如果保留点太少，放弃这次丢弃
++    if mask.sum() < min_keep:
++        mask = torch.ones(N, dtype=torch.bool, device=points_t.device)
++
++    retained = points_t[mask]
++    if is_numpy:
++        retained = retained.numpy()
++    return retained, mask
++
++
++def anisotropic_scaling(
++    points: Union[npt.NDArray[np.float32], torch.Tensor],
++    scale_range: Tuple[float, float] = (0.97, 1.03),
++    axes: Tuple[int, ...] = (0, 1, 2)   # 沿哪些轴缩放，默认XYZ
++) -> Union[npt.NDArray[np.float32], torch.Tensor]:
++    """
++    沿指定轴进行各向异性的随机缩放。
++    Args:
++        points: (N, 3) numpy 或 torch 张量
++        scale_range: 缩放因子的下限和上限
++        axes: 需要缩放的轴，默认全部
++    Returns:
++        scaled_points: 缩放后的点云（不会移动中心）
++    """
++    is_numpy = isinstance(points, np.ndarray)
++    if is_numpy:
++        points_t = torch.from_numpy(points)
++    else:
++        points_t = points
++
++    scales = torch.ones(3, device=points_t.device, dtype=points_t.dtype)
++    for ax in axes:
++        # 为每个指定的轴独立采样缩放因子
++        s = scale_range[0] + (scale_range[1] - scale_range[0]) * torch.rand(1, device=points_t.device)
++        scales[ax] = s.item()
++
++    # 以点云中心为原点进行缩放，防止整体位移
++    center = points_t.mean(dim=0, keepdim=True)
++    centered = points_t - center
++    scaled = centered * scales + center
++
++    if is_numpy:
++        scaled = scaled.numpy()
++    return scaled
++
++
++def add_gaussian_noise(
++    points: Union[npt.NDArray[np.float32], torch.Tensor],
++    std: float = 0.01,
++    clip: Optional[float] = None
++) -> Union[npt.NDArray[np.float32], torch.Tensor]:
++    """
++    给每个点添加独立的高斯噪声。
++    Args:
++        points: (N, 3) numpy 或 torch 张量
++        std: 噪声标准差
++        clip: 噪声的截断范围（绝对值），None 表示不截断
++    Returns:
++        noisy_points
++    """
++    is_numpy = isinstance(points, np.ndarray)
++    if is_numpy:
++        points_t = torch.from_numpy(points)
++    else:
++        points_t = points
++
++    noise = torch.randn_like(points_t) * std
++    if clip is not None:
++        noise = noise.clamp(-clip, clip)
++
++    noisy = points_t + noise
++    if is_numpy:
++        noisy = noisy.numpy()
++    return noisy
++
++
++def _occlusion_with_aug(
++    points: npt.NDArray[np.float32],
++    obj_class: int,
++    min_num_points: int,
++    cfg: OcclusionConfig
++):
++    # 假设 points 形状为 (1, N, 3)，先取第一个
++    pc = points[0]   # (N, 3) numpy
++
++    # 1. 遮挡增强
++    if obj_class == cfg.occlusion_class or cfg.occlusion_class == "all":
++        if cfg.ball_occlusion:
++            if np.random.rand() < cfg.occlusion_prob:
++                pc_new, _ = ball_occlusion(pc, radius=cfg.ball_radius)
++                if pc_new.shape[0] > min_num_points:
++                    pc = pc_new
++        if cfg.plane_occlusion:
++            if np.random.rand() < cfg.occlusion_prob:
++                pc_new, _ = plane_occlusion(pc, stand_off=cfg.plane_standoff)
++                if pc_new.shape[0] > min_num_points:
++                    pc = pc_new
++
++    # 2. 随机丢弃点
++    if cfg.random_dropout:
++        pc, _ = random_dropout(pc, drop_prob=cfg.drop_prob)
++
++    # 3. 各向异性缩放
++    if cfg.anisotropic_scaling:
++        pc = anisotropic_scaling(pc, scale_range=cfg.scale_range)
++
++    # 4. 高斯噪声
++    if cfg.gaussian_noise:
++        pc = add_gaussian_noise(pc, std=cfg.noise_std)
++
++    # 确保返回与输入类型一致（numpy），并恢复 batch 维度
++    if isinstance(pc, torch.Tensor):
++        pc = pc.numpy()
++    return pc[np.newaxis, :]   # (1, N, 3)
++
++
++def _no_occlusion(points, obj_class, min_num_points):
++    return points
++
++
++def occlusion_fn(cfg: Optional[OcclusionConfig] = None):
+     if cfg is None:
+-        return lambda x, y, z: x
+-
+-    def occlusion(points: npt.NDArray[np.float32], obj_class: int, min_num_points: int):
+-        if obj_class == cfg.occlusion_class or cfg.occlusion_class == "all":
+-            if cfg.ball_occlusion:
+-                if np.random.rand() < cfg.occlusion_prob:
+-                    points_new, _ = ball_occlusion(points[0], radius=cfg.ball_radius)
+-
+-                    # Ignore the occlusion if it's going to mess us up later...
+-                    if points_new.shape[0] > min_num_points:
+-                        points = points_new.unsqueeze(0)
+-
+-            if cfg.plane_occlusion:
+-                if np.random.rand() < cfg.occlusion_prob:
+-                    points_new, _ = plane_occlusion(
+-                        points[0], stand_off=cfg.plane_standoff
+-                    )
+-                    # Ignore the occlusion if it's going to mess us up later...
+-                    if points_new.shape[0] > min_num_points:
+-                        points = points_new.unsqueeze(0)
+-        return points if isinstance(points, np.ndarray) else points.numpy()  # type: ignore
+-
+-    return occlusion
++        return _no_occlusion          # 模块级普通函数
++    return partial(_occlusion_with_aug, cfg=cfg)  # partial 可正常序列化
+diff --git a/taxpose/datasets/point_cloud_data_module.py b/taxpose/datasets/point_cloud_data_module.py
+index 14ff17f..8900ca7 100644
+--- a/taxpose/datasets/point_cloud_data_module.py
++++ b/taxpose/datasets/point_cloud_data_module.py
+@@ -49,9 +49,9 @@ class MultiviewDataModule(pl.LightningDataModule):
+             self.train_dataset,
+             batch_size=self.batch_size,
+             num_workers=num_workers,
++            pin_memory=True,
+             persistent_workers=num_workers > 0,
+             shuffle=True,
+-            pin_memory=True,
+         )
+ 
+     def val_dataloader(self):
+@@ -61,5 +61,6 @@ class MultiviewDataModule(pl.LightningDataModule):
+             self.val_dataset,
+             batch_size=self.batch_size,
+             num_workers=num_workers,
++            pin_memory=False,
+             persistent_workers=num_workers > 0,
+         )
+diff --git a/taxpose/nets/RL_policy.py b/taxpose/nets/RL_policy.py
+index 7e1fad1..bd89251 100644
+--- a/taxpose/nets/RL_policy.py
++++ b/taxpose/nets/RL_policy.py
+@@ -60,7 +60,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
+         pt: torch.distributions.Normal = head_res["distribution"]
+         mean_flow = head_res["full_flow"]
+         bz, _, n = mean_flow.shape
+-        corr_flow = pt.sample((group,)).permute(1, 0, 3, 2)
++        corr_flow = pt.sample((group,)).permute(1, 0, 3, 2).contiguous()
+         flow_weight = mean_flow[:, None, -1, :].expand(-1, group, -1)
+ 
+         # residual_flow_action = head_res["residual_flow"].permute(0, 2, 1)
+@@ -76,7 +76,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
+             pred_flow_anchor=None, pred_w_anchor=None
+     ):
+         bz, _, n = act_pts.shape
+-        act_pts = act_pts.permute(0, 2, 1).unsqueeze(1).expand(-1, self.group, -1, -1).reshape(-1, n, 3)
++        act_pts = act_pts.permute(0, 2, 1).contiguous().unsqueeze(1).expand(-1, self.group, -1, -1).reshape(-1, n, 3)
+         pred_flow_action = pred_flow_action.reshape(-1, n, 3)
+         pred_w_action = pred_w_action.reshape(-1, n)
+         if pred_flow_anchor is None:
+@@ -86,7 +86,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
+                 return_transform3d=True,
+             )
+         else:
+-            anchor_pts = anchor_pts.permute(0, 2, 1).unsqueeze(1).expand(-1, self.group, -1, -1).reshape(-1, n, 3)
++            anchor_pts = anchor_pts.permute(0, 2, 1).contiguous().unsqueeze(1).expand(-1, self.group, -1, -1).reshape(-1, n, 3)
+             pred_flow_anchor = pred_flow_anchor.reshape(-1, n, 3)
+             pred_w_anchor = pred_w_anchor.reshape(-1, n)
+             real_act = dualflow2pose(
+diff --git a/taxpose/nets/RL_tune.py b/taxpose/nets/RL_tune.py
+index 7486fd6..43cb1ec 100644
+--- a/taxpose/nets/RL_tune.py
++++ b/taxpose/nets/RL_tune.py
+@@ -65,8 +65,8 @@ class RewardModel(nn.Module):
+         #     self.pos_encoder = ManualPointWiseGemoFea(True, emb_dims)
+ 
+     def forward(self, *input, return_total_reward=False):
+-        action_points = input[0].permute(0, 2, 1)[:, :3]  # B,3,num_points
+-        anchor_points = input[1].permute(0, 2, 1)[:, :3]
++        action_points = input[0].permute(0, 2, 1).contiguous()[:, :3]  # B,3,num_points
++        anchor_points = input[1].permute(0, 2, 1).contiguous()[:, :3]
+ 
+         # action_points_dmean = action_points - action_points.mean(dim=2, keepdim=True)
+         # anchor_points_dmean = anchor_points - anchor_points.mean(dim=2, keepdim=True)
+@@ -96,8 +96,8 @@ class RewardModel(nn.Module):
+             action_embedding += F.normalize(action_pt_pos)
+             anchor_embedding += F.normalize(anchor_pt_pos)
+ 
+-        action_embedding = action_embedding.permute(0, 2, 1)
+-        anchor_embedding = anchor_embedding.permute(0, 2, 1)
++        action_embedding = action_embedding.permute(0, 2, 1).contiguous()
++        anchor_embedding = anchor_embedding.permute(0, 2, 1).contiguous()
+ 
+         action_embedding_tf = self.transformer_action(
+             anchor_embedding, action_embedding
+diff --git a/taxpose/nets/dgcnn_group.py b/taxpose/nets/dgcnn_group.py
+index 212124b..aa07458 100644
+--- a/taxpose/nets/dgcnn_group.py
++++ b/taxpose/nets/dgcnn_group.py
+@@ -1,46 +1,10 @@
+ import torch
+ from torch import nn
+ from pointnet2_ops import pointnet2_utils
+-# from knn_cuda import KNN
++from taxpose.nets.point_net_util import get_graph_feature
+ # knn = KNN(k=16, transpose_mode=False)
+ 
+ 
+-def knn_point(nsample, xyz, new_xyz):
+-    """
+-    Input:
+-        nsample: max sample number in local region
+-        xyz: all points, [B, N, C]
+-        new_xyz: query points, [B, S, C]
+-    Return:
+-        group_idx: grouped points index, [B, S, nsample]
+-    """
+-    sqrdists = square_distance(new_xyz, xyz)
+-    _, group_idx = torch.topk(sqrdists, nsample, dim = -1, largest=False, sorted=False)
+-    return group_idx
+-
+-
+-def square_distance(src, dst):
+-    """
+-    Calculate Euclid distance between each two points.
+-    src^T * dst = xn * xm + yn * ym + zn * zm
+-    sum(src^2, dim=-1) = xn*xn + yn*yn + zn*zn;
+-    sum(dst^2, dim=-1) = xm*xm + ym*ym + zm*zm;
+-    dist = (xn - xm)^2 + (yn - ym)^2 + (zn - zm)^2
+-         = sum(src**2,dim=-1)+sum(dst**2,dim=-1)-2*src^T*dst
+-    Input:
+-        src: source points, [B, N, C]
+-        dst: target points, [B, M, C]
+-    Output:
+-        dist: per-point square distance, [B, N, M]
+-    """
+-    B, N, _ = src.shape
+-    _, M, _ = dst.shape
+-    dist = -2 * torch.matmul(src, dst.permute(0, 2, 1))
+-    dist += torch.sum(src ** 2, -1).view(B, N, 1)
+-    dist += torch.sum(dst ** 2, -1).view(B, 1, M)
+-    return dist  
+-
+-
+ class DGCNN_Grouper(nn.Module):
+     def __init__(self, emb_dims=256, output_num=256, knn=16, dropout=0.1, norm='BN'):
+         super().__init__()
+@@ -52,14 +16,14 @@ class DGCNN_Grouper(nn.Module):
+         self.norm = norm
+         if norm == 'BN':
+             norm1 = nn.BatchNorm2d(64)
+-            norm2 = nn.BatchNorm2d(128)
+-            norm3 = nn.BatchNorm2d(128)
+-            norm4 = nn.BatchNorm2d(256)
++            norm2 = nn.BatchNorm2d(256)
++            norm3 = nn.BatchNorm2d(1024)
++            # norm4 = nn.BatchNorm2d(emb_dims)
+         elif norm == 'GN':
+             norm1 = nn.GroupNorm(4, 64)
+             norm2 = nn.GroupNorm(4, 256)
+             norm3 = nn.GroupNorm(4, 1024)
+-            norm4 = nn.GroupNorm(4, 256)
++            # norm4 = nn.GroupNorm(4, emb_dims)
+         else:
+             raise ValueError('Invalid normalization: %s' % norm)
+ 
+@@ -84,18 +48,19 @@ class DGCNN_Grouper(nn.Module):
+                                     norm1,
+                                     nn.LeakyReLU(negative_slope=0.2))
+ 
+-        self.layer2 = nn.Sequential(nn.Conv2d(72*2, 128, kernel_size=1, bias=False),
++        self.layer2 = nn.Sequential(nn.Conv2d(72*2, 256, kernel_size=1, bias=False),
+                                     norm2,
+                                     nn.LeakyReLU(negative_slope=0.2))
+ 
+-        self.layer3 = nn.Sequential(nn.Conv2d(128*2, 256, kernel_size=1, bias=False),
++        self.layer3 = nn.Sequential(nn.Conv2d(256*2, 1024, kernel_size=1, bias=False),
+                                     norm3,
+                                     nn.LeakyReLU(negative_slope=0.2))
+-        fpn_dim = 8 + 64 + 128 + 256
+-        self.layer4 = nn.Sequential(nn.Conv1d(fpn_dim, emb_dims, kernel_size=1, bias=False),
+-                                    norm4,
+-                                    nn.LeakyReLU(negative_slope=0.2))
+-
++        fpn_dim = 8 + 64 + 256 + 1024
++        # self.layer4 = nn.Sequential(nn.Conv1d(fpn_dim, emb_dims, kernel_size=1, bias=False),
++        #                             norm4,
++        #                             nn.LeakyReLU(negative_slope=0.2))
++        self.conv5 = nn.Sequential(nn.Conv1d(fpn_dim, 512, kernel_size=1, bias=False))
++        self.dropout = nn.Dropout(dropout)
+         self.output_num = output_num
+ 
+     @staticmethod
+@@ -116,73 +81,29 @@ class DGCNN_Grouper(nn.Module):
+ 
+         return new_coor, new_x
+ 
+-    @staticmethod
+-    def get_graph_feature(coor_q, x_q, coor_k, x_k, k=16):
+-
+-        # coor: bs, 3, np, x: bs, c, np
+-
+-        batch_size = x_k.size(0)
+-        num_points_k = x_k.size(2)
+-        num_points_q = x_q.size(2)
+-
+-        # _, idx = knn(coor_k, coor_q)  # bs k np
+-        idx = knn_point(k, coor_k.transpose(-1, -2).contiguous(), coor_q.transpose(-1, -2).contiguous()) # B G M
+-        idx = idx.transpose(-1, -2).contiguous()
+-        assert idx.shape[1] == k
+-        idx_base = torch.arange(0, batch_size, device=x_q.device).view(-1, 1, 1) * num_points_k
+-        idx = idx + idx_base
+-        idx = idx.view(-1)
+-        num_dims = x_k.size(1)
+-        x_k = x_k.transpose(2, 1).contiguous()
+-        feature = x_k.view(batch_size * num_points_k, -1)[idx, :]
+-        feature = feature.view(batch_size, k, num_points_q, num_dims).permute(0, 3, 2, 1).contiguous()
+-        x_q = x_q.view(batch_size, num_dims, num_points_q, 1).expand(-1, -1, -1, k)
+-        feature = torch.cat((feature - x_q, x_q), dim=1)
+-        return feature
+-
+-    def forward(self, x):
++    def forward(self, x, down=True):
+ 
+         # x: bs, 3, np
+         coor = x
+         f1 = self.input_trans(x)
+ 
+-        f = self.get_graph_feature(coor, f1, coor, f1, self.k)
+-        f = self.dropout(self.layer1(f))
+-        f2 = f.max(dim=-1, keepdim=False)[0]  # bs, 64, np//2, k -> bs, 64, np//2
+-
+-        f_ = torch.cat([f1, f2], dim=1)
+-
+-        coor_q, f_q = self.fps_downsample(coor, f_, self.output_num)
+-        f = self.get_graph_feature(coor_q, f_q, coor, f_, self.k)
+-        f = self.dropout(self.layer2(f))
+-        f3 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 64, onp
+-        coor = coor_q
+-
+-        f = self.get_graph_feature(coor, f3, coor, f3, self.k)
+-        f = self.dropout(self.layer3(f))
+-        f4 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 128, onp
+-
+-        coor_q, f_q = self.fps_downsample(coor, f, self.output_num)
+-        f = self.get_graph_feature(coor_q, f_q, coor, f)
+-        f = self.layer4(f)
+-        f = self.dropout(f.max(dim=-1, keepdim=False)[0])
+-        coor = coor_q
+-
+-        f1 = self.input_trans(x)
+-
+-        f = self.get_graph_feature(coor, f1, coor, f1, self.k)
++        f = get_graph_feature(coor, f1, coor, f1, self.k)
+         f = self.dropout(self.layer1(f))
+         f2 = f.max(dim=-1, keepdim=False)[0]  # bs, 64, np//2, k -> bs, 64, np//2
+ 
+         f_ = torch.cat([f1, f2], dim=1)
+ 
+-        coor_q, f_q = self.fps_downsample(coor, f_, self.output_num)
+-        f = self.get_graph_feature(coor_q, f_q, coor, f_, self.k)
++        if down:
++            coor_q, f_q = self.fps_downsample(coor, f_, self.output_num)
++        else:
++            coor_q, f_q = coor, f_
++        
++        f = get_graph_feature(coor_q, f_q, coor, f_, self.k)
+         f = self.dropout(self.layer2(f))
+         f3 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 64, onp
+         coor = coor_q
+ 
+-        f = self.get_graph_feature(coor, f3, coor, f3, self.k)
++        f = get_graph_feature(coor, f3, coor, f3, self.k)
+         f = self.dropout(self.layer3(f))
+         f4 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 128, onp
+ 
+@@ -194,8 +115,11 @@ class DGCNN_Grouper(nn.Module):
+ 
+         f = torch.cat([f_q, f3, f4], dim=1)
+         f = self.conv5(f)
++        if not down:
++            return f
+         return (f, coor)
+ 
++
+ if __name__ == '__main__':
+     x = torch.rand(2, 3, 1024).cuda()
+     grouper = DGCNN_Grouper(emb_dims=512, output_num=512).cuda()
+diff --git a/taxpose/nets/gemo_fea.py b/taxpose/nets/gemo_fea.py
+index cd8adae..dfdb9ec 100644
+--- a/taxpose/nets/gemo_fea.py
++++ b/taxpose/nets/gemo_fea.py
+@@ -116,7 +116,7 @@ class ManualPointWiseGemoFea(nn.Module):
+         for patches, patch_normals in zip(patches_list, patches_normals_list):
+             ppfs.append(calc_ppf_gpu(pts, normal, patches, patch_normals).reshape(b, n, -1))
+         
+-        return torch.cat(ppfs, dim = -1)
++        return torch.cat(ppfs, dim=-1)
+ 
+     def rotate_pts_batch(self, pts, rotation):
+         pts_shape = pts.shape
+@@ -133,13 +133,13 @@ class ManualPointWiseGemoFea(nn.Module):
+             ppf_feature with shape of [b, c, n], default c=24
+         """
+         if pts.shape[1] == 3:
+-            pts = pts.permute(0, 2, 1)
++            pts = pts.permute(0, 2, 1).contiguous()
+         normals = self.cal_normal(pts)
+         ppf_feature = self.calc_ppf(pts, normals)
+         if self.project:
+             ppf_feature = self.pos_project(ppf_feature)
+ 
+-        return ppf_feature.permute(0, 2, 1)
++        return ppf_feature.permute(0, 2, 1).contiguous()
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/taxpose/nets/head.py b/taxpose/nets/head.py
+index 79fa105..60a6913 100644
+--- a/taxpose/nets/head.py
++++ b/taxpose/nets/head.py
+@@ -1,5 +1,4 @@
+ from dataclasses import dataclass
+-import math
+ import torch
+ import torch.nn as nn
+ import torch.nn.functional as F
+@@ -12,41 +11,6 @@ from taxpose.nets.vn_dgcnn import VN4Head
+ from taxpose.nets.moe_wab import MOELayer
+ 
+ 
+-def normalize(points, eps=1e-8):
+-    """
+-    points: (B, N, 3) 点云batch
+-    returns:
+-        normalized: (B, N, 3) 归一化后的点云
+-        center: (B, 1, 3) 每个样本的重心
+-        radius: (B, 1, 1) 每个样本的缩放半径（最大距离）
+-    """
+-    # 计算重心 (B, 1, 3)
+-    center = points.mean(dim=1, keepdim=True)  # [B,1,3]
+-    # 平移至重心
+-    centered = points - center  # [B,N,3]
+-    # 计算每个点到原点的距离 (B, N)
+-    distances = torch.norm(centered, dim=2, keepdim=False)  # [B,N]
+-    # 最大距离作为半径 (B,1,1)
+-    radius = distances.max(dim=1, keepdim=True)[0].unsqueeze(-1)  # [B,1,1]
+-    # 避免除零，若半径为0则置为1
+-    radius = torch.where(radius < eps, torch.ones_like(radius), radius)
+-    # 归一化
+-    normalized = centered / radius  # [B,N,3]
+-    return normalized, center, radius
+-
+-
+-def denormalize(normalized_points, center, radius):
+-    """
+-    将归一化后的点云恢复到原始坐标空间
+-    normalized_points: (B, N, 3)
+-    center: (B, 1, 3)
+-    radius: (B, 1, 1)
+-    returns:
+-        original_points: (B, N, 3)
+-    """
+-    return normalized_points * radius + center
+-
+-
+ class LayerNorm1d(nn.Module):
+     """对 (B, C, L) 输入在 C 维度执行 LayerNorm，保持输出形状不变。"""
+     def __init__(self, num_channels, eps=1e-5, elementwise_affine=True):
+@@ -55,9 +19,9 @@ class LayerNorm1d(nn.Module):
+ 
+     def forward(self, x):
+         # x: (B, C, L) -> (B, L, C) -> LN -> (B, L, C) -> (B, C, L)
+-        x = x.transpose(1, 2)
++        x = x.transpose(1, 2).contiguous()
+         x = self.norm(x)
+-        x = x.transpose(1, 2)
++        x = x.transpose(1, 2).contiguous()
+         return x
+ 
+ 
+@@ -83,161 +47,6 @@ class ResidualBlock(nn.Module):
+         return F.relu(out)
+ 
+ 
+-class LearnedUpsamplingHead(nn.Module):
+-    def __init__(self, in_channels, mid_channels=128, out_points=1024,
+-                 k=8, init_scale=0.1, refer_point=False):
+-        super().__init__()
+-        self.out_points = out_points
+-        self.k = k
+-        self.refer_raw_point = refer_point
+-        # 注意力打分（用于聚合全局特征）
+-        self.attn_proxy = nn.Conv1d(in_channels + 3, 1, 1)
+-
+-        inc = in_channels + int(3*refer_point)
+-        # 粗坐标生成 MLP（仅依赖特征）
+-        self.coarse_mlp = nn.Sequential(
+-            nn.Conv1d(inc, mid_channels, 1, bias=False),
+-            LayerNorm1d(mid_channels),
+-            nn.ReLU(inplace=True),
+-            nn.Conv1d(mid_channels, 3, 1)
+-        )
+-
+-        # 特征上采样模块
+-        self.feat_up_mlp = nn.Sequential(
+-            nn.Conv1d(in_channels + 3, mid_channels, 1, bias=False),
+-            LayerNorm1d(mid_channels),
+-            nn.ReLU(inplace=True),
+-            ResidualBlock(mid_channels, mid_channels),
+-            nn.Conv1d(mid_channels, mid_channels, 1, bias=False),
+-            LayerNorm1d(mid_channels),
+-            nn.ReLU(inplace=True),
+-        )
+-
+-        # 位移解码器
+-        self.pos_enc_dim = 12
+-        self.decoder_in = mid_channels + 3 + self.pos_enc_dim
+-        self.decoder = nn.Sequential(
+-            nn.Conv1d(self.decoder_in, 128, 1, bias=False),
+-            LayerNorm1d(128),
+-            nn.ReLU(inplace=True),
+-            ResidualBlock(128, 128),
+-            nn.Conv1d(128, 3, 1)
+-        )
+-
+-        # 可学习的逐通道缩放因子
+-        self.scale = nn.Parameter(torch.ones(1, 3, 1) * init_scale)
+-
+-        # 种子编码，用于生成 M 个不同的粗点（在 __init__ 中注册）
+-        self.seed_code = nn.Parameter(torch.randn(1, in_channels, out_points) * 0.001)
+-
+-        self._init_weights()
+-
+-    def _init_weights(self):
+-        for m in self.modules():
+-            if isinstance(m, nn.Conv1d):
+-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+-                if m.bias is not None:
+-                    nn.init.zeros_(m.bias)
+-            elif isinstance(m, LayerNorm1d):
+-                # LayerNorm 内部有自己默认初始化，也可留空
+-                pass
+-
+-    def get_coarse_points(self, feat, points, target_points=None):
+-        """
+-        feat: (B, C, N)
+-        points: (B, 3, N)
+-        returns: (B, 3, M)
+-        """
+-        if self.refer_raw_point:
+-            assert target_points is not None, "请提供目标点云坐标以生成参考点当refer_raw_point=True"
+-        B, C, N = feat.shape
+-        M = self.out_points
+-
+-        # 拼接特征与坐标，用 softmax 计算各点重要性
+-        x = torch.cat([feat, points], dim=1)               # (B, C+3, N)
+-        scores = self.attn_proxy(x)                         # (B, 1, N)
+-        scores = F.softmax(scores, dim=-1)
+-
+-        # 加权聚合得到全局特征 (B, C)
+-        global_feat = torch.sum(feat * scores, dim=2)
+-        global_feat = global_feat.unsqueeze(2).expand(-1, -1, M)  # (B, C, M)
+-        # 加种子打破对称性，生成粗坐标
+-        expanded_feat = global_feat + self.seed_code        # (B, C, M)
+-        
+-        if self.refer_raw_point:
+-            expanded_feat = torch.cat([expanded_feat, target_points], dim=1)
+-        coarse_coords = self.coarse_mlp(expanded_feat)      # (B, 3, M)
+-        return coarse_coords
+-
+-    def forward(self, feat, points, return_coarse=False, target_points=None):
+-        """
+-        feat: (B, C, N)  backbone 特征
+-        points: (B, 3, N) 输入点云坐标
+-        returns: (B, 3, M) 预测的上采样点云坐标
+-        """
+-        B, C, N = feat.shape
+-        M = self.out_points
+-
+-        # 1. 生成粗点云坐标
+-        P_coarse = self.get_coarse_points(feat, points, target_points)     # (B, 3, M)
+-
+-        # 2. 特征插值（kNN + 反距离加权）
+-        dists, idx = self.knn(points, P_coarse.detach())    # (B, M, k)
+-
+-        # 将特征展平：(B, C, N) -> (B*N, C)
+-        feat_flat = feat.transpose(1, 2).reshape(B * N, C)
+-
+-        # 构造展平索引
+-        batch_offset = torch.arange(B, device=feat.device).view(B, 1, 1) * N
+-        idx = idx + batch_offset                             # (B, M, k)
+-        idx_flat = idx.reshape(-1, self.k)                   # (B*M, k)
+-
+-        gathered_feat = feat_flat[idx_flat, :].view(B, M, self.k, C)  # (B, M, k, C)
+-
+-        # 反距离权重
+-        weights = 1.0 / (dists + 1e-8)                      # (B, M, k)
+-        weights = weights / weights.sum(dim=2, keepdim=True) # (B, M, k)
+-        interpolated_feat = (gathered_feat * weights.unsqueeze(-1)).sum(dim=2)  # (B, M, C)
+-        interpolated_feat = interpolated_feat.transpose(1, 2)  # (B, C, M)
+-
+-        # 3. 特征上采样 MLP
+-        up_input = torch.cat([interpolated_feat, P_coarse], dim=1)  # (B, C+3, M)
+-        up_feat = self.feat_up_mlp(up_input)                        # (B, mid_channels, M)
+-
+-        # 4. 位置编码与位移解码
+-        pe = self.positional_encoding(P_coarse)                     # (B, pos_enc_dim, M)
+-        dec_in = torch.cat([up_feat, P_coarse, pe], dim=1)
+-        delta = self.decoder(dec_in)                                # (B, 3, M)
+-
+-        # 5. 最终坐标
+-        output = P_coarse + delta * self.scale
+-        if return_coarse:
+-            return output, P_coarse
+-        return output
+-
+-    def knn(self, xyz1, xyz2):
+-        """计算 xyz1 (B,3,N) 与 xyz2 (B,3,M) 之间的 k 近邻"""
+-        B, _, N = xyz1.shape
+-        _, _, M = xyz2.shape
+-        dist = torch.cdist(xyz1.transpose(1, 2), xyz2.transpose(1, 2))  # (B, N, M)
+-        dist, idx = torch.topk(dist, self.k, dim=1, largest=False)      # (B, k, M)
+-        dist = dist.transpose(1, 2)                                     # (B, M, k)
+-        idx = idx.transpose(1, 2)                                       # (B, M, k)
+-        return dist, idx
+-
+-    def positional_encoding(self, coords):
+-        """对坐标 (B, 3, M) 生成 sin/cos 位置编码，返回 (B, pos_enc_dim, M)"""
+-        B, _, M = coords.shape
+-        pe_list = []
+-        # 生成 4 个频段，每个频段 sin 与 cos，共 24 维，取前 pos_enc_dim 维
+-        for i in range(4):
+-            freq = 2.0 ** i
+-            pe_list.append(torch.sin(coords * freq))
+-            pe_list.append(torch.cos(coords * freq))
+-        pe = torch.cat(pe_list, dim=1)          # (B, 24, M)
+-        return pe[:, :self.pos_enc_dim, :]      # 截取所需维度
+-
+-
+ class TransformerHead(nn.Module):
+     def __init__(
+         self,
+@@ -267,7 +76,7 @@ class TransformerHead(nn.Module):
+         self.head_tf = CustomTransformer(
+             emb_dims=emb_dims,
+             n_blocks=1,
+-            dropout=0.1,
++            dropout=0.3,
+             ff_dims=4*emb_dims,
+             n_heads=emb_dims//64,
+             return_attn=True,
+@@ -298,6 +107,10 @@ class TransformerHead(nn.Module):
+         action_embedding_raw = input[1]
+         action_points = input[2]     # B, 3, N
+         anchor_points = input[3]
++        if action_embedding.shape[2] != action_points.shape[2]:
++            # NOTE: 1_dim is for channel dim, 2_dim is for points dim
++            action_points = input[4]
++            anchor_points = input[5]
+         scores = scores.transpose(2, 1).contiguous()
+         corr_points = torch.matmul(anchor_points, scores)
+         if self.project_corrs:
+@@ -516,177 +329,100 @@ class ResidualMLPHead(nn.Module):
+         }
+ 
+ 
+-class Emb_dim_256_ResidualMLPHead(nn.Module):
++class ResidualMLPHead4RL(ResidualMLPHead):
+     def __init__(
+         self,
+-        emb_dims=256,
++        emb_dims=512,
+         pred_weight=True,
+         residual_on=True,
+         norm=nn.BatchNorm1d,
++        bias=False,
+         use_coarse_ps=False,
+-    ):
+-        super(Emb_dim_256_ResidualMLPHead, self).__init__()
+-        self.emb_dims = emb_dims
+-        if use_coarse_ps:
+-            self.proj_flow = ResidualPointNet(
+-                [emb_dims, emb_dims * 4, emb_dims],
+-                norm,
+-                init_scale=0.01,
+-                use_coarse_ps=True,
+-                pos_encoding=False,
+-            )
+-        else:
+-            self.proj_flow = PointwiseMLP([emb_dims, emb_dims * 4, emb_dims], 3, norm)
+-        self.pred_weight = pred_weight
+-        if self.pred_weight:
+-            self.proj_flow_weight = PointwiseMLP(
+-                [emb_dims, emb_dims * 4, emb_dims], 1, norm
+-            )
+-        self.residual_on = residual_on
+-        self.use_coarse_ps = use_coarse_ps
+-
+-    def forward(self, *input, scores=None, return_embedding=False):
+-        action_embedding = input[0]
+-        anchor_embedding = input[1]
+-        action_points = input[2]
+-        anchor_points = input[3]
+-        if action_embedding.shape[2] != action_points.shape[2]:
+-            # NOTE: 1_dim is for channel dim, 2_dim is for points dim
+-            action_points = input[4]
+-            anchor_points = input[5]
+-        if scores is None:
+-            if len(input) <= 4:
+-                action_query = action_embedding
+-                anchor_key = anchor_embedding
+-            else:
+-                action_query = input[4]
+-                anchor_key = input[5]
+-
+-            d_k = action_query.size(1)
+-            scores = torch.matmul(
+-                action_query.transpose(2, 1).contiguous(), anchor_key
+-            ) / math.sqrt(d_k)
+-            # W_i # B, N, N (N=number of points, 1024 cur)
+-            scores = torch.softmax(scores, dim=2)
+-
+-        scores = scores.transpose(2, 1).contiguous()
+-        corr_points = torch.matmul(anchor_points, scores)
+-        # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
+-        corr_flow = corr_points - action_points
+-
+-        if self.pred_weight:
+-            weight = self.proj_flow_weight(action_embedding)
+-
+-        if self.residual_on:
+-            if self.use_coarse_ps:
+-                coarse_pts = corr_points.detach()
+-                if self.pred_weight:
+-                    _weight = weight / (
+-                        weight.sum(dim=1, keepdim=True) + 1e-8
+-                    )  # 归一化权重和为1
+-                    center = (coarse_pts * _weight).sum(dim=1, keepdims=True)
+-                else:
+-                    center = coarse_pts.mean(dim=1, keepdim=True)  # [B,1,3]
+-                # 平移至重心 NOTE: 不再尺度归一化。这可能会带来尺度不匹配问题？
+-                centered_corr_points = coarse_pts - center  # [B,N,3]
+-                residual_flow = self.proj_flow(
+-                    action_embedding, coarse_points=centered_corr_points
+-                )
+-                residual_flow = residual_flow + center
+-
+-            else:
+-                residual_flow = self.proj_flow(action_embedding)  # B,3,N
+-                # residual_flow = torch.matmul(residual_flow, scores)
+-
+-            flow = residual_flow + corr_flow
+-        else:
+-            flow = corr_flow
+-            residual_flow = torch.zeros_like(flow)
+-
+-        if self.pred_weight:
+-            corr_flow_weight = torch.concat([flow, weight], dim=1)
+-        else:
+-            corr_flow_weight = flow
+-        return {
+-            "full_flow": corr_flow_weight,
+-            "residual_flow": residual_flow,
+-            "corr_flow": corr_flow,
+-            "corr_points": corr_points,
+-            "scores": scores,
+-        }
+-
+-
+-class Coarse_Res_Head(nn.Module):
+-    def __init__(
+-        self,
+-        emb_dims=512,
++        project_corrs=False,
++        project_corrs_mode='mlp',
+         output_num=1024,
+-        pred_weight=True,
+-        norm=nn.BatchNorm1d,
+     ):
+-        super(Coarse_Res_Head, self).__init__()
+-        self.emb_dims = emb_dims
+-        self.proj_flow = LearnedUpsamplingHead(
+-            emb_dims, out_points=output_num,
+-            init_scale=0.01, refer_point=True,
+-            k=16,
++        super().__init__(
++            emb_dims, pred_weight, 
++            residual_on, norm, bias, 
++            use_coarse_ps, project_corrs, 
++            project_corrs_mode, output_num
++        )
++        self.corr_pts_std = PointwiseMLP(
++            [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
+         )
+-        if pred_weight:
+-            self.proj_flow_weight = PointwiseMLP(
+-                [emb_dims, 4*emb_dims, emb_dims], 1, norm)
+-        self.norm = norm
+-        self.pred_weight = pred_weight
+ 
+-    def forward(self, *input, scores=None, return_embedding=False):
++    def forward(self, *input, scores, return_embedding=False):
++        """
++        input:
++          action_embedding: B,512,N
++          anchor_embedding: B,512,N
++          action_points: B,3,N
++          anchor_points: B,3,N
++          scores: B,N,N, if needed, use this instead of calculating scores
++        return:
++          dict with keys:
++          full_flow: B,3,N
++          residual_flow: B,3,N
++          corr_flow: B,3,N
++          corr_points: B,3,N
++          scores: B,N,N
++        """
++        output = super(ResidualMLPHead4RL, self).forward(*input, scores=scores)
++        if self.training:
++            action_embedding = input[0]
++            flow = output["full_flow"][:, :-1, :]
++            std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
++            pt = Normal(flow, std)
++            output["distribution"] = pt
++
++        return output
++
++    def sample(self, *input, scores, return_embedding=False):
++        """
++        input:
++          action_embedding: B,512,N
++          anchor_embedding: B,512,N
++          action_points: B,3,N
++          anchor_points: B,3,N
++          scores: B,N,N, if needed, use this instead of calculating scores
++        return:
++          dict with keys:
++          full_flow: B,3,N
++          residual_flow: B,3,N
++          corr_flow: B,3,N
++          corr_points: B,3,N
++          scores: B,N,N
++        """
++        output = super(ResidualMLPHead4RL, self).forward(*input, scores=scores)
+         action_embedding = input[0]
+-        anchor_embedding = input[1]
+-        action_points = input[2]
+-        anchor_points = input[3]
+-        sample_point = input[4]
+-
+-        # TODO: set target_points=anchor_points
+-        corr_points, coarse_pts = self.proj_flow.forward(
+-            action_embedding,
+-            sample_point,
+-            return_coarse=True,
+-            target_points=anchor_points,
+-        )
+-        if self.pred_weight:
+-            assert action_embedding.size(-1) == corr_points.size(-1)
+-            weight = self.proj_flow_weight(action_embedding)
++        flow = output["full_flow"][:, :-1, :]
++        std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
++        pt = Normal(flow, std)
++        output["distribution"] = pt
+ 
+-        flow = corr_points - action_points
+-        if self.pred_weight:
+-            corr_flow_weight = torch.concat([flow, weight], dim=1)
+-        else:
+-            corr_flow_weight = flow
+-        return {
+-            "full_flow": corr_flow_weight,
+-            "residual_flow": flow - coarse_pts + action_points,
+-            "corr_flow": coarse_pts - action_points,
+-            "corr_points": coarse_pts,
+-            "scores": scores,
+-        }
++        return output
+ 
+ 
+-class ResidualMLPHead4RL(ResidualMLPHead):
++class TransformerHead4RL(TransformerHead):
+     def __init__(
+         self,
++        point_encoder_fun=None,
+         emb_dims=512,
++        output_num=1024,
++        pos_enc_dim=0,
+         pred_weight=True,
+         residual_on=True,
++        pos_enc=False,
+         norm=nn.BatchNorm1d,
+-        bias=False,
+-        use_coarse_ps=False,
+         project_corrs=False,
+-        project_corrs_mode='mlp',
+-        output_num=1024,
++        project_corrs_mode='mlp'
+     ):
+         super().__init__(
+-            emb_dims, pred_weight, 
+-            residual_on, norm, bias, 
+-            use_coarse_ps, project_corrs, 
+-            project_corrs_mode, output_num
++            point_encoder_fun, emb_dims, 
++            output_num, pos_enc_dim, pred_weight, 
++            residual_on, pos_enc, 
++            norm, project_corrs,project_corrs_mode 
+         )
+         self.corr_pts_std = PointwiseMLP(
+             [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
+@@ -708,7 +444,7 @@ class ResidualMLPHead4RL(ResidualMLPHead):
+           corr_points: B,3,N
+           scores: B,N,N
+         """
+-        output = super(ResidualMLPHead4RL, self).forward(*input, scores=scores)
++        output = super(TransformerHead4RL, self).forward(*input, scores=scores)
+         if self.training:
+             action_embedding = input[0]
+             flow = output["full_flow"][:, :-1, :]
+@@ -734,13 +470,12 @@ class ResidualMLPHead4RL(ResidualMLPHead):
+           corr_points: B,3,N
+           scores: B,N,N
+         """
+-        output = super(ResidualMLPHead4RL, self).forward(*input, scores=scores)
++        output = super(TransformerHead4RL, self).forward(*input, scores=scores)
+         action_embedding = input[0]
+         flow = output["full_flow"][:, :-1, :]
+         std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
+         pt = Normal(flow, std)
+         output["distribution"] = pt
+-
+         return output
+ 
+ 
+@@ -762,17 +497,6 @@ class HeadConfig:
+ 
+ 
+ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
+-    if cfg.up_sample:
+-        return Coarse_Res_Head(
+-            cfg.emb_dims,
+-            cfg.output_num,
+-            cfg.pred_weight,
+-            cfg.norm,
+-        )
+-    if cfg.head_type == "attention":
+-        return AttentionHead(
+-            cfg.emb_dims, cfg.pred_weight, cfg.residual_on, bias=cfg.head_bias
+-        )
+     if cfg.head_type == "transformer":
+         return TransformerHead(
+             point_encoder_fun=embedding_fun,
+@@ -784,18 +508,6 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
+             project_corrs=cfg.project_corrs,
+             project_corrs_mode=cfg.project_corrs_mode,
+         )
+-    if cfg.head_type == "mlp_wieght":
+-        return WeightHead(cfg.emb_dims, cfg.pred_weight, cfg.output_num, cfg.norm)
+-    # if cfg.head_type == "residual" and cfg.emb_dims == 256:
+-    #     return Emb_dim_256_ResidualMLPHead(
+-    #         cfg.emb_dims,
+-    #         cfg.pred_weight,
+-    #         cfg.residual_on,
+-    #         cfg.norm,
+-    #         cfg.use_coarse_ps,
+-    #         cfg.project_corrs,
+-    #         cfg.output_num
+-    #     )
+     if cfg.head_type == "rl_residual":
+         return ResidualMLPHead4RL(
+             cfg.emb_dims,
+@@ -808,6 +520,18 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
+             cfg.project_corrs_mode,
+             cfg.output_num,
+         )
++    if cfg.head_type == "rl_transformer":
++        return TransformerHead4RL(
++            point_encoder_fun=embedding_fun,
++            emb_dims=cfg.emb_dims,
++            output_num=cfg.output_num,
++            pred_weight=cfg.pred_weight,
++            residual_on=cfg.residual_on,
++            pos_enc=cfg.pos_encoding,
++            project_corrs=cfg.project_corrs,
++            project_corrs_mode=cfg.project_corrs_mode,
++            norm=cfg.norm
++        )
+     return ResidualMLPHead(
+         cfg.emb_dims,
+         cfg.pred_weight,
+diff --git a/taxpose/nets/point_net_util.py b/taxpose/nets/point_net_util.py
+new file mode 100644
+index 0000000..ca29c77
+--- /dev/null
++++ b/taxpose/nets/point_net_util.py
+@@ -0,0 +1,95 @@
++import torch
++
++
++def knn(k, query, key):
++    """
++    计算 query (B,N,3) 与 key (B,M,3) 之间的 k 近邻.
++        Input:
++            k: max sample number in local region
++            xyz: all points, [B, N, C]
++            new_xyz: query points, [B, M, C]
++        Return:
++            dist: squared distance, [B, N, k]
++            idx: grouped points index, [B, N, k]
++    """
++    dist = torch.cdist(query, key)  # (B, N, M)
++    dist, idx = torch.topk(dist, k, dim=-1, largest=False)      # (B, N, k)
++    return dist, idx
++
++
++def get_graph_feature(x_q, x_k=None, k=20, coord_q=None, coord_k=None):
++    """
++    coord: bs, 3, np, x: bs, c, np
++    if coord_k is None, use coord_k as coord_k
++    if x is None, use x as coord
++    """
++
++    batch_size = x_q.size(0)
++    num_points_q = x_q.size(2)
++    x_q = x_q.transpose(2, 1).contiguous()  # B, N, C
++    if x_k is None:
++        x_k = x_q
++    else:
++        x_k = x_k.transpose(2, 1).contiguous()
++    num_points_k = x_k.size(1)
++    num_dims = x_k.size(2)
++    if coord_q is None:
++        coord_q = x_q
++    else:
++        coord_q = coord_q.transpose(2, 1).contiguous()
++    if coord_k is None:
++        coord_k = x_k
++    else:
++        coord_k = coord_k.transpose(2, 1).contiguous()
++
++    _, idx = knn(k, coord_q, coord_k)
++    idx = idx.transpose(-1, -2).contiguous()  # B K N
++    assert idx.shape[1] == k
++    idx_base = torch.arange(0, batch_size, device=coord_q.device).view(-1, 1, 1) * num_points_k
++    idx = idx + idx_base
++    idx = idx.view(-1)
++    
++    feature = x_k.view(batch_size * num_points_k, -1)[idx, :]
++    feature = feature.view(batch_size, k, num_points_q, num_dims).permute(0, 3, 2, 1).contiguous()
++    x_q = x_q.view(batch_size, num_dims, num_points_q, 1).expand(-1, -1, -1, k)
++    feature = torch.cat((feature - x_q, x_q), dim=1)
++    return feature
++
++
++def get_graph_feature_for_vndgcnn(x, k=20, idx=None, x_coord=None):
++    batch_size = x.size(0)
++    num_points = x.size(-1)
++    x = x.view(batch_size, -1, num_points)
++    if idx is None:
++        if x_coord is None: # dynamic knn graph
++            _, idx = knn(k, x, x)
++        else:          # fixed knn graph with input point coordinates
++            _, idx = knn(k, x_coord, x_coord)
++    device = x.device
++
++    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
++
++    idx = idx + idx_base
++
++    idx = idx.view(-1)
++ 
++    _, num_dims, _ = x.size()
++    num_dims = num_dims // 3
++
++    x = x.transpose(2, 1).contiguous()
++    feature = x.view(batch_size*num_points, -1)[idx, :]
++    feature = feature.view(batch_size, num_points, k, num_dims, 3) 
++    x = x.view(batch_size, num_points, 1, num_dims, 3).repeat(1, 1, k, 1, 1)
++    
++    feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 4, 1, 2).contiguous()
++  
++    return feature
++
++
++if __name__ == '__main__':
++    x_q = torch.rand(2, 8, 100)
++    x_k = torch.rand(2, 8, 50)
++    # coord_q = torch.rand(2, 3, 100)
++    # coord_k = torch.rand(2, 3, 50)
++    # print(knn(20, coord_q.transpose(2, 1), coord_k.transpose(2, 1))[1].shape)
++    print(get_graph_feature(x_q).shape)
+\ No newline at end of file
+diff --git a/taxpose/nets/raw_dgcnn.py b/taxpose/nets/raw_dgcnn.py
+index 43da15e..a9544ac 100644
+--- a/taxpose/nets/raw_dgcnn.py
++++ b/taxpose/nets/raw_dgcnn.py
+@@ -20,67 +20,7 @@ from taxpose.nets.vn_layers import (
+     VNBatchNorm,
+     VNLayerNorm
+ )
+-
+-
+-def knn(x, k):
+-    inner = -2*torch.matmul(x.transpose(2, 1), x)
+-    xx = torch.sum(x**2, dim=1, keepdim=True)
+-    pairwise_distance = -xx - inner - xx.transpose(2, 1)
+-    idx = pairwise_distance.topk(k=k, dim=-1)[1]   # (batch_size, num_points, k)
+-    return idx
+-
+-
+-def get_graph_feature(x, k=20, idx=None):
+-    batch_size = x.size(0)
+-    num_points = x.size(-1)
+-    x = x.view(batch_size, -1, num_points)
+-    if idx is None:
+-        idx = knn(x, k=k)   # (batch_size, num_points, k)
+-    device = x.device
+-
+-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1)*num_points
+-
+-    idx = idx + idx_base
+-
+-    idx = idx.view(-1)
+-    _, num_dims, _ = x.size()
+-
+-    x = x.transpose(2, 1).contiguous()   # (batch_size, num_points, num_dims)  -> (batch_size*num_points, num_dims) #   batch_size * num_points * k + range(0, batch_size*num_points)
+-    feature = x.view(batch_size*num_points, -1)[idx, :]
+-    feature = feature.view(batch_size, num_points, k, num_dims) 
+-    x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
+-    feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 1, 2).contiguous()
+-    return feature
+-
+-
+-def get_graph_feature_for_vndgcnn(x, k=20, idx=None, x_coord=None):
+-    batch_size = x.size(0)
+-    num_points = x.size(-1)
+-    x = x.view(batch_size, -1, num_points)
+-    if idx is None:
+-        if x_coord is None: # dynamic knn graph
+-            idx = knn(x, k=k)
+-        else:          # fixed knn graph with input point coordinates
+-            idx = knn(x_coord, k=k)
+-    device = x.device
+-
+-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1)*num_points
+-
+-    idx = idx + idx_base
+-
+-    idx = idx.view(-1)
+- 
+-    _, num_dims, _ = x.size()
+-    num_dims = num_dims // 3
+-
+-    x = x.transpose(2, 1).contiguous()
+-    feature = x.view(batch_size*num_points, -1)[idx, :]
+-    feature = feature.view(batch_size, num_points, k, num_dims, 3) 
+-    x = x.view(batch_size, num_points, 1, num_dims, 3).repeat(1, 1, k, 1, 1)
+-    
+-    feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 4, 1, 2).contiguous()
+-  
+-    return feature
++from taxpose.nets.point_net_util import get_graph_feature
+ 
+ 
+ class LayerNorm1d(nn.Module):
+@@ -92,9 +32,9 @@ class LayerNorm1d(nn.Module):
+ 
+     def forward(self, x):
+         # x: (B, C, L) -> (B, L, C) -> LN -> (B, L, C) -> (B, C, L)
+-        x = x.transpose(1, 2)
++        x = x.transpose(1, 2).contiguous()
+         x = self.norm(x)
+-        x = x.transpose(1, 2)
++        x = x.transpose(1, 2).contiguous()
+         return x
+ 
+ 
+@@ -109,9 +49,9 @@ class LayerNorm2d(nn.Module):
+         """ 
+         x: (B, C, L) -> (B, L, C) -> LN -> (B, L, C) -> (B, C, L)
+         """
+-        x = x.transpose(1, 2)
++        x = x.transpose(1, 2).contiguous()
+         x = self.norm(x)
+-        x = x.transpose(1, 2)
++        x = x.transpose(1, 2).contiguous()
+         return x
+ 
+ 
+@@ -149,7 +89,7 @@ class PointNet(nn.Module):
+ 
+ class Swapaxes(nn.Module):
+     def forward(self, x):
+-        return x.transpose(-1, -2)
++        return x.transpose(-1, -2).contiguous()
+ 
+ 
+ class DGCNN(nn.Module):
+@@ -258,10 +198,11 @@ class DGCNN4TaxPose(DGCNN):
+         self.linear3 = None
+         del self.linear3
+ 
+-    def forward(self, x):
++    def forward(self, x, down=False):
+         '''
+         input: x with shape of [B, 3, N]
+         '''
++        coor = x
+         x = get_graph_feature(x, k=self.k)
+         x = self.conv1(x)
+         x1 = x.max(dim=-1, keepdim=False)[0]
+@@ -308,12 +249,12 @@ class DGCNN_VAE(nn.Module):
+             return self.inference(x)
+         fea = self.encoder(x)
+         pts = self.decoder(fea, x)
+-        return fea, pts.transpose(-1, -2)
++        return fea, pts.transpose(-1, -2).contiguous()
+ 
+     def process(self, x):
+         fea = self.encoder(x)
+         pts = self.decoder(fea, x)
+-        return fea, pts.transpose(-1, -2)
++        return fea, pts.transpose(-1, -2).contiguous()
+ 
+     @torch.no_grad()
+     def inference(self, x):
+@@ -334,6 +275,7 @@ class VNArgs:
+     pooling: str = "mean"
+     channel: int = 3
+ 
++
+ class VN_DGCNN(nn.Module):
+     def __init__(self, args: VNArgs, gc=False):
+         super(VN_DGCNN, self).__init__()
+@@ -351,7 +293,7 @@ class VN_DGCNN(nn.Module):
+         """
+         xyz: B, 3, N
+         """
+-        xyz = xyz.transpose(2, 1).unsqueeze(-1)  # (B, N, 3, 1)
++        xyz = xyz.transpose(2, 1).unsqueeze(-1).contiguous()  # (B, N, 3, 1)
+         xyz = self.conv2(self.conv1(xyz), )
+ 
+ 
+diff --git a/taxpose/nets/transformer_flow.py b/taxpose/nets/transformer_flow.py
+index 2f5dad3..e3ee335 100644
+--- a/taxpose/nets/transformer_flow.py
++++ b/taxpose/nets/transformer_flow.py
+@@ -15,10 +15,9 @@ import torch.nn.functional as F
+ from taxpose.nets.pointnet import PointwiseMLP, ResidualPointNet, PointNet
+ from taxpose.nets.transformer_flow_pm import CustomTransformer
+ from taxpose.nets.tv_mlp import MLP as TVMLP
+-from taxpose.nets.vn_dgcnn import VN_DGCNN_iqSO3, VNArgs
+ from taxpose.utils.multilateration import estimate_p
+ from third_party.dcp.model import DGCNN
+-from taxpose.nets.raw_dgcnn import DGCNN4TaxPose, DGCNN_VAE
++from taxpose.nets.raw_dgcnn import DGCNN4TaxPose, DGCNN_VAE, VN_DGCNN, VNArgs
+ from taxpose.nets.dgcnn_group import DGCNN_Grouper
+ from taxpose.nets.head import create_head, HeadConfig
+ from taxpose.nets.gemo_fea import ManualPointWiseGemoFea
+@@ -489,6 +488,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+                 head_cfg.pop("norm")
+                 cfg = HeadConfig(
+                     **head_cfg,
++                    output_num=encoder_cfg.output_num,
+                     norm=norm, emb_dims=emb_dims, pos_encoding=pos_encoding)
+             else:
+                 cfg = head_cfg
+@@ -523,20 +523,20 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+     def _action_embedding(self, points):
+         self.emb_nn_action.eval()
+         points = points - points.mean(dim=1, keepdim=True)
+-        embedding = self.emb_nn_action(points)
++        embedding = self.emb_nn_action(points, down=False)
+         embedding = F.normalize(embedding, dim=1)
+         return embedding
+ 
+     def _anchor_embedding(self, points):
+         self.emb_nn_anchor.eval()
+         points = points - points.mean(dim=1, keepdim=True)
+-        embedding = self.emb_nn_anchor(points)
++        embedding = self.emb_nn_anchor(points, down=False)
+         embedding = F.normalize(embedding, dim=1)
+         return embedding
+ 
+     def _embedding(self, *input):
+-        action_points = input[0].permute(0, 2, 1)[:, :3]  # B,3,num_points
+-        anchor_points = input[1].permute(0, 2, 1)[:, :3]
++        action_points = input[0].permute(0, 2, 1).contiguous()[:, :3]  # B,3,num_points
++        anchor_points = input[1].permute(0, 2, 1).contiguous()[:, :3]
+         action_points_dmean = action_points - action_points.mean(dim=2, keepdim=True)
+         anchor_points_dmean = anchor_points - anchor_points.mean(dim=2, keepdim=True)
+         # mean center point cloud before DGCNN
+@@ -552,21 +552,19 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+             if isinstance(action_embedding, tuple):
+                 action_embedding, pts = action_embedding
+                 act_down_sample = pts + action_points.mean(dim=2, keepdim=True)
+-                act_down_sample = act_down_sample
+                 # action_points = pts + action_points.mean(dim=2, keepdim=True)
+             anchor_embedding = self.emb_nn_anchor(anchor_points_dmean)
+             if isinstance(anchor_embedding, tuple):
+                 anchor_embedding, pts = anchor_embedding
+                 anch_down_sample = pts + anchor_points.mean(dim=2, keepdim=True)
+-                anch_down_sample = anch_down_sample
+                 # anchor_points = pts + anchor_points.mean(dim=2, keepdim=True)
+             action_embedding = F.normalize(action_embedding, dim=1)
+             anchor_embedding = F.normalize(anchor_embedding, dim=1)
+             del action_points_dmean, anchor_points_dmean
+             if self.feature_channels > 0:
+                 # Add a symmetry label to the embeddings.
+-                action_features = input[2].permute(0, 2, 1)
+-                anchor_features = input[3].permute(0, 2, 1)
++                action_features = input[2].permute(0, 2, 1).contiguous()
++                anchor_features = input[3].permute(0, 2, 1).contiguous()
+ 
+                 action_embedding_stack = torch.cat(
+                     [action_embedding, action_features], axis=1
+@@ -663,10 +661,10 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+             anch_down_sample,
+             scores=action_attn,
+         )
+-        flow_action = head_action_output["full_flow"].permute(0, 2, 1)
+-        residual_flow_action = head_action_output["residual_flow"].permute(0, 2, 1)
+-        corr_flow_action = head_action_output["corr_flow"].permute(0, 2, 1)
+-        corr_points_action = head_action_output["corr_points"].permute(0, 2, 1)
++        flow_action = head_action_output["full_flow"].permute(0, 2, 1).contiguous()
++        residual_flow_action = head_action_output["residual_flow"].permute(0, 2, 1).contiguous()
++        corr_flow_action = head_action_output["corr_flow"].permute(0, 2, 1).contiguous()
++        corr_points_action = head_action_output["corr_points"].permute(0, 2, 1).contiguous()
+ 
+         outputs = {
+             "flow_action": flow_action,
+@@ -674,12 +672,12 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+             "corr_flow_action": corr_flow_action,
+             "corr_points_action": corr_points_action,
+             "act_down_sample": (
+-                None if act_down_sample is None else act_down_sample.permute(0, 2, 1)
++                None if act_down_sample is None else act_down_sample.permute(0, 2, 1).contiguous()
+             ),
+         }
+ 
+         if "P_A" in head_action_output:
+-            original_points_action = head_action_output["P_A"].permute(0, 2, 1)
++            original_points_action = head_action_output["P_A"].permute(0, 2, 1).contiguous()
+             outputs["original_points_action"] = original_points_action
+             outputs["sampled_ixs_action"] = head_action_output["A_ixs"]
+ 
+@@ -695,10 +693,10 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+                 act_down_sample,
+                 scores=anchor_attn,
+             )
+-            flow_anchor = head_anchor_output["full_flow"].permute(0, 2, 1)
+-            residual_flow_anchor = head_anchor_output["residual_flow"].permute(0, 2, 1)
+-            corr_flow_anchor = head_anchor_output["corr_flow"].permute(0, 2, 1)
+-            corr_points_anchor = head_anchor_output["corr_points"].permute(0, 2, 1)
++            flow_anchor = head_anchor_output["full_flow"].permute(0, 2, 1).contiguous()
++            residual_flow_anchor = head_anchor_output["residual_flow"].permute(0, 2, 1).contiguous()
++            corr_flow_anchor = head_anchor_output["corr_flow"].permute(0, 2, 1).contiguous()
++            corr_points_anchor = head_anchor_output["corr_points"].permute(0, 2, 1).contiguous()
+ 
+             outputs = {
+                 **outputs,
+@@ -709,12 +707,12 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+                 "anch_down_sample": (
+                     None
+                     if anch_down_sample is None
+-                    else anch_down_sample.permute(0, 2, 1)
++                    else anch_down_sample.permute(0, 2, 1).contiguous()
+                 ),
+             }
+ 
+             if "P_A" in head_anchor_output:
+-                original_points_anchor = head_anchor_output["P_A"].permute(0, 2, 1)
++                original_points_anchor = head_anchor_output["P_A"].permute(0, 2, 1).contiguous()
+                 outputs["original_points_anchor"] = original_points_anchor
+                 outputs["sampled_ixs_anchor"] = head_anchor_output["A_ixs"]
+ 
+diff --git a/taxpose/nets/transformer_flow_pm.py b/taxpose/nets/transformer_flow_pm.py
+index b09cd1e..efb7445 100644
+--- a/taxpose/nets/transformer_flow_pm.py
++++ b/taxpose/nets/transformer_flow_pm.py
+@@ -216,8 +216,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+         )
+ 
+     def forward(self, *input):
+-        action_points = input[0].permute(0, 2, 1)  # B,3,num_points
+-        anchor_points = input[1].permute(0, 2, 1)
++        action_points = input[0].permute(0, 2, 1).contiguous()  # B,3,num_points
++        anchor_points = input[1].permute(0, 2, 1).contiguous()
+         if len(input) == 3:
+             cat = input[2]
+         else:
+@@ -252,9 +252,9 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+                 scores=action_attn,
+                 return_flow_component=self.return_flow_component,
+             )
+-            flow_action = flow_output_action["full_flow"].permute(0, 2, 1)
+-            residual_flow_action = flow_output_action["residual_flow"].permute(0, 2, 1)
+-            corr_flow_action = flow_output_action["corr_flow"].permute(0, 2, 1)
++            flow_action = flow_output_action["full_flow"].permute(0, 2, 1).contiguous()
++            residual_flow_action = flow_output_action["residual_flow"].permute(0, 2, 1).contiguous()
++            corr_flow_action = flow_output_action["corr_flow"].permute(0, 2, 1).contiguous()
+         else:
+             flow_action = self.head_action(
+                 action_embedding_tf,
+@@ -263,7 +263,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+                 anchor_points,
+                 scores=action_attn,
+                 return_flow_component=self.return_flow_component,
+-            ).permute(0, 2, 1)
++            ).permute(0, 2, 1).contiguous()
+ 
+         if self.cycle:
+             anchor_attn = anchor_attn.mean(dim=1)
+@@ -276,11 +276,11 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+                     scores=anchor_attn,
+                     return_flow_component=self.return_flow_component,
+                 )
+-                flow_anchor = flow_output_anchor["full_flow"].permute(0, 2, 1)
++                flow_anchor = flow_output_anchor["full_flow"].permute(0, 2, 1).contiguous()
+                 residual_flow_anchor = flow_output_anchor["residual_flow"].permute(
+                     0, 2, 1
+-                )
+-                corr_flow_anchor = flow_output_anchor["corr_flow"].permute(0, 2, 1)
++                ).contiguous()
++                corr_flow_anchor = flow_output_anchor["corr_flow"].permute(0, 2, 1).contiguous()
+             else:
+                 flow_anchor = self.head_anchor(
+                     anchor_embedding_tf,
+@@ -289,7 +289,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
+                     action_points,
+                     scores=anchor_attn,
+                     return_flow_component=self.return_flow_component,
+-                ).permute(0, 2, 1)
++                ).permute(0, 2, 1).contiguous()
+             if self.return_flow_component:
+                 return {
+                     "flow_action": flow_action,
+diff --git a/taxpose/nets/vn_dgcnn.py b/taxpose/nets/vn_dgcnn.py
+index f78895b..90d2078 100644
+--- a/taxpose/nets/vn_dgcnn.py
++++ b/taxpose/nets/vn_dgcnn.py
+@@ -7,7 +7,7 @@ from dataclasses import dataclass
+ 
+ import torch.nn as nn
+ from taxpose.utils.se3 import random_se3
+-from taxpose.nets.raw_dgcnn import get_graph_feature_for_vndgcnn
++from taxpose.nets.point_net_util import get_graph_feature_for_vndgcnn
+ from taxpose.nets.vn_layers import (
+     VNLinearLeakyReLU,
+     VNLinearAndLeakyReLU,
+@@ -44,10 +44,10 @@ class VN4Head(VNLinearAndLeakyReLU):
+         """
+         xyz: B, 3, N
+         """
+-        x = x.transpose(2, 1).unsqueeze(-1)  # (B, N, 3, 1)
++        x = x.transpose(2, 1).contiguous().unsqueeze(-1)  # (B, N, 3, 1)
+         x = super(VN4Head, self).forward(x)
+         x = self.output(x)  # (B, N, 3, 1)
+-        return x.squeeze(-1).transpose(2, 1)
++        return x.squeeze(-1).transpose(2, 1).contiguous()
+ 
+ 
+ class VN_DGCNN_eqSO3(nn.Module):
+diff --git a/taxpose/nets/vn_layers.py b/taxpose/nets/vn_layers.py
+index 255af75..2a9751f 100644
+--- a/taxpose/nets/vn_layers.py
++++ b/taxpose/nets/vn_layers.py
+@@ -17,7 +17,7 @@ class VNLinear(nn.Module):
+         '''
+         x: point features of shape [B, N_feat, 3, N_samples, ...]
+         '''
+-        x_out = self.map_to_feat(x.transpose(1,-1)).transpose(1,-1)
++        x_out = self.map_to_feat(x.transpose(1,-1)).transpose(1,-1).contiguous()
+         return x_out
+ 
+ 
+@@ -34,7 +34,7 @@ class VNLeakyReLU(nn.Module):
+         '''
+         x: point features of shape [B, N_feat, 3, N_samples, ...]
+         '''
+-        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1)
++        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1).contiguous()
+         dotprod = (x*d).sum(2, keepdim=True)
+         mask = (dotprod >= 0).float()
+         d_norm_sq = (d*d).sum(2, keepdim=True)
+@@ -61,11 +61,11 @@ class VNLinearLeakyReLU(nn.Module):
+         x: point features of shape [B, N_feat, 3, N_samples, ...]
+         '''
+         # Linear
+-        p = self.map_to_feat(x.transpose(1,-1)).transpose(1,-1)
++        p = self.map_to_feat(x.transpose(1,-1)).transpose(1,-1).contiguous()
+         # BatchNorm
+         p = self.batchnorm(p)
+         # LeakyReLU
+-        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1)
++        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1).contiguous()
+         dotprod = (p*d).sum(2, keepdims=True)
+         mask = (dotprod >= 0).float()
+         d_norm_sq = (d*d).sum(2, keepdims=True)
+@@ -146,9 +146,9 @@ class VNLayerNorm(nn.Module):
+         Input: x, point features of shape [B, N_feat, 3, N_samples, ...]
+         Return: 
+         """
+-        x = x.transpose(1, 3)  # B, N, 3, N_feat, ...
++        x = x.transpose(1, 3).contiguous()  # B, N, 3, N_feat, ...
+         x = self.norm(x)
+-        return x.transpose(1, 3)
++        return x.transpose(1, 3).contiguous()
+ 
+ 
+ class VNMaxPool(nn.Module):
+@@ -160,7 +160,7 @@ class VNMaxPool(nn.Module):
+         '''
+         x: point features of shape [B, N_feat, 3, N_samples, ...]
+         '''
+-        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1)
++        d = self.map_to_dir(x.transpose(1,-1)).transpose(1,-1).contiguous()
+         dotprod = (x*d).sum(2, keepdims=True)
+         idx = dotprod.max(dim=-1, keepdim=False)[1]
+         index_tuple = torch.meshgrid([torch.arange(j) for j in x.size()[:-1]]) + (idx,)
+@@ -192,7 +192,7 @@ class VNStdFeature(nn.Module):
+         z0 = x
+         z0 = self.vn1(z0)
+         z0 = self.vn2(z0)
+-        z0 = self.vn_lin(z0.transpose(1, -1)).transpose(1, -1)
++        z0 = self.vn_lin(z0.transpose(1, -1)).transpose(1, -1).contiguous()
+         
+         if self.normalize_frame:
+             # make z0 orthogonal. u2 = v2 - proj_u1(v2)
+@@ -208,9 +208,9 @@ class VNStdFeature(nn.Module):
+ 
+             # compute the cross product of the two output vectors        
+             u3 = torch.cross(u1, u2)
+-            z0 = torch.stack([u1, u2, u3], dim=1).transpose(1, 2)
++            z0 = torch.stack([u1, u2, u3], dim=1).transpose(1, 2).contiguous()
+         else:
+-            z0 = z0.transpose(1, 2)
++            z0 = z0.transpose(1, 2).contiguous()
+         
+         if self.dim == 4:
+             x_std = torch.einsum('bijm,bjkm->bikm', x, z0)
+diff --git a/taxpose/training/flow_equivariance_training_module_nocentering.py b/taxpose/training/flow_equivariance_training_module_nocentering.py
+index 885b9bd..f8caeaf 100644
+--- a/taxpose/training/flow_equivariance_training_module_nocentering.py
++++ b/taxpose/training/flow_equivariance_training_module_nocentering.py
+@@ -851,12 +851,17 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
+         attns_action = np.concatenate([vis_pts.numpy(), color_dist], axis=1)
+         res_images["attns_action"] = wandb.Object3D(attns_action)
+ 
+-        corr_points = model_output["corr_points_action"][0].detach().cpu()
++        corr_points = model_output["corr_points_action"][0].cpu()
++        corr_points = corr_points - corr_points.mean(dim=0, keepdim=True)
++        w_0 = 100 * pred_w_action[0].unsqueeze(-1).expand(-1, 3).cpu()
++        flow = pred_flow_action[0].cpu()
++        flow = flow - flow.mean(dim=0, keepdim=True)
++        maybe_corr = w_0 * (corr_points + flow)
+         corr_points = get_color(
+             tensor_list=[
+-                points_trans_anchor[0],
+-                corr_points,
+-                corr_points + model_output["residual_flow_action"][0].detach().cpu(),
++                w_0 * (points_trans_action[0].cpu() - points_trans_action[0].cpu().mean(dim=0, keepdim=True)),
++                w_0 * corr_points,
++                maybe_corr,
+             ],
+             color_list=["blue", "red", "green"],
+         )
+diff --git a/taxpose/training/point_cloud_training_module.py b/taxpose/training/point_cloud_training_module.py
+index fdeeb58..246a668 100644
+--- a/taxpose/training/point_cloud_training_module.py
++++ b/taxpose/training/point_cloud_training_module.py
+@@ -43,7 +43,7 @@ class PointCloudTrainingModule(pl.LightningModule):
+         return super().on_train_end()
+     
+     def on_train_epoch_start(self) -> None:
+-        print(f"Epoch: {self.current_epoch}, LR: {self._optimizer_.param_groups[0]['lr']:1.2e}")
++        self.print(f"Epoch: {self.current_epoch}, LR: {self._optimizer_.param_groups[0]['lr']:1.2e}")
+         return super().on_train_epoch_start()
+     
+     def on_train_epoch_end(self) -> None:
+diff --git a/taxpose/utils/se3.py b/taxpose/utils/se3.py
+index 586eb48..2a78d78 100644
+--- a/taxpose/utils/se3.py
++++ b/taxpose/utils/se3.py
+@@ -13,10 +13,6 @@ from pytorch3d.transforms import (
+ from pytorch3d.loss import chamfer_distance
+ from torch.nn import functional as F
+ from torch.cuda.amp.autocast_mode import autocast
+-import open3d as o3d
+-import open3d.core as o3c
+-import open3d.t.geometry as o3t_geom
+-import open3d.t.pipelines.registration as o3t_reg
+ from pytorch3d.ops import iterative_closest_point
+ 
+ 
+@@ -373,133 +369,6 @@ def dualflow2pose(
+     return R, t
+ 
+ 
+-def batch_icp(src_batch, tgt, init_batch, max_correspondence_distance=0.1):
+-    """
+-    src_batch: (B, N, 3)  GPU tensor
+-    tgt:        (M, 3)    GPU tensor（单目标）或 (B, M, 3)
+-    init_batch: (B, 4, 4) GPU tensor
+-    """
+-    B = src_batch.shape[0]
+-    transformations = []
+-    aligned_list = []
+-    for i in range(B):
+-        tgt_i = tgt[i] if tgt.dim() == 3 else tgt
+-        trans, aligned = icp_open3d(
+-            src_batch[i], tgt_i, init_batch[i],
+-            max_correspondence_distance
+-        )
+-        transformations.append(trans)
+-        aligned_list.append(aligned)
+-    # 堆叠回 batch 张量
+-    transformations = torch.stack(transformations)
+-    aligned_batch = torch.stack(aligned_list)
+-    return transformations, aligned_batch
+-
+-
+-def icp_open3d(src_pts, tgt_pts, tran_init, max_correspondence_distance=0.1):
+-    """
+-    使用 Open3D 进行 ICP 配准，支持 GPU 原生加速（带 CPU 回退）。
+-
+-    Parameters
+-    ----------
+-    src_pts : torch.Tensor
+-        源点云，shape (N, 3)，GPU 上的 float32/float64 张量。
+-    tgt_pts : torch.Tensor
+-        目标点云，shape (M, 3)，GPU 上的 float32/float64 张量。
+-    tran_init : torch.Tensor
+-        初始变换矩阵，shape (4, 4)，GPU 上的 float32/float64 张量。
+-    max_correspondence_distance : float
+-        ICP 最大对应点距离阈值。
+-
+-    Returns
+-    -------
+-    transformation : torch.Tensor
+-        最终 4x4 变换矩阵，保持与输入相同设备。
+-    aligned_src : torch.Tensor
+-        变换后的源点云，shape (N, 3)，与输入相同设备。
+-    """
+-    device = src_pts.device
+-    assert tgt_pts.device == device and tran_init.device == device, "所有输入必须位于同一设备"
+-
+-    # ── 1. 尝试 GPU 原生路径（零拷贝） ──
+-    if device.type == 'cuda':
+-        try:
+-            # 将 torch 张量转换为 Open3D tensor，共享内存（DLPack）
+-            src_o3d = o3c.Tensor.from_dlpack(
+-                torch.as_tensor(src_pts, dtype=torch.float32).contiguous().detach().to('cuda')
+-            )
+-            tgt_o3d = o3c.Tensor.from_dlpack(
+-                torch.as_tensor(tgt_pts, dtype=torch.float32).contiguous().detach().to('cuda')
+-            )
+-            init_o3d = o3c.Tensor.from_dlpack(
+-                torch.as_tensor(tran_init, dtype=torch.float32).contiguous().detach().to('cuda')
+-            )
+-
+-            # 构建 tensor point cloud
+-            src_pcd = o3t_geom.PointCloud(src_o3d)
+-            tgt_pcd = o3t_geom.PointCloud(tgt_o3d)
+-
+-            # ICP 参数
+-            criteria = o3t_reg.ICPConvergenceCriteria(
+-                relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=30
+-            )
+-            estimation = o3t_reg.TransformationEstimationPointToPoint()
+-
+-            # 执行 ICP（整个计算留在 GPU 上）
+-            reg_result = o3t_reg.icp(
+-                source=src_pcd, target=tgt_pcd,
+-                max_correspondence_distance=max_correspondence_distance,
+-                init=init_o3d, estimation_method=estimation, criteria=criteria
+-            )
+-
+-            # 结果张量转回 torch（同样零拷贝）
+-            transformation = torch.utils.dlpack.from_dlpack(
+-                reg_result.transformation.to_dlpack()
+-            ).to(device=device, dtype=torch.float32)
+-
+-            # 应用变换得到对齐后的点云
+-            ones = torch.ones(src_pts.shape[0], 1, device=device, dtype=src_pts.dtype)
+-            src_hom = torch.cat([src_pts, ones], dim=1)
+-            aligned_src = (transformation @ src_hom.T).T[:, :3]
+-
+-            return transformation, aligned_src
+-
+-        except Exception as e:
+-            print(f"GPU ICP 失败（可能 Open3D 未启用 CUDA）: {e}，回退到 CPU。")
+-
+-    # ── 2. CPU 回退路径 ──
+-    # 将数据移到 CPU，转为 NumPy
+-    src_cpu = src_pts.cpu().detach().numpy().astype('float64')
+-    tgt_cpu = tgt_pts.cpu().detach().numpy().astype('float64')
+-    init_cpu = tran_init.cpu().detach().numpy().astype('float64')
+-
+-    src_pcd = o3d.geometry.PointCloud()
+-    src_pcd.points = o3d.utility.Vector3dVector(src_cpu)
+-    tgt_pcd = o3d.geometry.PointCloud()
+-    tgt_pcd.points = o3d.utility.Vector3dVector(tgt_cpu)
+-
+-    # 传统 ICP
+-    reg_result = o3d.pipelines.registration.registration_icp(
+-        source=src_pcd, target=tgt_pcd,
+-        max_correspondence_distance=max_correspondence_distance,
+-        init=init_cpu,
+-        estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+-        criteria=o3d.pipelines.registration.ICPConvergenceCriteria(
+-            relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=30
+-        )
+-    )
+-
+-    transformation_cpu = reg_result.transformation
+-    transformation = torch.tensor(transformation_cpu, device=device, dtype=src_pts.dtype)
+-
+-    # 对齐
+-    ones = torch.ones(src_pts.shape[0], 1, device=device, dtype=src_pts.dtype)
+-    src_hom = torch.cat([src_pts, ones], dim=1)
+-    aligned_src = (transformation @ src_hom.T).T[:, :3]
+-
+-    return transformation, aligned_src
+-
+-
+ def dualflow2translation(
+     xyz_src,
+     xyz_tgt,
+diff --git a/taxpose_RL_tune.sh b/taxpose_RL_tune.sh
+index ca64875..7ad15ef 100644
+--- a/taxpose_RL_tune.sh
++++ b/taxpose_RL_tune.sh
+@@ -18,12 +18,12 @@ bash ./my_launch.sh $PLATFORM $GPU_INDEX \
+     python "./scripts/train_rl_tune.py" \
+     --config-name train_ndf \
+     job_type="rl_tune" \
+-    data_root="${ROOT_DIR}data/pair_models" \
++    data_root="${ROOT_DIR}data/ideal_pair_models" \
+     training.max_epochs=500 \
+     training.check_val_every_n_epoch=1 \
+-    training.batch_size=12 \
+-    training.lr=0.0001 \
+-    training.min_lr=0.000002 \
++    training.batch_size=6 \
++    training.lr=0.00005 \
++    training.min_lr=0.0000002 \
+     training.warmup_ratio=0.1 \
+     training.precision='32' \
+     training.num_gpus=1 \
+@@ -34,21 +34,22 @@ bash ./my_launch.sh $PLATFORM $GPU_INDEX \
+     dm.train_dset.anchor_rot_sample_method=axis_angle \
+     dm.train_dset.anchor_rotation_variance=3.141592653589793 \
+     model.freeze_embnn=True \
+-    model.dropout=0.0 \
++    model.dropout=0.1 \
++    model.n_blocks=1 \
+     model.encoder.name=raw_dgcnn \
+     model.encoder.emb_dims=512 \
+     model.encoder.norm=BN \
+     model.encoder.output_num=1024 \
+-    model.encoder.dropout=0.0 \
+-    model.head.head_type=rl_residual \
++    model.encoder.dropout=0.1 \
++    model.head.head_type=rl_transformer \
+     model.head.project_corrs=True \
+-    model.head.project_corrs_mode="vn" \
++    model.head.project_corrs_mode="moe" \
+     model.head.norm=LN \
+     model.head.head_bias=False \
+     model.head.residual_on=True \
+     model.head.pred_weight=True \
+-    rl.reward_model_path="logs/rl_reward/2026-05-24/10-51-49/checkpoints/reward_w.ckpt" \
+-    rl.base_model_path="logs/train_taxpose/best_ckpt/vn_Wab_wo_TFhead_6400dz.ckpt" \
++    rl.reward_model_path="logs/best_cpkg/reward_w.ckpt" \
++    rl.base_model_path="logs/train_taxpose/2026-05-30/10-42-04/checkpoints/last.ckpt" \
+     rl.group=8 \
+     rl.update_base_every=5 \
+     rl.kl_coef=0.02 \
+@@ -56,5 +57,4 @@ bash ./my_launch.sh $PLATFORM $GPU_INDEX \
+     wandb.name=$WANDB_NAME \
+     wandb.offline=True \
+     debug=False \
+-    resume_ckpt=$RESUME_CKPT \
+     eval=False
+diff --git a/taxpose_train_new_TFhead_rawEmb.sh b/taxpose_train_new_TFhead_rawEmb.sh
+index 157135e..b62487a 100644
+--- a/taxpose_train_new_TFhead_rawEmb.sh
++++ b/taxpose_train_new_TFhead_rawEmb.sh
+@@ -5,23 +5,24 @@ WANDB_NAME=$3
+ EVAL=$4
+ RESUME_CKPT=$5
+ ## use ./launch.sh local 0 $command to run on local machine
+-ROOT_DIR=/data/zju_YanKH/pair_pose/
+-cd $ROOT_DIR
++SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
++ROOT_DIR="${SCRIPT_DIR}/"
++cd "$ROOT_DIR" || exit 1
+ 
+ # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
+ export PYTEST_CURRENT_TEST=$TEST_MODE
+ ENCODEING=False
+ 
+-bash "./launch.sh" local $GPU_INDEX \
++bash "./my_launch.sh" local $GPU_INDEX \
+     python "./scripts/train_residual_flow.py" \
+     --config-name train_ndf \
+     job_type="train_taxpose" \
+-    data_root="/data/zju_YanKH/pair_pose/dataset/ideal_pair_models" \
+-    training.max_epochs=500 \
++    data_root="${ROOT_DIR}data/ideal_pair_models" \
++    training.max_epochs=50 \
+     training.check_val_every_n_epoch=1 \
+-    training.batch_size=38 \
+-    training.lr=0.00013 \
+-    training.min_lr=0.0000125 \
++    training.batch_size=12 \
++    training.lr=0.00005 \
++    training.min_lr=0.0000005 \
+     training.warmup_ratio=0.05 \
+     training.precision='32' \
+     training.scheduler=linear \
+@@ -32,7 +33,7 @@ bash "./launch.sh" local $GPU_INDEX \
+     dm.train_dset.anchor_rot_sample_method=axis_angle \
+     dm.train_dset.anchor_rotation_variance=3.141592653 \
+     model.freeze_embnn=True \
+-    model.dropout=0.3 \
++    model.dropout=0.1 \
+     model.n_blocks=1 \
+     model.pos_encoding=$ENCODEING \
+     model.encoder.name=raw_dgcnn \
+@@ -48,8 +49,8 @@ bash "./launch.sh" local $GPU_INDEX \
+     model.head.residual_on=True \
+     model.head.pred_weight=True \
+     wandb.name=$WANDB_NAME \
+-    'model.pretraining.action.ckpt_path="logs/best_cpkg/5000pts_dgcnn.ckpt"' \
+-    'model.pretraining.anchor.ckpt_path="logs/best_cpkg/5000pts_dgcnn.ckpt"' \
++    'model.pretraining.action.ckpt_path="/home/yan/pose_estimation/taxpose/trained_models/5000pts_dgcnn.ckpt"' \
++    'model.pretraining.anchor.ckpt_path="/home/yan/pose_estimation/taxpose/trained_models/5000pts_dgcnn.ckpt"' \
+     wandb.offline=False \
+     debug=False \
+     eval=$EVAL \
+diff --git a/train_base_model_on_featurize.sh b/train_base_model_on_featurize.sh
+index 042abba..464d7a5 100644
+--- a/train_base_model_on_featurize.sh
++++ b/train_base_model_on_featurize.sh
+@@ -12,29 +12,26 @@ cd "$ROOT_DIR" || exit 1
+ ENCODEING=False
+ 
+ bash "./my_launch.sh" cloud-featurize $GPU_INDEX \
+-    wandb login --relogin --host=http://localhost:8080 \
+-    local-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 \
+-    && \
+     python "./scripts/train_residual_flow.py" \
+     --config-name train_ndf \
+     job_type="train_taxpose" \
+     data_root="${ROOT_DIR}data/ideal_pair_models" \
+     training.max_epochs=500 \
+-    training.check_val_every_n_epoch=1 \
+-    training.batch_size=7 \
+-    training.lr=0.0001 \
+-    training.min_lr=0.00001 \
+-    training.warmup_ratio=0.05 \
++    training.check_val_every_n_epoch=2 \
++    training.batch_size=10 \
++    training.lr=0.000035 \
++    training.min_lr=0.0000035 \
++    training.warmup_ratio=0.02 \
+     training.precision='32' \
+     training.scheduler=linear \
+     training.num_gpus=$GPU_NUM \
+     dataset@dm=tax_pose \
+     dm.train_dset.demo_dset.num_demo=6000 \
+-    dm.train_dset.dataset_size=32000 \
++    dm.train_dset.dataset_size=64000 \
+     dm.train_dset.anchor_rot_sample_method=axis_angle \
+     dm.train_dset.anchor_rotation_variance=3.141592653 \
+     model.freeze_embnn=True \
+-    model.dropout=0.1 \
++    model.dropout=0.3 \
+     model.n_blocks=1 \
+     model.pos_encoding=$ENCODEING \
+     model.encoder.name=raw_dgcnn \
+@@ -52,6 +49,5 @@ bash "./my_launch.sh" cloud-featurize $GPU_INDEX \
+     wandb.name=$WANDB_NAME \
+     model.pretraining.action.ckpt_path="logs/5000pts_dgcnn.ckpt" \
+     model.pretraining.anchor.ckpt_path="logs/5000pts_dgcnn.ckpt" \
+-    wandb.offline=False \
+-    debug=False \
+-    resume_ckpt=$RESUME_CKPT
++    wandb.offline=True \
++    debug=False
+\ No newline at end of file
+diff --git a/train_base_model_on_gongji.sh b/train_base_model_on_gongji.sh
+index 2f3190d..447cfc0 100644
+--- a/train_base_model_on_gongji.sh
++++ b/train_base_model_on_gongji.sh
+@@ -8,7 +8,7 @@ cd "$ROOT_DIR" || exit 1
+ # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
+ ENCODEING=False
+ 
+-CUDA_VISIBLE_DEVICES=[0]
++CUDA_VISIBLE_DEVICES="0"
+ 
+ python "./scripts/train_residual_flow.py" \
+     --config-name train_ndf \
