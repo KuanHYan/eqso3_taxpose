@@ -219,8 +219,8 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
             min_num = min(len(self.filenames), self.num_demo)
             self.filenames = self.filenames[: min_num]
 
-        self.occlusion_cfg = None
-        # self.occlusion_fn = occlusion_fn(cfg.occlusion_cfg)
+        self.occlusion_cfg = cfg.occlusion_cfg
+        self.occlusion_fn = occlusion_fn(cfg.occlusion_cfg)
 
     def get_existing_data(self):
         filenames = fnmatch.filter(os.listdir(self.dataset_root), f"**_asm_**.npz")
@@ -238,12 +238,10 @@ class CustomPointCloudDataset(Dataset[PlacementPointCloudData]):
 
         # remove bad filenames in bad_demo
         if len(bad_demo_names) > 0:
-            print(f"Removed from {bad_demo_names} bad demos")
             filenames = [name for name in filenames if name not in bad_demo_names]
         print(f"{len(filenames)} / {original_length} demos left")
         return filenames
 
-    @functools.lru_cache(maxsize=100)
     def load_data(self, filename, action_class, anchor_class):
         point_data = np.load(filename, allow_pickle=True)
         
@@ -505,7 +503,6 @@ class CustomPretrainingPointCloudDataset(Dataset):
             pcs[i] += noise
         return pcs
 
-    @functools.lru_cache(maxsize=100)
     def load_data(self, filename) -> list:
         with open(filename, 'rb') as f:
             sample_data = pickle.load(f)
@@ -564,7 +561,6 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
 
         # remove bad filenames in bad_demo
         if len(bad_demo_names) > 0:
-            print(f"Removed from {len(bad_demo_names)} bad demos")
             filenames = [name for name in filenames if name not in bad_demo_names]
         
         print(f"Total valid files: {len(filenames)} / {original_length}")
@@ -575,7 +571,6 @@ class CustomPretrainingTotalPCDataset(CustomPretrainingPointCloudDataset):
 
         return filenames
 
-    @functools.lru_cache(maxsize=100)
     def load_data(self, filename) -> list:
         point_data = np.load(filename, allow_pickle=True)
         if random.random() > 0.5:
