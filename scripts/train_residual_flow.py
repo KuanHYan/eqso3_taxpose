@@ -7,14 +7,16 @@ import wandb
 from omegaconf import OmegaConf
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.strategies import DDPStrategy
+from pytorch_lightning.strategies import DDPStrategy, SingleDeviceStrategy
 from taxpose.datasets.point_cloud_data_module import MultiviewDataModule
 from taxpose.nets.transformer_flow import create_network
 from taxpose.training.flow_equivariance_training_module_nocentering import (
     EquivarianceTrainingModule,
 )
 from taxpose.utils.load_model import get_weights_path
-
+import torch.distributed as dist
+print(torch.cuda.device_count())
+DEVICE = torch.device('cuda:0')
 
 def load_emb_weights(checkpoint_reference, wandb_cfg=None, run=None):
     if checkpoint_reference.startswith(wandb_cfg.entity):
@@ -60,7 +62,9 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
 
 @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
 def main(cfg):
-    # wandb.init(resume=cfg.resume_ckpt is not None)
+    # if __name__ == "__main__":
+    #     print(OmegaConf.to_yaml(cfg, resolve=True))
+    # # wandb.init(resume=cfg.resume_ckpt is not None)
 
     torch.set_float32_matmul_precision("medium")
     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
@@ -113,7 +117,7 @@ def main(cfg):
         accelerator="gpu",
         strategy=DDPStrategy(find_unused_parameters=True) if device_count > 1 else "auto",
         devices=device_count,
-        sync_batchnorm=(device_count > 1),
+        sync_batchnorm=False,
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         # reload_dataloaders_every_n_epochs=1,
@@ -145,6 +149,7 @@ def main(cfg):
         max_epochs=cfg.training.max_epochs,
         fast_dev_run=20 if TESTING else False,
         precision=cfg.training.precision,
+        accumulate_grad_batches=2,
     )
     trainer.print(OmegaConf.to_yaml(cfg, resolve=True))
     trainer.print(f"use {device_count} gpus")
@@ -202,7 +207,7 @@ def main(cfg):
         tensorboard_writer=tensorboard_writer
     )
 
-    model.cuda()
+    model.cuda(DEVICE)
     model.train()
     if cfg.training.load_from_checkpoint:
         trainer.print("loaded checkpoint from", cfg.training.checkpoint_file)
@@ -232,8 +237,8 @@ def main(cfg):
                     "-----------------------Pretrained EmbNN Action Model Loaded!-----------------------"
                 )
                 print(
-                    "Loaded Pretrained EmbNN Action: {}".format(
-                        cfg.model.pretraining.action.ckpt_path
+                    "rank {} Loaded Pretrained EmbNN Action: {}".format(
+                        trainer.global_rank, cfg.model.pretraining.action.ckpt_path
                     )
                 )
             if cfg.model.pretraining.anchor.ckpt_path is not None:
@@ -245,13 +250,18 @@ def main(cfg):
                     "-----------------------Pretrained EmbNN Anchor Model Loaded!-----------------------"
                 )
                 print(
-                    "Loaded Pretrained EmbNN Anchor: {}".format(
-                        cfg.model.pretraining.anchor.ckpt_path
+                    "rank {} Loaded Pretrained EmbNN Anchor: {}".format(
+                        trainer.global_rank, cfg.model.pretraining.anchor.ckpt_path
                     )
                 )
+    # for name, param in model.named_parameters():
+    #     print(f"[Rank {trainer.global_rank}] {name}: {param.shape}")
+    # for name, buf in model.named_buffers():
+    #     print(f"[Rank {trainer.global_rank}] buffer {name}: {buf.shape}")
+
     if not cfg.eval:
-        model.eval()
-        trainer.validate(model, dm, ckpt_path=resume_ckpt)
+        # if trainer.is_global_zero:
+        #     trainer.validate(model, dm, ckpt_path=resume_ckpt)
         model.train()
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
     model.eval()

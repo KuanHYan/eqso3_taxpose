@@ -134,12 +134,12 @@ class CorrespondenceMLPHead(nn.Module):
 
             d_k = action_query.size(1)
             scores = torch.matmul(
-                action_query.transpose(2, 1).contiguous(), anchor_key
+                action_query.transpose(2, 1), anchor_key
             ) / math.sqrt(d_k)
             # W_i # B, N, N (N=number of points, 1024 cur)
             scores = torch.softmax(scores, dim=2)
 
-        corr_points = torch.matmul(anchor_points, scores.transpose(2, 1).contiguous())
+        corr_points = torch.matmul(anchor_points, scores.transpose(2, 1))
         # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
         corr_flow = corr_points - action_points
         weight = self.proj_flow(action_embedding)

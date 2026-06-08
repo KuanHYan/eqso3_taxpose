@@ -126,7 +126,7 @@ class TransformerHead(nn.Module):
         corr_flow = corr_points - action_points
 
         # global point is to compute relative vector
-        pt_scores = self.score(action_embedding).transpose(2, 1).contiguous()  # B, C, N --> B, N, 1
+        pt_scores = self.score(action_embedding).transpose(2, 1)  # B, C, N --> B, N, 1
         pt_scores = F.softmax(pt_scores, dim=1)
         global_pt = corr_points @ pt_scores  # B, 3, 1
         # global_pt = anchor_points.mean(dim=2, keepdim=True)
@@ -136,7 +136,7 @@ class TransformerHead(nn.Module):
         corr_points_emb = self.pt_encoder_fun(corr_points)
         scores_for_bias, emb_2 = self.head_tf.get_attn_scores(
             action_embedding_raw, corr_points_emb, seq_dim=2)
-        scores_for_bias = scores_for_bias.transpose(2, 1).contiguous()  # B, N, M
+        scores_for_bias = scores_for_bias.transpose(2, 1)  # B, N, M
         residual_flow = torch.einsum("bcn,bnm->bcm", corr_points, scores_for_bias) - global_pt  # B, 3, N
         if self.project_corrs:
             if not isinstance(self.project_pts, MOELayer):
@@ -259,7 +259,7 @@ class ResidualMLPHead(nn.Module):
         #     # W_i # B, N, N (N=number of points, 1024 cur)
         #     scores = torch.softmax(scores, dim=2)
 
-        scores = scores.transpose(2, 1).contiguous()
+        scores = scores.transpose(2, 1)
         corr_points = torch.matmul(anchor_points, scores)
         if self.project_corrs:
             corr_points_center = corr_points.mean(dim=2, keepdim=True)

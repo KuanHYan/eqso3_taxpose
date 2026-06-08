@@ -18,7 +18,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     --config-name train_ndf \
     job_type="train_taxpose" \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
-    training.max_epochs=50 \
+    training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
     training.batch_size=12 \
     training.lr=0.00005 \
@@ -26,7 +26,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     training.warmup_ratio=0.05 \
     training.precision='32' \
     training.scheduler=linear \
-    training.num_gpus=2 \
+    training.num_gpus=1 \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=6000 \
     dm.train_dset.dataset_size=32000 \
