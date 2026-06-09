@@ -16,7 +16,7 @@ from taxpose.training.flow_equivariance_training_module_nocentering import (
 from taxpose.utils.load_model import get_weights_path
 import torch.distributed as dist
 print(torch.cuda.device_count())
-DEVICE = torch.device('cuda:0')
+# DEVICE = torch.device('cuda:0')
 
 def load_emb_weights(checkpoint_reference, wandb_cfg=None, run=None):
     if checkpoint_reference.startswith(wandb_cfg.entity):
@@ -149,7 +149,7 @@ def main(cfg):
         max_epochs=cfg.training.max_epochs,
         fast_dev_run=20 if TESTING else False,
         precision=cfg.training.precision,
-        accumulate_grad_batches=2,
+        accumulate_grad_batches=cfg.training.accumulate_grad_batches,
     )
     trainer.print(OmegaConf.to_yaml(cfg, resolve=True))
     trainer.print(f"use {device_count} gpus")
@@ -163,6 +163,7 @@ def main(cfg):
 
     network = create_network(cfg.model)
     trainer.print(network)
+    device_count = device_count * cfg.training.accumulate_grad_batches
     if cfg.training.lr_scheduler_by_epoch:
         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio
     else:
@@ -207,7 +208,7 @@ def main(cfg):
         tensorboard_writer=tensorboard_writer
     )
 
-    model.cuda(DEVICE)
+    model.cuda()
     model.train()
     if cfg.training.load_from_checkpoint:
         trainer.print("loaded checkpoint from", cfg.training.checkpoint_file)

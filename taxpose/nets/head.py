@@ -76,7 +76,7 @@ class TransformerHead(nn.Module):
         self.head_tf = CustomTransformer(
             emb_dims=emb_dims,
             n_blocks=1,
-            dropout=0.3,
+            dropout=0.1,
             ff_dims=4*emb_dims,
             n_heads=emb_dims//64,
             return_attn=True,

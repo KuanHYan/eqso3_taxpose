@@ -78,6 +78,7 @@ training:
 
   optimization_mode: "auto"
   num_gpus: 1
+  accumulate_grad_batches: 1
 
 seed: 0
 resume_ckpt: null
