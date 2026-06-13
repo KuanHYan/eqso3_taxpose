@@ -59,7 +59,7 @@ class DGCNN_Grouper(nn.Module):
         # self.layer4 = nn.Sequential(nn.Conv1d(fpn_dim, emb_dims, kernel_size=1, bias=False),
         #                             norm4,
         #                             nn.LeakyReLU(negative_slope=0.2))
-        self.conv5 = nn.Sequential(nn.Conv1d(fpn_dim, 512, kernel_size=1, bias=False))
+        self.conv5 = nn.Sequential(nn.Conv1d(fpn_dim, emb_dims, kernel_size=1, bias=False))
         self.dropout = nn.Dropout(dropout)
         self.output_num = output_num
 

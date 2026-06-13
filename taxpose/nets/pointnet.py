@@ -65,7 +65,7 @@ class PointNet(nn.Module):
             x = conv(x)  # B, new_c, N
             if isinstance(norm, nn.LayerNorm):
                 # B, new_c, N -> B, N, new_c -> B, new_c, N
-                x = norm(x.swapaxes(1, 2)).swapaxes(1, 2)
+                x = norm(x.permute(1, 2)).permute(1, 2)
             else:
                 x = norm(x)
             x = F.relu(x)

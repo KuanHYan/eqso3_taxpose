@@ -15,7 +15,6 @@ from taxpose.training.flow_equivariance_training_module_nocentering import (
 )
 from taxpose.utils.load_model import get_weights_path
 import torch.distributed as dist
-print(torch.cuda.device_count())
 # DEVICE = torch.device('cuda:0')
 
 def load_emb_weights(checkpoint_reference, wandb_cfg=None, run=None):
@@ -60,18 +59,63 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
     return ckpt_file
 
 
+def set_cfg_fpr_debug(cfg):
+    torch.cuda.set_device(0)
+    OmegaConf.update(cfg, "job_type", "train_taxpose")
+    OmegaConf.update(cfg, "data_root", "/home/yan/pose_estimation/taxpose/data/ideal_pair_models")
+    OmegaConf.update(cfg, "training.max_epochs", 500)
+    OmegaConf.update(cfg, "training.check_val_every_n_epoch", 1)
+    OmegaConf.update(cfg, "training.batch_size", 16)
+    OmegaConf.update(cfg, "training.lr", 0.0001)
+    OmegaConf.update(cfg, "training.min_lr", 0.00001)
+    OmegaConf.update(cfg, "training.warmup_ratio", 0.05)
+    OmegaConf.update(cfg, "training.precision", '32')
+    OmegaConf.update(cfg, "training.num_gpus", 1)
+    OmegaConf.update(cfg, "training.accumulate_grad_batches", 1)
+    OmegaConf.update(cfg, "training.scheduler", "linear")
+    OmegaConf.update(cfg, "dm.train_dset.demo_dset.num_demo", 600)
+    OmegaConf.update(cfg, "dm.train_dset.dataset_size", 640)
+    OmegaConf.update(cfg, "dm.train_dset.anchor_rot_sample_method", "axis_angle")
+    OmegaConf.update(cfg, "dm.train_dset.anchor_rotation_variance", 3.141592653589793)
+    OmegaConf.update(cfg, "model.freeze_embnn", True)
+    OmegaConf.update(cfg, "model.dropout", 0.1)
+    OmegaConf.update(cfg, "model.n_blocks", 1)
+    OmegaConf.update(cfg, "model.cycle", True)
+    OmegaConf.update(cfg, "model.encoder.name", "raw_dgcnn")
+    OmegaConf.update(cfg, "model.encoder.emb_dims", 512)
+    OmegaConf.update(cfg, "model.encoder.norm", "BN")
+    OmegaConf.update(cfg, "model.encoder.output_num", 1024)
+    OmegaConf.update(cfg, "model.encoder.dropout", 0.1)
+    OmegaConf.update(cfg, "model.head.head_type", "rl_residual")
+    OmegaConf.update(cfg, "model.head.project_corrs", True)
+    OmegaConf.update(cfg, "model.head.project_corrs_mode", "moe")
+    OmegaConf.update(cfg, "model.head.norm", "LN")
+    OmegaConf.update(cfg, "model.head.head_bias", False)
+    OmegaConf.update(cfg, "model.head.residual_on", True)
+    OmegaConf.update(cfg, "model.head.pred_weight", False)
+    OmegaConf.update(cfg, "model.head.reparam", True)
+    OmegaConf.update(cfg, "rl.group", 8)
+    OmegaConf.update(cfg, "wandb.name", "debug")
+    OmegaConf.update(cfg, "wandb.offline", True)
+    OmegaConf.update(cfg, "debug", False)
+    OmegaConf.update(cfg, "eval", False)
+    OmegaConf.update(cfg, "model.pretraining.action.ckpt_path", "taxpose/trained_models/5000pts_dgcnn.ckpt")
+    OmegaConf.update(cfg, "model.pretraining.anchor.ckpt_path", "taxpose/trained_models/5000pts_dgcnn.ckpt")
+    return cfg
+
+
 @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
 def main(cfg):
     # if __name__ == "__main__":
     #     print(OmegaConf.to_yaml(cfg, resolve=True))
     # # wandb.init(resume=cfg.resume_ckpt is not None)
-
-    torch.set_float32_matmul_precision("medium")
+    # cfg = set_cfg_fpr_debug(cfg)
+    torch.set_float32_matmul_precision("high")
     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
     if not (cfg.wandb.offline or TESTING):
         wandb.login(
-            key = os.environ.get("WANDB_API_KEY", None),
-            host= os.environ.get("WANDB_BASE_URL", None),
+            key=os.environ.get("WANDB_API_KEY", None),
+            host=os.environ.get("WANDB_BASE_URL", None),
         )
     if cfg.resume_ckpt:
         print("Resuming from checkpoint", cfg.resume_ckpt)
@@ -181,6 +225,7 @@ def main(cfg):
         'warmup_ratio': cfg.training.warmup_ratio,
         'min_lr': cfg.training.min_lr,
         'by_epoch': cfg.training.lr_scheduler_by_epoch,
+        "weight_decay": cfg.training.weight_decay,
     }
     trainer.print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_step: {cfg.training.warmup_ratio*lr_scheduler_total_steps}")
     if cfg.debug:
@@ -234,6 +279,9 @@ def main(cfg):
                 # )
 
                 model.model.emb_nn_action.load_state_dict(emb_nn_action_state_dict)
+                if cfg.model.freeze_embnn:
+                    trainer.print("freezing embnn action")
+                    model.model.emb_nn_action.requires_grad_(False)
                 print(
                     "-----------------------Pretrained EmbNN Action Model Loaded!-----------------------"
                 )
@@ -247,6 +295,9 @@ def main(cfg):
                     cfg.model.pretraining.anchor.ckpt_path, cfg.wandb, logger.experiment
                 )
                 model.model.emb_nn_anchor.load_state_dict(emb_nn_anchor_state_dict)
+                if cfg.model.freeze_embnn:
+                    trainer.print("freezing embnn anchor")
+                    model.model.emb_nn_anchor.requires_grad_(False)
                 print(
                     "-----------------------Pretrained EmbNN Anchor Model Loaded!-----------------------"
                 )
@@ -261,12 +312,16 @@ def main(cfg):
     #     print(f"[Rank {trainer.global_rank}] buffer {name}: {buf.shape}")
 
     if not cfg.eval:
-        # if trainer.is_global_zero:
-        #     trainer.validate(model, dm, ckpt_path=resume_ckpt)
         model.train()
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
     model.eval()
-    trainer.validate(model, dm, ckpt_path=resume_ckpt)
+    validater = pl.Trainer(
+        logger=False if TESTING else logger,
+        accelerator="auto",
+        devices=1,
+        check_val_every_n_epoch=cfg.training.check_val_every_n_epoch
+    )
+    validater.validate(model, dm, ckpt_path=resume_ckpt)
 
     # Print he run id of the current run
     print("Run ID: {} ".format(logger.experiment.id))
@@ -274,7 +329,7 @@ def main(cfg):
 
 if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
-    # torch.autograd.set_detect_anomaly(True)
+    torch.autograd.set_detect_anomaly(True)
     torch.cuda.empty_cache()
     torch.multiprocessing.set_sharing_strategy("file_system")
     main()

@@ -59,7 +59,7 @@ class MultiviewDataModule(pl.LightningDataModule):
         # num_workers = 0
         return DataLoader(
             self.val_dataset,
-            batch_size=self.batch_size,
+            batch_size=self.batch_size * 2,
             num_workers=num_workers,
             pin_memory=False,
             persistent_workers=num_workers > 0,

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal
+from torch.distributions import Normal, MultivariateNormal
 from torch.nn.utils import weight_norm
 from taxpose.nets.pointnet import ResidualPointNet, PointwiseMLP
 from taxpose.nets.huggingface_tf import Transformer
@@ -199,17 +199,17 @@ class ResidualMLPHead(nn.Module):
             )
         elif residual_on:
             self.proj_flow = PointwiseMLP(
-                [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
+                [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, None    
             )
 
         self.pred_weight = pred_weight
         if self.pred_weight:
             self.proj_flow_weight = PointwiseMLP(
-                [emb_dims, 64, 64, 64, 128, 512], 1, norm
+                [emb_dims, 64, 64, 64, 128, 512], 1, None
             )
         self.project_corrs = project_corrs
         if project_corrs and project_corrs_mode == 'mlp':
-            self.project_pts = weight_norm(nn.Linear(output_num, output_num, bias=False))
+            self.project_pts = nn.Linear(output_num, output_num, bias=False)
         elif project_corrs and project_corrs_mode == 'vn':
             self.project_pts = VN4Head(output_num)
         elif project_corrs and project_corrs_mode == 'moe':
@@ -260,6 +260,7 @@ class ResidualMLPHead(nn.Module):
         #     scores = torch.softmax(scores, dim=2)
 
         scores = scores.transpose(2, 1)
+        assert anchor_points is not None, "anchor_points is None"
         corr_points = torch.matmul(anchor_points, scores)
         if self.project_corrs:
             corr_points_center = corr_points.mean(dim=2, keepdim=True)
@@ -329,7 +330,7 @@ class ResidualMLPHead(nn.Module):
         }
 
 
-class ResidualMLPHead4RL(ResidualMLPHead):
+class ReparamResidualMLPHead(ResidualMLPHead):
     def __init__(
         self,
         emb_dims=512,
@@ -339,72 +340,110 @@ class ResidualMLPHead4RL(ResidualMLPHead):
         bias=False,
         use_coarse_ps=False,
         project_corrs=False,
-        project_corrs_mode='mlp',
+        project_corrs_mode='vn',
         output_num=1024,
     ):
-        super().__init__(
-            emb_dims, pred_weight, 
-            residual_on, norm, bias, 
-            use_coarse_ps, project_corrs, 
+        super(ReparamResidualMLPHead, self).__init__(
+            emb_dims, pred_weight,
+            residual_on, norm, bias,
+            use_coarse_ps, project_corrs,
             project_corrs_mode, output_num
         )
-        self.corr_pts_std = PointwiseMLP(
-            [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
+        self.register_buffer("zero_mean", torch.zeros(3))
+        self.register_buffer("one_std", torch.eye(3))
+
+    def forward(self, *input, scores, sample=False):
+        """
+        input:
+          action_embedding: B,512,N
+          anchor_embedding: B,512,N
+          action_points: B,3,N
+          anchor_points: B,3,N
+          scores: B,N,N, if needed, use this instead of calculating scores
+        return:
+          dict with keys:
+          full_flow: B,3,N
+          residual_flow: B,3,N
+          corr_flow: B,3,N
+          corr_points: B,3,N
+          scores: B,N,N
+        """
+        output = super().forward(*input, scores=scores)
+        if self.training or sample:
+            mean_is_soft_cpt = output["corr_flow"]
+            var_is_res_flow = torch.exp(output["residual_flow"])  # B,3,N
+            std = torch.exp(0.5*output["residual_flow"])
+            output["residual_flow"] = var_is_res_flow
+            output["std"] = std
+            if sample:
+                return output
+            # reparam_sample = torch.randn_like(mean_is_soft_cpt)     # 标准正态噪声
+            # assert var_is_res_flow.shape == reparam_sample.shape
+            # reparam_flow = std * reparam_sample
+            output["full_flow"][:, :3, :] = mean_is_soft_cpt
+        else:
+            output["full_flow"][:, :3, :] = output["corr_flow"]
+            output["residual_flow"] = torch.exp(output["residual_flow"])
+        return output
+
+    def sample(self, *input, scores, sample_num, return_logP=False):
+        """
+        input:
+          *input: include action_embedding, anchor_embedding, action_points, anchor_points (B,C,N)
+          scores: B,N,N, if needed, use this instead of calculating scores
+          sample_num: int. Number of samples.
+          return_logP: bool. If true, return log prob.
+        return:
+          dict with keys: {
+            samples: G,B,N,3
+            weights: G,B,N
+            log_probs: G,B
+            **kwargs: other keys in output
+          }
+        """
+        output = self.forward(*input, scores=scores, sample=True)
+        mean_is_soft_cpt = output["corr_flow"].transpose(1, 2).contiguous()  # B, N, 3
+        var_is_res_flow = output["residual_flow"].transpose(1, 2).contiguous()  # B, N, 3
+        std = output["std"].transpose(1, 2).contiguous()
+        bz, num, _ = var_is_res_flow.shape
+        noise = torch.randn((sample_num, bz, num, 3)).to(scores.device)  # G B N 3
+        assert mean_is_soft_cpt.shape == var_is_res_flow.shape
+        samples = mean_is_soft_cpt.unsqueeze(0).expand(sample_num, -1, -1, -1) + \
+            noise * std.unsqueeze(0).expand(sample_num, -1, -1, -1)  # G, B, N, 3
+        output["samples"] = samples
+        output["weights"] = output["full_flow"][None, :, -1, :].expand(sample_num, -1, -1)
+        if return_logP:
+            dist = MultivariateNormal(
+                mean_is_soft_cpt,
+                torch.diag_embed(var_is_res_flow)
+            )
+            output["log_probs"] = dist.log_prob(samples).mean(dim=-1)
+
+        return output
+
+    def log_probs(self, *input, scores, actions):
+        """
+        input:
+            *input: include action_embedding, anchor_embedding, action_points, anchor_points (B,C,N)
+            scores: B,N,N, if needed, use this instead of calculating scores
+            actions: tensor of shape G,B,N,3
+        return:
+            log_probs: tensor of shape G,B
+        """
+        output = self.forward(*input, scores=scores, sample=True)
+        group, bz, num, _ = actions.shape
+        mean_is_soft_cpt = output["corr_flow"].transpose(1, 2).contiguous()  # B, N, 3
+        var_is_res_flow = output["residual_flow"].transpose(1, 2).contiguous()  # B, N, 3
+        dist = MultivariateNormal(
+            mean_is_soft_cpt,
+            torch.diag_embed(var_is_res_flow)
         )
+        log_probs = dist.log_prob(actions).mean(dim=-1).reshape(group, bz)  # G,B
 
-    def forward(self, *input, scores, return_embedding=False):
-        """
-        input:
-          action_embedding: B,512,N
-          anchor_embedding: B,512,N
-          action_points: B,3,N
-          anchor_points: B,3,N
-          scores: B,N,N, if needed, use this instead of calculating scores
-        return:
-          dict with keys:
-          full_flow: B,3,N
-          residual_flow: B,3,N
-          corr_flow: B,3,N
-          corr_points: B,3,N
-          scores: B,N,N
-        """
-        output = super(ResidualMLPHead4RL, self).forward(*input, scores=scores)
-        if self.training:
-            action_embedding = input[0]
-            flow = output["full_flow"][:, :-1, :]
-            std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
-            pt = Normal(flow, std)
-            output["distribution"] = pt
-
-        return output
-
-    def sample(self, *input, scores, return_embedding=False):
-        """
-        input:
-          action_embedding: B,512,N
-          anchor_embedding: B,512,N
-          action_points: B,3,N
-          anchor_points: B,3,N
-          scores: B,N,N, if needed, use this instead of calculating scores
-        return:
-          dict with keys:
-          full_flow: B,3,N
-          residual_flow: B,3,N
-          corr_flow: B,3,N
-          corr_points: B,3,N
-          scores: B,N,N
-        """
-        output = super(ResidualMLPHead4RL, self).forward(*input, scores=scores)
-        action_embedding = input[0]
-        flow = output["full_flow"][:, :-1, :]
-        std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
-        pt = Normal(flow, std)
-        output["distribution"] = pt
-
-        return output
+        return log_probs
 
 
-class TransformerHead4RL(TransformerHead):
+class ReparamTransformerHead(TransformerHead, ReparamResidualMLPHead):
     def __init__(
         self,
         point_encoder_fun=None,
@@ -419,16 +458,15 @@ class TransformerHead4RL(TransformerHead):
         project_corrs_mode='mlp'
     ):
         super().__init__(
-            point_encoder_fun, emb_dims, 
-            output_num, pos_enc_dim, pred_weight, 
-            residual_on, pos_enc, 
-            norm, project_corrs,project_corrs_mode 
+            point_encoder_fun, emb_dims,
+            output_num, pos_enc_dim, pred_weight,
+            residual_on, pos_enc,
+            norm, project_corrs, project_corrs_mode
         )
-        self.corr_pts_std = PointwiseMLP(
-            [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
-        )
+        self.register_buffer("zero_mean", torch.zeros(3))
+        self.register_buffer("one_std", torch.eye(3))
 
-    def forward(self, *input, scores, return_embedding=False):
+    def forward(self, *input, scores, sample=False):
         """
         input:
           action_embedding: B,512,N
@@ -444,17 +482,138 @@ class TransformerHead4RL(TransformerHead):
           corr_points: B,3,N
           scores: B,N,N
         """
-        output = super(TransformerHead4RL, self).forward(*input, scores=scores)
-        if self.training:
+        output = super().forward(*input, scores=scores)
+        if self.training or sample:
+            mean_is_soft_cpt = output["corr_flow"]
+            var_is_res_flow = torch.exp(output["residual_flow"])  # B,3,N
+            std = torch.exp(0.5*output["residual_flow"])
+            output["residual_flow"] = var_is_res_flow
+            output["std"] = std
+            if sample:
+                return output
+            # reparam_sample = torch.randn_like(mean_is_soft_cpt)     # 标准正态噪声
+            # assert var_is_res_flow.shape == reparam_sample.shape
+            # reparam_flow = std * reparam_sample
+            output["full_flow"][:, :3, :] = mean_is_soft_cpt
+        else:
+            output["full_flow"][:, :3, :] = output["corr_flow"]
+            output["residual_flow"] = torch.exp(output["residual_flow"])
+        return output
+
+
+class ResidualMLPHead4RL(ResidualMLPHead):
+    def __init__(
+        self,
+        emb_dims=512,
+        pred_weight=True,
+        residual_on=True,
+        norm=nn.BatchNorm1d,
+        bias=False,
+        use_coarse_ps=False,
+        project_corrs=False,
+        project_corrs_mode='mlp',
+        output_num=1024,
+    ):
+        super().__init__(
+            emb_dims, pred_weight,
+            residual_on, norm, bias,
+            use_coarse_ps, project_corrs,
+            project_corrs_mode, output_num
+        )
+        self.corr_pts_var = PointwiseMLP(
+            [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
+        )
+
+    def forward(self, *input, scores, sample=False):
+        """
+        input:
+          action_embedding: B,512,N
+          anchor_embedding: B,512,N
+          action_points: B,3,N
+          anchor_points: B,3,N
+          scores: B,N,N, if needed, use this instead of calculating scores
+        return:
+          dict with keys:
+          full_flow: B,3,N
+          residual_flow: B,3,N
+          corr_flow: B,3,N
+          corr_points: B,3,N
+          scores: B,N,N
+        """
+        output = super(ResidualMLPHead4RL, self).forward(*input, scores=scores)
+        if sample:
             action_embedding = input[0]
-            flow = output["full_flow"][:, :-1, :]
-            std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
-            pt = Normal(flow, std)
+            flow = output["full_flow"][:, :-1, :].permute(0, 2, 1).contiguous()  # B, N, 3
+            log_var = self.corr_pts_var(action_embedding).permute(0, 2, 1).contiguous()  # B, N, 3
+            pt = MultivariateNormal(flow, torch.diag_embed(log_var.exp()))
             output["distribution"] = pt
 
         return output
 
-    def sample(self, *input, scores, return_embedding=False):
+    @torch.no_grad()
+    def sample(self, *input, scores, sample_num, return_logP=False):
+        """
+        input:
+          *input: include action_embedding, anchor_embedding, action_points, anchor_points (B,C,N)
+          scores: B,N,N, if needed, use this instead of calculating scores
+          sample_num: int. Number of samples.
+          return_logP: bool. If true, return log prob.
+        return:
+          dict with keys: {
+            samples: G,B,N,3
+            weights: G,B,N
+            log_probs: G,B
+            **kwargs: other keys in output
+          }
+        """
+        output = self.forward(*input, scores=scores, sample=True)
+        pt: torch.distributions.MultivariateNormal = output["distribution"]
+        output["samples"] = pt.sample((sample_num,))  # G, B, N, 3
+        output["weights"] = output["full_flow"][None, :, -1, :].expand(sample_num, -1, -1)
+        if return_logP:
+            output["log_probs"] = pt.log_prob(output["samples"]).mean(dim=-1)
+        return output
+
+    def log_probs(self, *input, scores, actions):
+        """
+        input:
+            *input: include action_embedding, anchor_embedding, action_points, anchor_points (B,C,N)
+            scores: B,N,N, if needed, use this instead of calculating scores
+            actions: tensor of shape G,B,N,3
+        return:
+            log_probs: tensor of shape G,B
+        """
+        output = self.forward(*input, scores=scores, sample=True)
+        dist = output["distribution"]
+        log_probs = dist.log_prob(actions).mean(dim=-1)  # G, B
+        return log_probs
+
+
+class TransformerHead4RL(TransformerHead, ResidualMLPHead4RL):
+    def __init__(
+        self,
+        point_encoder_fun=None,
+        emb_dims=512,
+        output_num=1024,
+        pos_enc_dim=0,
+        pred_weight=True,
+        residual_on=True,
+        pos_enc=False,
+        norm=nn.BatchNorm1d,
+        project_corrs=False,
+        project_corrs_mode='mlp'
+    ):
+        super().__init__(
+            point_encoder_fun, emb_dims,
+            output_num, pos_enc_dim, pred_weight,
+            residual_on, pos_enc,
+            norm, project_corrs, project_corrs_mode
+        )
+        self.corr_pts_var = PointwiseMLP(
+            [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
+        )
+
+    def forward(self, *input, scores, sample=False):
         """
         input:
           action_embedding: B,512,N
@@ -471,11 +630,13 @@ class TransformerHead4RL(TransformerHead):
           scores: B,N,N
         """
         output = super(TransformerHead4RL, self).forward(*input, scores=scores)
-        action_embedding = input[0]
-        flow = output["full_flow"][:, :-1, :]
-        std = self.corr_pts_std(action_embedding).exp()  # B, 3, N
-        pt = Normal(flow, std)
-        output["distribution"] = pt
+        if sample:
+            action_embedding = input[0]
+            flow = output["full_flow"][:, :-1, :].permute(0, 2, 1).contiguous()  # B, N, 3
+            log_var = self.corr_pts_var(action_embedding).permute(0, 2, 1).contiguous()  # B, N, 3
+            pt = MultivariateNormal(flow, torch.diag_embed(log_var.exp()))
+            output["distribution"] = pt
+
         return output
 
 
@@ -494,6 +655,7 @@ class HeadConfig:
     pos_encoding: bool = False
     project_corrs: bool = False
     project_corrs_mode: str = "mlp"  # "mlp" or "vn"
+    reparam: bool = False
 
 
 def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
@@ -509,7 +671,9 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             project_corrs_mode=cfg.project_corrs_mode,
         )
     if cfg.head_type == "rl_residual":
-        return ResidualMLPHead4RL(
+        head_type = ReparamResidualMLPHead if cfg.reparam else ResidualMLPHead4RL
+        print("Using Head: ", str(head_type))
+        return head_type(
             cfg.emb_dims,
             cfg.pred_weight,
             cfg.residual_on,
@@ -521,6 +685,7 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             cfg.output_num,
         )
     if cfg.head_type == "rl_transformer":
+        head_type = TransformerHead4RL if cfg.reparam else TransformerHead4RL
         return TransformerHead4RL(
             point_encoder_fun=embedding_fun,
             emb_dims=cfg.emb_dims,
@@ -556,13 +721,35 @@ if __name__ == '__main__':
     # print(isinstance(norm, nn.Module))
 
     # TFhead
-    model = TransformerHead(None, 256, 0, True, True, False)
+    # model = TransformerHead(None, 256, 0, True, True, False)
+    # query_pt = torch.rand(3, 3, 512)
+    # query_emb = torch.rand(3, 256, 512)
+    # tgt_pt = torch.rand(3, 3, 512)
+    # tgt_emb = torch.rand(3, 256, 512)
+
+    # y = model.forward(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512))
+    # print(y.keys())
+    # print(y['full_flow'].shape)
+    # print(y['residual_flow'].shape)
+
+    # Reparameterize Head
+    model = ReparamResidualMLPHead(256, True, True, nn.BatchNorm1d, False, False, True, output_num=512)
+    model.eval()
     query_pt = torch.rand(3, 3, 512)
     query_emb = torch.rand(3, 256, 512)
     tgt_pt = torch.rand(3, 3, 512)
     tgt_emb = torch.rand(3, 256, 512)
-
-    y = model.forward(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512))
-    print(y.keys())
-    print(y['full_flow'].shape)
+    y = model.forward(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512), sample=False)
     print(y['residual_flow'].shape)
+    model.train()
+    y = model.forward(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512), sample=True)
+    print(y['residual_flow'].shape)
+
+    y = model.sample(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512), sample_num=5, return_logP=False)
+    print(y['samples'].shape)
+
+    y = model.sample(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512), sample_num=5, return_logP=True)
+    print(y['log_probs'].shape)
+
+    logP = model.log_probs(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512), actions=y['samples'])
+    print(logP)

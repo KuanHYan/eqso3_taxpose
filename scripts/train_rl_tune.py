@@ -8,12 +8,11 @@ import wandb
 from omegaconf import OmegaConf
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
-
+from pytorch_lightning.strategies import DDPStrategy
 from taxpose.datasets.point_cloud_data_module import MultiviewDataModule
 from taxpose.training.rl_fine_tune import RLTrainingModule
 from taxpose.nets.RL_policy import PolicyModel
 from taxpose.utils.load_model import get_weights_path
-
 
 def load_emb_weights(checkpoint_reference, wandb_cfg=None, run=None):
     if checkpoint_reference.startswith(wandb_cfg.entity):
@@ -57,6 +56,53 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
     return ckpt_file
 
 
+def set_cfg_fpr_debug(cfg):
+    torch.cuda.set_device(0)
+    OmegaConf.update(cfg, "job_type", "rl_tune")
+    OmegaConf.update(cfg, "data_root", "/home/yan/pose_estimation/taxpose/data/ideal_pair_models")
+    OmegaConf.update(cfg, "training.max_epochs", 500)
+    OmegaConf.update(cfg, "training.check_val_every_n_epoch", 1)
+    OmegaConf.update(cfg, "training.batch_size", 8)
+    OmegaConf.update(cfg, "training.lr", 1e-6)
+    OmegaConf.update(cfg, "training.min_lr", 1e-7)
+    OmegaConf.update(cfg, "training.warmup_ratio", 0.1)
+    OmegaConf.update(cfg, "training.precision", '32')
+    OmegaConf.update(cfg, "training.num_gpus", 1)
+    OmegaConf.update(cfg, "training.accumulate_grad_batches", 2)
+    OmegaConf.update(cfg, "training.scheduler", "linear")
+    OmegaConf.update(cfg, "dm.train_dset.demo_dset.num_demo", 600)
+    OmegaConf.update(cfg, "dm.train_dset.dataset_size", 640)
+    OmegaConf.update(cfg, "dm.train_dset.anchor_rot_sample_method", "axis_angle")
+    OmegaConf.update(cfg, "dm.train_dset.anchor_rotation_variance", 3.141592653589793)
+    OmegaConf.update(cfg, "model.freeze_embnn", True)
+    OmegaConf.update(cfg, "model.dropout", 0.1)
+    OmegaConf.update(cfg, "model.n_blocks", 1)
+    OmegaConf.update(cfg, "model.cycle", True)
+    OmegaConf.update(cfg, "model.encoder.name", "raw_dgcnn")
+    OmegaConf.update(cfg, "model.encoder.emb_dims", 512)
+    OmegaConf.update(cfg, "model.encoder.norm", "BN")
+    OmegaConf.update(cfg, "model.encoder.output_num", 1024)
+    OmegaConf.update(cfg, "model.encoder.dropout", 0.1)
+    OmegaConf.update(cfg, "model.head.head_type", "rl_residual")
+    OmegaConf.update(cfg, "model.head.project_corrs", True)
+    OmegaConf.update(cfg, "model.head.project_corrs_mode", "moe")
+    OmegaConf.update(cfg, "model.head.norm", "LN")
+    OmegaConf.update(cfg, "model.head.head_bias", False)
+    OmegaConf.update(cfg, "model.head.residual_on", True)
+    OmegaConf.update(cfg, "model.head.pred_weight", True)
+    OmegaConf.update(cfg, "model.head.reparam", False)
+    OmegaConf.update(cfg, "rl.group", 8)
+    OmegaConf.update(cfg, "rl.update_base_every", 100)
+    OmegaConf.update(cfg, "rl.kl_coef", 0.02)
+    OmegaConf.update(cfg, "rl.clip_eps", 0.2)
+    OmegaConf.update(cfg, "wandb.name", "debug")
+    OmegaConf.update(cfg, "wandb.offline", True)
+    OmegaConf.update(cfg, "debug", False)
+    OmegaConf.update(cfg, "eval", False)
+    OmegaConf.update(cfg, "rl.reward_model_path", "/home/yan/pose_estimation/taxpose/trained_models/reward_w.ckpt")
+    OmegaConf.update(cfg, "rl.base_model_path", "/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-10/13-05-52/checkpoints/last.ckpt")
+    return cfg
+
 @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
 def main(cfg):
     if __name__ == "__main__":
@@ -64,6 +110,9 @@ def main(cfg):
 
     torch.set_float32_matmul_precision("medium")
     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
+
+    ## debug
+    # cfg = set_cfg_fpr_debug(cfg)
 
     if cfg.resume_ckpt:
         print("Resuming from checkpoint")
@@ -110,13 +159,11 @@ def main(cfg):
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
         accelerator="auto",
-        strategy="auto",
-        devices=[0],
-        sync_batchnorm=(device_count > 1),
+        strategy=DDPStrategy(find_unused_parameters=True) if device_count > 1 else "auto",
+        devices=device_count,
+        sync_batchnorm=False,
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
-        # reload_dataloaders_every_n_epochs=1,
-        # callbacks=[SaverCallbackModel(), SaverCallbackEmbnnActionAnchor()],
         callbacks=(
             [
                 # This checkpoint callback saves the latest model during training, i.e. so we can resume if it crashes.
@@ -141,7 +188,7 @@ def main(cfg):
             ]
             if not TESTING else []
         ),
-        accumulate_grad_batches=1,
+        accumulate_grad_batches=cfg.training.accumulate_grad_batches,
         max_epochs=cfg.training.max_epochs,
         fast_dev_run=20 if TESTING else False,
         precision=cfg.training.precision,
@@ -149,9 +196,8 @@ def main(cfg):
     validationer = pl.Trainer(
         logger=False if TESTING else logger,
         accelerator="auto",
-        strategy="auto",
-        devices=[0],
-        log_every_n_steps=cfg.testing.log_every_n_steps,
+        devices=1,
+        log_every_n_steps=cfg.training.log_every_n_steps,
     )
     trainer.print(f"use {device_count} GPUs")
     dm = MultiviewDataModule(
@@ -168,12 +214,17 @@ def main(cfg):
         cfg.rl.reward_model_path,
         cfg.model.cycle,
         center_feature=cfg.model.center_feature,
+        freeze_embnn=cfg.model.freeze_embnn,
+        return_attn=cfg.model.return_attn,
         dropout=cfg.model.dropout,
         pos_encoding=cfg.model.pos_encoding,
         group=cfg.rl.group,
+        n_blocks=int(cfg.model.n_blocks),
+        manual_reawrd=True
     )
 
     trainer.print(network)
+    device_count = device_count * cfg.training.accumulate_grad_batches
     if cfg.training.lr_scheduler_by_epoch:
         lr_scheduler_total_steps = cfg.training.max_epochs * cfg.training.end_lr_ratio
     else:
@@ -189,6 +240,7 @@ def main(cfg):
         'warmup_ratio': cfg.training.warmup_ratio,
         'min_lr': cfg.training.min_lr,
         'by_epoch': cfg.training.lr_scheduler_by_epoch,
+        "weight_decay": cfg.training.weight_decay,
     }
     trainer.print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_step: {cfg.training.warmup_ratio*lr_scheduler_total_steps}")
     if cfg.debug:
@@ -206,7 +258,7 @@ def main(cfg):
         clip_eps=cfg.rl.clip_eps,
         update_base_every=cfg.rl.update_base_every,
         grpo_iter=cfg.rl.grpo_iter,
-        optimization_mode='manual',
+        optimization_mode=cfg.training.optimization_mode,
         tensorboard_writer=tensorboard_writer
     )
 
@@ -220,8 +272,8 @@ def main(cfg):
         ],
     )
     if not cfg.eval:
-        model.eval()
-        validationer.validate(model, dm, ckpt_path=resume_ckpt)
+        # model.eval()
+        # validationer.validate(model, dm, ckpt_path=resume_ckpt)
         model.train()
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
 

@@ -8,6 +8,7 @@ from taxpose.nets.RL_policy import PolicyModel
 from taxpose.utils.se3 import (
     dense_flow_loss,
     dualflow2pose,
+    flow2pose,
     get_degree_angle,
     get_translation,
     mse_criterion,
@@ -25,6 +26,7 @@ class RLTrainingModule(PointCloudTrainingModule):
             "warmup_ratio": 0.1,
             "min_lr": 1e-5,
             "by_epoch": True,
+            "weight_decay": 0.0,
         },
         image_log_period=500,
         action_weight=1,
@@ -34,7 +36,7 @@ class RLTrainingModule(PointCloudTrainingModule):
         kl_coef: float = 0.05,      # KL 惩罚系数
         clip_eps: float = 0.2,      # PPO-style 裁剪阈值
         grpo_iter: int = 10,        # GRPO单词迭代次数
-        update_base_every: int = 5,  # base model 更新频率
+        update_base_every: int = 1000,  # base model 更新频率
         tensorboard_writer=None,
     ):
         super().__init__(
@@ -87,34 +89,40 @@ class RLTrainingModule(PointCloudTrainingModule):
         sch = self.lr_schedulers()     # 获取调度器
         log_values = {}
         # 采样（无梯度）
+        # 预先计算 log_p_old 与 log_p_base（均为 eval 或 no_grad）
+        T0 = Transform3d(matrix=batch["T0"])
+        T1 = Transform3d(matrix=batch["T1"])
+        gt_trans = T0.inverse().compose(T1)
         with torch.no_grad():
             samples = self.model.rl_sample(
                 batch["points_action_trans"],
-                batch["points_anchor_trans"]
+                batch["points_anchor_trans"],
+                return_cache=True,
+                gt_trans=gt_trans
             )
-        # 预先计算 log_p_old 与 log_p_base（均为 eval 或 no_grad）
-        with torch.no_grad():
             state_act = batch["points_action_trans"]  # B,N,3
             state_anch = batch["points_anchor_trans"]
-            flow_act = samples['flow_act']  # B, 3, N ??
+            flow_act = samples['flow_act']  # B, G, N, 3
             flow_anch = samples['flow_anch']
-            samples["log_p_old"] = self.model.log_probs(
-                state_act, state_anch, flow_act, flow_anch)
+            samples["log_p_old"] = samples["log_prob"]
             samples["log_p_base"] = self.base_model.log_probs(
-                state_act, state_anch, flow_act, flow_anch)
+                state_act, state_anch, flow_act, flow_anch, cache=samples["cache"])
 
-        total_grpo_loss = 0.0
-        for i in range(self.grpo_iter):
-            opt.zero_grad()
-            loss = self.compute_loss(samples, batch, log_values)
-            loss.backward()
-            self.clip_gradients(opt, 1.0, 'norm')
-            opt.step()
-            total_grpo_loss += loss.detach()
+        if self._automatic_optimization:
+            total_grpo_loss = self.compute_loss(samples, batch, log_values)
+        else:
+            total_grpo_loss = 0.0
+            for _ in range(self.grpo_iter):
+                opt.zero_grad()
+                loss = self.compute_loss(samples, batch, log_values)
+                loss.backward()
+                self.clip_gradients(opt, 10.0, 'norm')
+                opt.step()
+                total_grpo_loss += loss.detach()
 
-        # 每个 batch 结束才步进调度器
-        if sch is not None:
-            sch.step()
+            # 每个 batch 结束才步进调度器
+            if sch is not None:
+                sch.step()
 
         for key, val in log_values.items():
             self.log(key, val, logger=True, sync_dist=True)
@@ -139,6 +147,7 @@ class RLTrainingModule(PointCloudTrainingModule):
         self.log("mean rewrad", log_values['reward_mean'], prog_bar=True, logger=True, sync_dist=True)
         # avg_loss = total_grpo_loss / self.grpo_iter
         # self.log("train_loss", avg_loss)
+        return total_grpo_loss
 
     def module_step(self, batch, batch_idx):
         points_trans_action = batch["points_action_trans"]  # B,N,3
@@ -165,8 +174,8 @@ class RLTrainingModule(PointCloudTrainingModule):
         log_p_old = samples['log_p_old']
 
         # ---- 当前策略的对数概率 ----
-        log_p = self.model.log_probs(state_act, state_anch, flow_act, flow_anch)  # [B, G]
-
+        log_p = self.model.log_probs(
+            state_act, state_anch, flow_act, flow_anch, samples['cache'])  # [G, B]
         # ---- GRPO 策略损失 (带裁剪) ----
         log_ratio = log_p - log_p_old
         # 安全范围，避免 exp 溢出
@@ -191,14 +200,14 @@ class RLTrainingModule(PointCloudTrainingModule):
         # 可选：记录比率范围和优势均值
         log_values[loss_prefix + "ratio_mean"] = ratio.detach().mean()
         log_values[loss_prefix + "ratio_max"] = ratio.detach().max()
-        log_values[loss_prefix + "adv_mean"] = adv.mean()
-        log_values["reward_mean"] = samples['reward'].mean()
+        log_values[loss_prefix + "adv_std"] = samples['reward_std'].mean()
+        log_values["reward_mean"] = samples['reward_mean'].mean()
 
         return loss
 
     def compute_error(self, model_output, batch, log_values, loss_prefix=""):
         x_action = model_output["flow_action"]
-        x_anchor = model_output["flow_anchor"]
+        x_anchor = model_output.get("flow_anchor", None)
 
         # The original point clouds from the demonstration.
         points_action = batch["points_action"]  # action point clouds
@@ -230,22 +239,30 @@ class RLTrainingModule(PointCloudTrainingModule):
 
         # Extract predictred flow and weight
         pred_flow_action, pred_w_action = self.extract_flow_and_weight(x_action)
-        pred_flow_anchor, pred_w_anchor = self.extract_flow_and_weight(x_anchor)
 
         if points_trans_action.shape[1] != pred_flow_action.shape[1]:
             input_act_pts = model_output["act_down_sample"]
-            inputs_anch_pts = model_output["anch_down_sample"]
+            inputs_anch_pts = model_output.get("anch_down_sample", None)
 
-        pred_T_action = dualflow2pose(
-            xyz_src=input_act_pts,
-            xyz_tgt=inputs_anch_pts,
-            flow_src=pred_flow_action,
-            flow_tgt=pred_flow_anchor,
-            weights_src=pred_w_action,
-            weights_tgt=pred_w_anchor,
-            return_transform3d=True,
-            training=True  # self.training,
-        )
+        if x_anchor is None:
+            pred_T_action = flow2pose(
+                xyz=input_act_pts,
+                flow=pred_flow_action,
+                weights=pred_w_action,
+                return_transform3d=True,
+            )        
+        else:
+            pred_flow_anchor, pred_w_anchor = self.extract_flow_and_weight(x_anchor)
+            pred_T_action = dualflow2pose(
+                xyz_src=input_act_pts,
+                xyz_tgt=inputs_anch_pts,
+                flow_src=pred_flow_action,
+                flow_tgt=pred_flow_anchor,
+                weights_src=pred_w_action,
+                weights_tgt=pred_w_anchor,
+                return_transform3d=True,
+                training=True  # self.training,
+            )
 
         error_R_max, error_R_min, error_R_mean = get_degree_angle(
             T0.inverse().compose(T1).compose(pred_T_action.inverse())
@@ -275,32 +292,37 @@ class RLTrainingModule(PointCloudTrainingModule):
             trans_gt=gt_T_action,
         )
 
-        pred_T_anchor = pred_T_action.inverse()
-        # Loss associated with ground truth transform
-        pred_points_anchor = pred_T_anchor.transform_points(points_trans_anchor)
-        points_anchor_target = T0.transform_points(points_anchor)
-        point_loss_anchor = mse_criterion(
-            pred_points_anchor,
-            points_anchor_target,
-        )
+        if x_anchor is None:
+            point_loss_anchor = point_loss_action.detach()
+            dense_loss_anchor = dense_loss_action.detach()
+            smoothness_loss_anchor = smoothness_loss_action.detach()
+        else:
+            pred_T_anchor = pred_T_action.inverse()
+            # Loss associated with ground truth transform
+            pred_points_anchor = pred_T_anchor.transform_points(points_trans_anchor)
+            points_anchor_target = T0.transform_points(points_anchor)
+            point_loss_anchor = mse_criterion(
+                pred_points_anchor,
+                points_anchor_target,
+            )
 
-        # Loss associated flow vectors matching a consistent rigid transform
-        induced_flow_anchor = (
-            pred_T_anchor.transform_points(inputs_anch_pts) - inputs_anch_pts
-        ).detach()
-        smoothness_loss_anchor = mse_criterion(
-            pred_flow_anchor,
-            induced_flow_anchor,
-        )
+            # Loss associated flow vectors matching a consistent rigid transform
+            induced_flow_anchor = (
+                pred_T_anchor.transform_points(inputs_anch_pts) - inputs_anch_pts
+            ).detach()
+            smoothness_loss_anchor = mse_criterion(
+                pred_flow_anchor,
+                induced_flow_anchor,
+            )
 
-        # loss associated with dense flow
-        # pred_T_action=T1T0^-1
-        gt_T_anchor = T1.inverse().compose(T0)
-        dense_loss_anchor = dense_flow_loss(
-            points=inputs_anch_pts,
-            flow_pred=pred_flow_anchor,
-            trans_gt=gt_T_anchor,
-        )
+            # loss associated with dense flow
+            # pred_T_action=T1T0^-1
+            gt_T_anchor = T1.inverse().compose(T0)
+            dense_loss_anchor = dense_flow_loss(
+                points=inputs_anch_pts,
+                flow_pred=pred_flow_anchor,
+                trans_gt=gt_T_anchor,
+            )
 
         self.action_weight = (self.action_weight) / (
             self.action_weight + self.anchor_weight

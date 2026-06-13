@@ -148,11 +148,12 @@ def random_se3(
 
 
 @autocast(enabled=False)
-def get_degree_angle(T):
+def get_degree_angle(T, return_batch=False):
     angle_rad_T = (
         so3_rotation_angle(T.get_matrix()[:, :3, :3], eps=1e-2) * 180 / np.pi
     )  # B
-
+    if return_batch:
+        return angle_rad_T, None, None
     max = torch.max(angle_rad_T).item()
     min = torch.min(angle_rad_T).item()
     mean = torch.mean(angle_rad_T).item()
@@ -160,9 +161,11 @@ def get_degree_angle(T):
 
 
 @autocast(enabled=False)
-def get_translation(T):
+def get_translation(T, return_batch=False):
     t = T.get_matrix()[:, 3, :3]  # B,3
     t_norm = torch.norm(t, dim=1)  # B
+    if return_batch:
+        return t_norm, None, None
     max = torch.max(t_norm).item()
     min = torch.min(t_norm).item()
     mean = torch.mean(t_norm).item()
@@ -527,6 +530,13 @@ def dense_flow_loss(points, flow_pred, trans_gt):
         flow_gt,
     )
     return loss
+
+
+def dense_flow_distribution_loss(points, flow_pred, variance_pred, trans_gt):
+    # -0.5 * ( ((target_z - mu) / sigma)**2 + 2*torch.log(sigma) + np.log(2*np.pi) ).sum(-1)
+    flow_gt = trans_gt.transform_points(points) - points
+    log_prob = -0.5 * (torch.log(variance_pred) + (flow_pred - flow_gt) ** 2 / variance_pred + np.log(2*np.pi)).sum(-1)
+    return -log_prob.mean()
 
 
 def svd_flow_loss(points, flow_pred, points_tgt, weights_pred=None):

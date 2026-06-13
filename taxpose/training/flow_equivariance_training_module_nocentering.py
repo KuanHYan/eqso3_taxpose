@@ -11,6 +11,7 @@ from taxpose.training.point_cloud_training_module import PointCloudTrainingModul
 from taxpose.utils.color_utils import get_color
 from taxpose.utils.se3 import (
     dense_flow_loss,
+    dense_flow_distribution_loss,
     dualflow2pose,
     flow2pose,
     get_degree_angle,
@@ -34,6 +35,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             "warmup_ratio": 0.1,
             "min_lr": 1e-5,
             "by_epoch": True,
+            "weight_decay": 1e-2,
         },
         image_log_period=500,
         action_weight=1,
@@ -196,9 +198,10 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             # loss associated with dense flow
             # pred_T_action=T1T0^-1
             gt_T_action = T0.inverse().compose(T1)
-            dense_loss_action = dense_flow_loss(
+            dense_loss_action = dense_flow_distribution_loss(
                 points=input_act_pts,
                 flow_pred=pred_flow_action,
+                variance_pred=model_output["residual_flow_action"],
                 trans_gt=gt_T_action,
             )
 
@@ -223,9 +226,10 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             # loss associated with dense flow
             # pred_T_action=T1T0^-1
             gt_T_anchor = T1.inverse().compose(T0)
-            dense_loss_anchor = dense_flow_loss(
+            dense_loss_anchor = dense_flow_distribution_loss(
                 points=inputs_anch_pts,
                 flow_pred=pred_flow_anchor,
+                variance_pred=model_output["residual_flow_anchor"],
                 trans_gt=gt_T_anchor,
             )
 
@@ -616,6 +620,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
     def visualize_results(self, batch, batch_idx):
         # classes = batch['classes']
         # points = batch['points']
+        self.model.eval()
         points_action = batch["points_action"]
         points_anchor = batch["points_anchor"]
         # points_trans = batch['points_trans']
@@ -853,18 +858,20 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
 
         corr_points = model_output["corr_points_action"][0].cpu()
         corr_points = corr_points - corr_points.mean(dim=0, keepdim=True)
-        w_0 = 100 * pred_w_action[0].unsqueeze(-1).expand(-1, 3).cpu()
-        flow = pred_flow_action[0].cpu()
-        flow = flow - flow.mean(dim=0, keepdim=True)
-        maybe_corr = w_0 * (corr_points + flow)
-        corr_points = get_color(
+        if pred_w_action is not None:
+            w_0 = 100 * pred_w_action[0].unsqueeze(-1).expand(-1, 3).cpu()
+        else:
+            w_0 = 1.0
+        maybe_corr = pred_flow_action[0].cpu() + points_trans_action[0].cpu()
+        maybe_corr = maybe_corr - maybe_corr.mean(dim=0, keepdim=True)
+        draw_points = get_color(
             tensor_list=[
-                w_0 * (points_trans_action[0].cpu() - points_trans_action[0].cpu().mean(dim=0, keepdim=True)),
+                w_0 * (points_action_target[0].cpu() - points_action_target[0].cpu().mean(dim=0, keepdim=True)),
                 w_0 * corr_points,
-                maybe_corr,
+                w_0 * maybe_corr,
             ],
             color_list=["blue", "red", "green"],
         )
-        res_images["corr_points_action"] = wandb.Object3D(corr_points)
+        res_images["corr_points_action"] = wandb.Object3D(draw_points)
 
         return res_images

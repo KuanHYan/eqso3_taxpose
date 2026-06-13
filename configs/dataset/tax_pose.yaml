@@ -19,7 +19,7 @@ train_dset:
     min_num_points: 1024
     cloud_type: "mesh_sample"
     action_class: 0
-    anchor_class: 0
+    anchor_class: 1
     min_num_cameras: 4
     max_num_cameras: 4
     normalize_dist: true

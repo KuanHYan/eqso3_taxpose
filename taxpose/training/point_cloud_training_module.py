@@ -11,7 +11,8 @@ class PointCloudTrainingModule(pl.LightningModule):
     def __init__(
             self, model=None, lr=1e-3, min_lr=1e-4,
             scheduler: str = 'constant', max_steps: int = 100,
-            warmup_ratio: float = 0.1, by_epoch: bool = True,
+            warmup_ratio: float = 0.1, weight_decay=1e-4,
+            by_epoch: bool = True,
             tensorboard_writer=None, image_log_period=500,
             optimization_mode: str = 'auto'
             ):
@@ -25,6 +26,7 @@ class PointCloudTrainingModule(pl.LightningModule):
         self.by_epoch = by_epoch
         self.end_lr_steps = max_steps
         self.warmup_steps = int(warmup_ratio * self.end_lr_steps)
+        self.weight_decay = weight_decay
         self._automatic_optimization = optimization_mode == 'auto'
         if tensorboard_writer is not None:
             self.tensorboard_writer = tensorboard_writer
@@ -99,8 +101,7 @@ class PointCloudTrainingModule(pl.LightningModule):
         for key, val in log_values.items():
             self.log(key, val, logger=True, sync_dist=True)
 
-        if (self.global_step % self.image_log_period) == 0 and \
-                self.trainer.is_global_zero:
+        if (self.global_step % self.image_log_period) == 0:
             results_images = self.visualize_results(batch, batch_idx)
 
             for key, val in results_images.items():
@@ -187,7 +188,7 @@ class PointCloudTrainingModule(pl.LightningModule):
         #     },
         # }
         learned_params = self.parameters()
-        optimizer = torch.optim.AdamW(learned_params, lr=self.lr, weight_decay=1e-2)
+        optimizer = torch.optim.AdamW(learned_params, self.lr, weight_decay=self.weight_decay)
         self._optimizer_ = optimizer
         if self.warmup_steps <= 0:
             return optimizer

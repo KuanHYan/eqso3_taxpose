@@ -110,8 +110,6 @@ class RewardModel(nn.Module):
             (action_embedding_tf * action_reward_gate).sum(dim=1)  # [B, D]
         )  # [B, 1]
 
-        outputs = {"action_reward": action_reward}
-
         if self.cycle:
             anchor_embedding_tf = self.transformer_anchor(
                 action_embedding, anchor_embedding
@@ -122,13 +120,8 @@ class RewardModel(nn.Module):
             ancho_reward = self.reward_head(
                 (anchor_embedding_tf * anch_reward_gate).sum(dim=1)  # [B, D]
             )  # [B, 1]
-
-            outputs.update(
-                {"anchor_reward": ancho_reward}
-            )
-            if return_total_reward:
-                return ancho_reward * 0.5 + action_reward * 0.5
-        return outputs
+            return ancho_reward * 0.5 + action_reward * 0.5
+        return action_reward
 
 
 if __name__ == "__main__":

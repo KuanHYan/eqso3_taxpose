@@ -25,6 +25,7 @@ head:
   project_corrs: False
   project_corrs_mode: mlp
   up_sample: False
+  reparam: False
 
 # By default, the number of additional feature channels will be 0.
 # But these could be RGB, symmetry features, etc.
