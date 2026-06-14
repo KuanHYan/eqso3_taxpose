@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import math
-import open3d as o3d
-import open3d.core as o3c
+from pytorch3d.ops import estimate_pointcloud_normals
 
 
 def calc_ppf_gpu(points, point_normals, patches, patch_normals):
@@ -56,48 +55,31 @@ def hierachical_knn_query_list(points, ref_points, k_list ):
 
 
 class ManualPointWiseGemoFea(nn.Module):
-    def __init__(self, project, embedding_dim=512, sample_num=300):
+    def __init__(self, project, embedding_dim=512, sample_num=300,
+                 normal_neighborhood: int = 10):
         super(ManualPointWiseGemoFea, self).__init__()
         self.ppf_nn = [10, 20, 40, 80, 160, 300]
-        self.camera_cfg = o3c.Tensor([0.0, 0.0, 0.0], device=o3c.Device("CUDA:0"), dtype=o3c.Dtype.Float32)
+        self.normal_neighborhood = normal_neighborhood
         if project:
             self.pos_project = nn.Linear(len(self.ppf_nn)*4, embedding_dim, bias=False).cuda()
         self.project = project
 
     def cal_normal(self, points, rand_rotaton=None, translation=None, size=None):
-        b, n, _ = points.shape
-        # translation = translation/size.norm(dim=-1, keepdim=True)
-        # points = self.rotate_pts_batch(points, rand_rotaton) + \
-        #     translation[:, None, :].repeat(1, n, 1)
-        if points.device == torch.device('cpu'):  # 确保张量在正确的设备上
-            self.camera_cfg = self.camera_cfg.to(o3c.Device("CPU:0"))
-        rets = []
-        for i in range(b):
-            point = points[i]  # (N, 3) torch.Tensor on CUDA
+        """使用 PyTorch3D 估计点云法向量 (GPU/CPU 均原生支持).
 
-            # 将 PyTorch CUDA 张量转换为 Open3D CUDA 张量（零拷贝）
-            # 需要张量连续且为 float32
-            if not point.is_contiguous():
-                point = point.contiguous()
-            # 使用 __dlpack__ 协议实现零拷贝共享 GPU 内存
-            o3d_point = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(point))
-
-            # 创建 GPU 点云对象
-            pcd = o3d.t.geometry.PointCloud(o3d_point)
-            # 估计法向量，参数与原 CPU 版本一致：radius=4.0, max_nn=10
-            pcd.estimate_normals(max_nn=10, radius=4.0)
-            # 统一法向量朝向（默认朝向相机位置 (0,0,0)）
-            pcd.orient_normals_towards_camera_location(self.camera_cfg)
-
-            # 取出法向量，转换回 PyTorch CUDA 张量
-            normals_o3d = pcd.point.normals  # o3c.Tensor on CUDA
-            # 同样使用 dlpack 零拷贝回 PyTorch
-            ret = torch.utils.dlpack.from_dlpack(normals_o3d.to_dlpack())
-            rets.append(ret)
-
-        rets = torch.stack(rets, dim=0)  # (B, N, 3)
-        # rets = self.rotate_pts_batch(rets, rand_rotaton.transpose(1, 2))
-        return rets
+        Args:
+            points: (B, N, 3) torch.Tensor
+        Returns:
+            normals: (B, N, 3) torch.Tensor
+        """
+        # estimate_pointcloud_normals 内部使用 knn + PCA + MST 方向一致化,
+        # 功能等价于 Open3D 的 estimate_normals + orient_normals_towards_camera
+        normals = estimate_pointcloud_normals(
+            points,
+            neighborhood_size=self.normal_neighborhood,
+            disambiguate_directions=True,
+        )
+        return normals
 
     def calc_ppf(self, pts, normal):
         b, n, _ = pts.shape

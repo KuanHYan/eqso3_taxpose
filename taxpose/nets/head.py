@@ -72,7 +72,7 @@ class TransformerHead(nn.Module):
         
         # 共享特征提取
         self.shared_point_importance = PointwiseMLP(
-            [2*emb_dims, emb_dims, emb_dims], emb_dims, norm,
+            [2*emb_dims, emb_dims, emb_dims], emb_dims, None,
         )
         if self.pred_weight:
             self.proj_flow_weight = nn.Conv1d(emb_dims, 1, 1)
@@ -641,12 +641,14 @@ class TransformerHead4RL(TransformerHead, ResidualMLPHead4RL):
         project_corrs=False,
         project_corrs_mode='mlp',
         weight_beta: float = 0.1,
+        attn_mode: str = "torch_attn",
     ):
         super().__init__(
             point_encoder_fun, emb_dims,
             output_num, pos_enc_dim, pred_weight,
             residual_on, pos_enc,
-            norm, project_corrs, project_corrs_mode
+            norm, project_corrs, project_corrs_mode,
+            attn_mode
         )
         self.corr_pts_var = PointwiseMLP(
             [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
@@ -698,6 +700,7 @@ class HeadConfig:
     project_corrs_mode: str = "mlp"  # "mlp" or "vn"
     reparam: bool = False
     weight_beta: float = 0.1         # RL head: 采样 log_prob 对 weight 的调制强度
+    attn_mode: str = "torch_attn"  # transformer head attention mode
 
 
 def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
@@ -711,6 +714,7 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             pos_enc=cfg.pos_encoding,
             project_corrs=cfg.project_corrs,
             project_corrs_mode=cfg.project_corrs_mode,
+            attn_mode=cfg.attn_mode,
         )
     if cfg.head_type == "rl_residual":
         head_type = ReparamResidualMLPHead if cfg.reparam else ResidualMLPHead4RL
@@ -729,7 +733,7 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
         )
     if cfg.head_type == "rl_transformer":
         head_type = TransformerHead4RL if cfg.reparam else TransformerHead4RL
-        return TransformerHead4RL(
+        return head_type(
             point_encoder_fun=embedding_fun,
             emb_dims=cfg.emb_dims,
             output_num=cfg.output_num,
@@ -740,6 +744,7 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             project_corrs_mode=cfg.project_corrs_mode,
             norm=cfg.norm,
             weight_beta=cfg.weight_beta,
+            attn_mode=cfg.attn_mode,
         )
     return ResidualMLPHead(
         cfg.emb_dims,

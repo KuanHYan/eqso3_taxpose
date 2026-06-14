@@ -26,6 +26,7 @@ head:
   project_corrs_mode: mlp
   up_sample: False
   reparam: False
+  attn_mode: ${..attn_mode}
 
 # By default, the number of additional feature channels will be 0.
 # But these could be RGB, symmetry features, etc.
