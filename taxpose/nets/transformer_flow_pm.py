@@ -3,6 +3,7 @@ import math
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from taxpose.nets.dgcnn_gc import DGCNN_GC
 from taxpose.nets.pointnet import PointNet
@@ -16,7 +17,7 @@ from third_party.dcp.model import (
     PositionwiseFeedForward,
     MultiHeadedAttention
 )
-from taxpose.nets.huggingface_tf import MHAttention
+from taxpose.nets.huggingface_tf import MHAttention, LinearMHAttention
 
 
 class CustomTransformer(nn.Module):
@@ -35,6 +36,7 @@ class CustomTransformer(nn.Module):
         n_heads=4,
         return_attn=False,
         bidirectional=True,
+        attn_mode="torch.nn"
     ):
         super(CustomTransformer, self).__init__()
         self.emb_dims = emb_dims
@@ -44,8 +46,16 @@ class CustomTransformer(nn.Module):
         self.n_heads = n_heads
         self.return_attn = return_attn
         self.bidirectional = bidirectional
+        self.attn_mode = attn_mode
         c = copy.deepcopy
-        attn = MHAttention(
+        if self.attn_mode == "linear":
+            attn_class = LinearMHAttention
+        elif self.attn_mode == "torch_attn":
+            attn_class = MHAttention
+        else:
+            attn_class = MultiHeadedAttention
+
+        attn = attn_class(
             self.n_heads,
             self.emb_dims,
             dropout=self.dropout,

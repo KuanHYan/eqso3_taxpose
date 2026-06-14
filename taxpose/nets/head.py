@@ -59,7 +59,8 @@ class TransformerHead(nn.Module):
         pos_enc=False,
         norm=nn.BatchNorm1d,
         project_corrs=False,
-        project_corrs_mode='mlp'
+        project_corrs_mode='mlp',
+        attn_mode="torch_attn"
     ):
         super(TransformerHead, self).__init__()
 
@@ -68,10 +69,13 @@ class TransformerHead(nn.Module):
         self.pos_enc = pos_enc
         if self.pos_enc:
             assert pos_enc_dim > 0
+        
+        # 共享特征提取
+        self.shared_point_importance = PointwiseMLP(
+            [2*emb_dims, emb_dims, emb_dims], emb_dims, norm,
+        )
         if self.pred_weight:
-            self.proj_flow_weight = PointwiseMLP(
-                [emb_dims, emb_dims], 1, norm=None
-            )
+            self.proj_flow_weight = nn.Conv1d(emb_dims, 1, 1)
         self.score = nn.Conv1d(emb_dims + pos_enc_dim, 1, 1)
         self.head_tf = CustomTransformer(
             emb_dims=emb_dims,
@@ -81,6 +85,7 @@ class TransformerHead(nn.Module):
             n_heads=emb_dims//64,
             return_attn=True,
             bidirectional=False,
+            attn_mode=attn_mode
         )
         if point_encoder_fun is None:
             from taxpose.nets.raw_dgcnn import DGCNN4TaxPose
@@ -105,12 +110,13 @@ class TransformerHead(nn.Module):
     def forward(self, *input, scores):
         action_embedding = input[0]  # B, C, N
         action_embedding_raw = input[1]
-        action_points = input[2]     # B, 3, N
-        anchor_points = input[3]
+        anchor_embedding = input[2]
+        action_points = input[3]     # B, 3, N
+        anchor_points = input[4]
         if action_embedding.shape[2] != action_points.shape[2]:
             # NOTE: 1_dim is for channel dim, 2_dim is for points dim
-            action_points = input[4]
-            anchor_points = input[5]
+            action_points = input[5]
+            anchor_points = input[6]
         scores = scores.transpose(2, 1).contiguous()
         corr_points = torch.matmul(anchor_points, scores)
         if self.project_corrs:
@@ -126,7 +132,9 @@ class TransformerHead(nn.Module):
         corr_flow = corr_points - action_points
 
         # global point is to compute relative vector
-        pt_scores = self.score(action_embedding).transpose(2, 1)  # B, C, N --> B, N, 1
+        weight_input = torch.cat([action_embedding, anchor_embedding], dim=1)  # (B, 2*emb, N)
+        weight_shared_embedding = self.shared_point_importance(weight_input)
+        pt_scores = self.score(weight_shared_embedding).transpose(2, 1).contiguous()  # B, C, N --> B, N, 1
         pt_scores = F.softmax(pt_scores, dim=1)
         global_pt = corr_points @ pt_scores  # B, 3, 1
         # global_pt = anchor_points.mean(dim=2, keepdim=True)
@@ -155,7 +163,7 @@ class TransformerHead(nn.Module):
         # flow = flow_centerd * self.scale + flow_mean
 
         if self.pred_weight:
-            weight = self.proj_flow_weight(action_embedding)
+            weight = self.proj_flow_weight(weight_shared_embedding)
             corr_flow_weight = torch.concat([flow, weight], dim=1)
         else:
             corr_flow_weight = flow
@@ -222,6 +230,7 @@ class ResidualMLPHead(nn.Module):
         """
         input:
           action_embedding: B,512,N
+          action_embedding_raw: B,512,N
           anchor_embedding: B,512,N
           action_points: B,3,N
           anchor_points: B,3,N
@@ -236,12 +245,13 @@ class ResidualMLPHead(nn.Module):
         """
         action_embedding = input[0]
         action_embedding_raw = input[1]  # It's wrong
-        action_points = input[2]
-        anchor_points = input[3]
+        anchor_embedding = input[2]
+        action_points = input[3]
+        anchor_points = input[4]
         if action_embedding.shape[2] != action_points.shape[2]:
             # NOTE: 1_dim is for channel dim, 2_dim is for points dim
-            action_points = input[4]
-            anchor_points = input[5]
+            action_points = input[5]
+            anchor_points = input[6]
 
         assert scores is not None
         # if scores is None:
@@ -356,6 +366,7 @@ class ReparamResidualMLPHead(ResidualMLPHead):
         """
         input:
           action_embedding: B,512,N
+          action_embedding_raw: B,512,N
           anchor_embedding: B,512,N
           action_points: B,3,N
           anchor_points: B,3,N
@@ -470,6 +481,7 @@ class ReparamTransformerHead(TransformerHead, ReparamResidualMLPHead):
         """
         input:
           action_embedding: B,512,N
+          action_embedding_raw: B,512,N
           anchor_embedding: B,512,N
           action_points: B,3,N
           anchor_points: B,3,N
@@ -513,6 +525,7 @@ class ResidualMLPHead4RL(ResidualMLPHead):
         project_corrs=False,
         project_corrs_mode='mlp',
         output_num=1024,
+        weight_beta: float = 0.1,     # 采样 log_prob 对 weight 的调制强度
     ):
         super().__init__(
             emb_dims, pred_weight,
@@ -523,11 +536,13 @@ class ResidualMLPHead4RL(ResidualMLPHead):
         self.corr_pts_var = PointwiseMLP(
             [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
         )
+        self.weight_beta = weight_beta
 
     def forward(self, *input, scores, sample=False):
         """
         input:
           action_embedding: B,512,N
+          action_embedding_raw: B,512,N
           anchor_embedding: B,512,N
           action_points: B,3,N
           anchor_points: B,3,N
@@ -543,6 +558,7 @@ class ResidualMLPHead4RL(ResidualMLPHead):
         output = super(ResidualMLPHead4RL, self).forward(*input, scores=scores)
         if sample:
             action_embedding = input[0]
+            action_embedding_raw = input[1]
             flow = output["full_flow"][:, :-1, :].permute(0, 2, 1).contiguous()  # B, N, 3
             log_var = self.corr_pts_var(action_embedding).permute(0, 2, 1).contiguous()  # B, N, 3
             pt = MultivariateNormal(flow, torch.diag_embed(log_var.exp()))
@@ -560,18 +576,40 @@ class ResidualMLPHead4RL(ResidualMLPHead):
           return_logP: bool. If true, return log prob.
         return:
           dict with keys: {
-            samples: G,B,N,3
-            weights: G,B,N
-            log_probs: G,B
+            samples: G,B,N,3         — 采样的 flow
+            weights: G,B,N           — 采样相关的 weight (logits, 需 sigmoid)
+            log_probs: G,B           — 平均 log prob (用于 PPO)
             **kwargs: other keys in output
           }
         """
         output = self.forward(*input, scores=scores, sample=True)
         pt: torch.distributions.MultivariateNormal = output["distribution"]
-        output["samples"] = pt.sample((sample_num,))  # G, B, N, 3
-        output["weights"] = output["full_flow"][None, :, -1, :].expand(sample_num, -1, -1)
+        samples = pt.sample((sample_num,))  # G, B, N, 3
+        output["samples"] = samples
+
+        # ---- 采样相关的 weight 调制 ----
+        # base_weight_logit: (B, N), 来自 full_flow 第4通道 (确定性均值下的 weight)
+        base_weight_logit = output["full_flow"][:, -1, :]  # (B, N)
+
+        if self.weight_beta > 0:
+            # log_prob_point: (G, B, N), 每个采样点在其高斯分布下的对数概率
+            log_prob_point = pt.log_prob(samples)  # (G, B, N)
+
+            # 零中心化: 每个样本组内, 相对可信度
+            # 高 log_prob → 该采样点接近均值 → weight 上调
+            # 低 log_prob → 该采样点偏离均值 → weight 下调
+            log_prob_centered = log_prob_point - log_prob_point.mean(dim=-1, keepdim=True)
+
+            # 调制 weight logit
+            adjusted_weight_logit = base_weight_logit.unsqueeze(0) + self.weight_beta * log_prob_centered
+        else:
+            # weight_beta=0 时退化为确定性 weight (兼容旧行为)
+            adjusted_weight_logit = base_weight_logit.unsqueeze(0).expand(sample_num, -1, -1)
+
+        output["weights"] = adjusted_weight_logit  # (G, B, N) — logits, 调用方需 sigmoid
+
         if return_logP:
-            output["log_probs"] = pt.log_prob(output["samples"]).mean(dim=-1)
+            output["log_probs"] = pt.log_prob(samples).mean(dim=-1)
         return output
 
     def log_probs(self, *input, scores, actions):
@@ -601,7 +639,8 @@ class TransformerHead4RL(TransformerHead, ResidualMLPHead4RL):
         pos_enc=False,
         norm=nn.BatchNorm1d,
         project_corrs=False,
-        project_corrs_mode='mlp'
+        project_corrs_mode='mlp',
+        weight_beta: float = 0.1,
     ):
         super().__init__(
             point_encoder_fun, emb_dims,
@@ -612,11 +651,13 @@ class TransformerHead4RL(TransformerHead, ResidualMLPHead4RL):
         self.corr_pts_var = PointwiseMLP(
             [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
         )
+        self.weight_beta = weight_beta
 
     def forward(self, *input, scores, sample=False):
         """
         input:
           action_embedding: B,512,N
+          action_embedding_raw: B,512,N
           anchor_embedding: B,512,N
           action_points: B,3,N
           anchor_points: B,3,N
@@ -656,6 +697,7 @@ class HeadConfig:
     project_corrs: bool = False
     project_corrs_mode: str = "mlp"  # "mlp" or "vn"
     reparam: bool = False
+    weight_beta: float = 0.1         # RL head: 采样 log_prob 对 weight 的调制强度
 
 
 def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
@@ -683,6 +725,7 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             cfg.project_corrs,
             cfg.project_corrs_mode,
             cfg.output_num,
+            weight_beta=cfg.weight_beta,
         )
     if cfg.head_type == "rl_transformer":
         head_type = TransformerHead4RL if cfg.reparam else TransformerHead4RL
@@ -695,7 +738,8 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             pos_enc=cfg.pos_encoding,
             project_corrs=cfg.project_corrs,
             project_corrs_mode=cfg.project_corrs_mode,
-            norm=cfg.norm
+            norm=cfg.norm,
+            weight_beta=cfg.weight_beta,
         )
     return ResidualMLPHead(
         cfg.emb_dims,

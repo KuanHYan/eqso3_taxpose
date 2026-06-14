@@ -198,13 +198,17 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             # loss associated with dense flow
             # pred_T_action=T1T0^-1
             gt_T_action = T0.inverse().compose(T1)
-            dense_loss_action = dense_flow_distribution_loss(
+            dense_loss_action = dense_flow_loss(
                 points=input_act_pts,
                 flow_pred=pred_flow_action,
-                variance_pred=model_output["residual_flow_action"],
                 trans_gt=gt_T_action,
             )
-
+            # dense_loss_action = dense_flow_distribution_loss(
+            #     points=input_act_pts,
+            #     flow_pred=pred_flow_action,
+            #     variance_pred=model_output["residual_flow_action"],
+            #     trans_gt=gt_T_action,
+            # )
             pred_T_anchor = pred_T_action.inverse()
             # Loss associated with ground truth transform
             pred_points_anchor = pred_T_anchor.transform_points(points_trans_anchor)
@@ -226,12 +230,17 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             # loss associated with dense flow
             # pred_T_action=T1T0^-1
             gt_T_anchor = T1.inverse().compose(T0)
-            dense_loss_anchor = dense_flow_distribution_loss(
+            dense_loss_anchor = dense_flow_loss(
                 points=inputs_anch_pts,
                 flow_pred=pred_flow_anchor,
-                variance_pred=model_output["residual_flow_anchor"],
                 trans_gt=gt_T_anchor,
             )
+            # dense_loss_anchor = dense_flow_distribution_loss(
+            #     points=inputs_anch_pts,
+            #     flow_pred=pred_flow_anchor,
+            #     variance_pred=model_output["residual_flow_anchor"],
+            #     trans_gt=gt_T_anchor,
+            # )
 
             self.action_weight = (self.action_weight) / (
                 self.action_weight + self.anchor_weight

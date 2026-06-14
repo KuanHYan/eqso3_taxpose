@@ -63,31 +63,68 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
         self.reward_model.load_state_dict(state_dict)
         self.reward_model.requires_grad_(False)
 
-    def ideal_reward(self, s_next, act_pts, anchor_pts, gt_trans: Transform3d):
+    def ideal_reward(self,
+                     pred_flow_action, pred_w_action,       # 原始采样 flow (未经过刚体约束)
+                     pred_trans: Transform3d, s_next,       # 由 flow 求解的刚体变换及结果
+                     act_pts, anchor_pts,                   # 点云
+                     gt_trans: Transform3d,                 # GT 变换
+                     pred_flow_anchor=None, pred_w_anchor=None):
+        """计算与 compute_error 评估指标对齐的多目标 Reward。
+
+        关键: 使用原始采样 flow (pred_flow_action) 而非 s_next 来计算 smoothness 和 dense，
+        这样才能真正反映 flow 的自洽性和与 GT 刚性流的偏差。
+
+        对应 compute_error 中的指标:
+          - point_loss      → r_point   (变换后点云与 GT 的 L2 距离)
+          - error_R_mean    → r_pose    (旋转角度误差)
+          - error_t_mean    → r_pose    (平移误差)
+          - smoothness_loss → r_smooth  (原始 flow 与刚体诱导流的偏差，反映 flow 自洽性)
+          - dense_loss      → r_dense   (原始 flow 与 GT 刚性流的偏差)
+
+        所有 reward 分量均通过 1/(x+eps) 转换为正值，clamp 后加权求和。
+        """
+        # ---- 将 GT 变换广播到 group 维度 ----
         gt_trans_mat = gt_trans.get_matrix().unsqueeze(0).expand(self.group, -1, -1, -1).reshape(-1, 4, 4)
-        gt_trans = Transform3d(matrix=gt_trans_mat)
-        # r1 = chamfer_distance(
-        #     s_next, gt_trans.transform_points(act_pts), point_reduction='sum', batch_reduction=None)[0]
-        r1 = (s_next - gt_trans.transform_points(act_pts)).norm(p=2, dim=-1).mean(dim=-1)
-        r1 = torch.clamp_max(1 / r1, max=1e6)
-        # gt_inv = gt_trans.inverse()
-        # r2 = chamfer_distance(
-        #     anchor_pts, gt_inv.transform_points(anchor_pts), point_reduction='sum', batch_reduction=None)[0]
-        return r1
+        gt_trans_group = Transform3d(matrix=gt_trans_mat)
 
-    @torch.no_grad()
-    def sample_group(self, head_res, group=64):
-        pt: torch.distributions.MultivariateNormal = head_res["distribution"]
-        mean_flow = head_res["full_flow"]
-        bz, _, n = mean_flow.shape
-        corr_flow = pt.sample((group,)).permute(1, 0, 3, 2).contiguous()
-        flow_weight = mean_flow[:, None, -1, :].expand(-1, group, -1)
+        # ---- 1. point_loss 对应: 变换后点云与 GT 变换后点云的 L2 距离 ----
+        gt_transformed_pts = gt_trans_group.transform_points(act_pts)
+        point_dist = (s_next - gt_transformed_pts).norm(p=2, dim=-1).mean(dim=-1)
+        r_point = torch.clamp_max(1.0 / (point_dist + 1e-6), max=1e6)
 
-        # residual_flow_action = head_res["residual_flow"].permute(0, 2, 1)
-        # corr_flow_action = head_res["corr_flow"].permute(0, 2, 1)
-        # corr_points_action = head_res["corr_points"].permute(0, 2, 1)
+        # ---- 2. error_R + error_t 对应: 位姿误差 ----
+        error_mat = gt_trans_group.compose(pred_trans.inverse())
+        error_R = get_degree_angle(error_mat, return_batch=True)[0]        # 旋转误差 (度)
+        error_t = get_translation(error_mat, return_batch=True)[0]         # 平移误差
+        r_pose = torch.clamp_max(1.0 / (error_R + error_t + 1e-6), max=1e6)
 
-        return corr_flow, flow_weight
+        # ---- 3. smoothness_loss 对应: 原始采样 flow vs 刚体诱导流 ----
+        # compute_error 中: smoothness_loss = mse(pred_flow, induced_flow)
+        # 其中 induced_flow = pred_T(p) - p，即刚体变换严格定义的流
+        # 原始采样 flow 与刚体流的偏差越大 → flow 越不自洽 → 惩罚
+        induced_flow_rigid = s_next - act_pts               # 刚体诱导流 (已经是变换后-变换前)
+        smoothness_dist = (pred_flow_action - induced_flow_rigid).norm(p=2, dim=-1).mean(dim=-1)
+        r_smooth = torch.clamp_max(1.0 / (smoothness_dist + 1e-6), max=1e6)
+
+        # ---- 4. dense_loss 对应: 原始采样 flow vs GT 刚性流 ----
+        # compute_error 中: dense_loss = dense_flow_loss(points, flow_pred, trans_gt)
+        # 即 pred_flow 与 gt_T(p) - p 的偏差
+        gt_induced_flow = gt_transformed_pts - act_pts      # GT 刚性流
+        dense_dist = (pred_flow_action - gt_induced_flow).norm(p=2, dim=-1).mean(dim=-1)
+        r_dense = torch.clamp_max(1.0 / (dense_dist + 1e-6), max=1e6)
+
+        # ---- 5. (可选) anchor 侧的 dense_loss ----
+        if pred_flow_anchor is not None:
+            # GT 刚性流从 anchor 侧: gt_T_anchor(p) - p = gt_T^{-1}(p) - p
+            gt_induced_flow_anch = gt_trans_group.inverse().transform_points(anchor_pts) - anchor_pts
+            dense_dist_anch = (pred_flow_anchor - gt_induced_flow_anch).norm(p=2, dim=-1).mean(dim=-1)
+            r_dense_anch = torch.clamp_max(1.0 / (dense_dist_anch + 1e-6), max=1e6)
+            r_dense = (r_dense + r_dense_anch) / 2.0
+
+        # ---- 加权组合 (权重可调) ----
+        # point 和 pose 是核心指标，smooth 和 dense 作为辅助正则
+        reward = r_point + r_pose + 0.5 * r_smooth + 0.5 * r_dense
+        return reward
 
     @torch.no_grad()
     def compute_reward(
@@ -102,7 +139,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
         pred_flow_action = pred_flow_action.reshape(-1, n, 3)
         pred_w_action = pred_w_action.reshape(-1, n)
         if pred_flow_anchor is None:
-            real_act = flow2pose(
+            pred_trans = flow2pose(
                 act_pts, pred_flow_action,
                 weights=pred_w_action,
                 return_transform3d=True,
@@ -110,7 +147,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
         else:
             pred_flow_anchor = pred_flow_anchor.reshape(-1, n, 3)
             pred_w_anchor = pred_w_anchor.reshape(-1, n)
-            real_act = dualflow2pose(
+            pred_trans = dualflow2pose(
                 xyz_src=act_pts,
                 xyz_tgt=anchor_pts,
                 flow_src=pred_flow_action,
@@ -120,7 +157,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
                 return_transform3d=True,
                 training=True,
             )
-        s_next = real_act.transform_points(act_pts)
+        s_next = pred_trans.transform_points(act_pts)
         # ## Debug ##############
         # gt_trans_mat = gt_trans.get_matrix().unsqueeze(0).expand(self.group, -1, -1, -1).reshape(-1, 4, 4)
         # gt_trans_group = Transform3d(matrix=gt_trans_mat)
@@ -131,10 +168,14 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
         assert s_next.shape == anchor_pts.shape
         if self.manual_reawrd:
             assert gt_trans is not None
-            rewards = self.ideal_reward(s_next, act_pts, anchor_pts, gt_trans)
+            rewards = self.ideal_reward(
+                pred_flow_action, pred_w_action,
+                pred_trans, s_next,
+                act_pts, anchor_pts, gt_trans,
+                pred_flow_anchor, pred_w_anchor)
         else:
             rewards = self.reward_model(s_next, anchor_pts, return_total_reward=True)
-        return rewards, real_act
+        return rewards, pred_trans
 
     @torch.no_grad()
     def rl_sample(self, *input, return_cache=False, gt_trans=None):
@@ -155,6 +196,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
         head_action_output = self.head_action.sample(
             action_embedding_tf,
             action_embedding,
+            anchor_embedding,
             action_points,
             anchor_points,
             act_down_sample,
@@ -174,6 +216,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
             head_anchor_output = self.head_anchor.sample(
                 anchor_embedding_tf,
                 anchor_embedding,
+                action_embedding,
                 anchor_points,
                 action_points,
                 anch_down_sample,

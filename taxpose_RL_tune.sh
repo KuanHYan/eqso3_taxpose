@@ -58,7 +58,7 @@ bash ./my_launch.sh local $GPU_INDEX \
     rl.base_model_path="/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-10/13-05-52/checkpoints/last.ckpt" \
     rl.group=16 \
     rl.update_base_every=100 \
-    rl.kl_coef=0.04 \
+    rl.kl_coef=0.02 \
     rl.clip_eps=0.2 \
     rl.grpo_iter=1 \
     wandb.name=$WANDB_NAME \

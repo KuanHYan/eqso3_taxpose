@@ -149,11 +149,14 @@ def random_se3(
 
 @autocast(enabled=False)
 def get_degree_angle(T, return_batch=False):
+    if return_batch:
+        angle_rad_T = (
+            so3_rotation_angle(T.get_matrix()[:, :3, :3], eps=1e-2)
+        )  # B        
+        return angle_rad_T, None, None
     angle_rad_T = (
         so3_rotation_angle(T.get_matrix()[:, :3, :3], eps=1e-2) * 180 / np.pi
     )  # B
-    if return_batch:
-        return angle_rad_T, None, None
     max = torch.max(angle_rad_T).item()
     min = torch.min(angle_rad_T).item()
     mean = torch.mean(angle_rad_T).item()

@@ -434,6 +434,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         dropout=0.1,
         pos_encoding=False,
         n_blocks=1,
+        attn_mode="torch.nn"
     ):
         super(ResidualFlow_DiffEmbTransformer, self).__init__()
         self.cycle = cycle
@@ -457,7 +458,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             ff_dims=4*emb_dims,
             n_heads=emb_dims//64,
             return_attn=self.return_attn,
-            bidirectional=False
+            bidirectional=False,
+            attn_mode=attn_mode
         )
         self.transformer_anchor = CustomTransformer(
             emb_dims=emb_dims,
@@ -466,7 +468,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             ff_dims=4*emb_dims,
             n_heads=emb_dims//64,
             return_attn=self.return_attn,
-            bidirectional=False
+            bidirectional=False,
+            attn_mode=attn_mode
         )
         if multilaterate:
             self.head_action = MultilaterationHead(
@@ -655,6 +658,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         head_action_output = self.head_action(
             action_embedding_tf,
             action_embedding,
+            anchor_embedding,
             action_points,
             anchor_points,
             act_down_sample,
@@ -687,6 +691,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             head_anchor_output = self.head_anchor(
                 anchor_embedding_tf,
                 anchor_embedding,
+                action_embedding,
                 anchor_points,
                 action_points,
                 anch_down_sample,
@@ -1028,7 +1033,8 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             conditional=r_cfg.conditional,
             dropout=r_cfg.dropout,
             pos_encoding=cfg.pos_encoding,
-            n_blocks=int(cfg.n_blocks)
+            n_blocks=int(cfg.n_blocks),
+            attn_mode=cfg.attn_mode,
         )
     elif cfg.model_type == "residual_flow_diff_emb_transformer_multi_block":
         r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
