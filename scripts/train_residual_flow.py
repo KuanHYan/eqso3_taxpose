@@ -199,7 +199,8 @@ def main(cfg):
     trainer.print(f"use {device_count} gpus")
 
     dm = MultiviewDataModule(
-        batch_size=cfg.training.batch_size,
+        trainbatch_size=cfg.dm.train_mini_batch_size,
+        valbatch_size=cfg.dm.val_mini_batch_size,
         num_workers=cfg.resources.num_workers,
         cfg=cfg.dm,
     )

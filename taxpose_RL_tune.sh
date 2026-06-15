@@ -11,6 +11,8 @@ cd "$ROOT_DIR" || exit 1
 
 # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
+ENCODEING=True
+POINTS=920
 
 # train taxpose network
 bash ./my_launch.sh local $GPU_INDEX \
@@ -20,7 +22,7 @@ bash ./my_launch.sh local $GPU_INDEX \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=16 \
+    training.batch_size=8 \
     training.lr=1e-6 \
     training.min_lr=1e-7 \
     training.warmup_ratio=0.02 \
@@ -31,23 +33,29 @@ bash ./my_launch.sh local $GPU_INDEX \
     training.scheduler=constant \
     dataset@dm=tax_pose \
     dm.train_dset.demo_dset.num_demo=6000 \
-    dm.train_dset.dataset_size=6400 \
+    dm.train_dset.dataset_size=6000 \
+    dm.train_dset.demo_dset.min_num_points=$POINTS \
+    dm.train_dset.demo_dset.occlusion_cfg.random_dropout=False \
+    dm.train_dset.demo_dset.occlusion_cfg.anisotropic_scaling=False \
+    dm.train_dset.demo_dset.occlusion_cfg.gaussian_noise=False \
+    dm.train_dset.demo_dset.occlusion_cfg.occlusion_class="all" \
     dm.train_dset.anchor_rot_sample_method=axis_angle \
     dm.train_dset.anchor_rotation_variance=3.141592653589793 \
     dm.test_folder=val_data \
-    dm.val_dset.demo_dset.num_demo=6000 \
-    dm.val_dset.dataset_size=6000 \
     model.freeze_embnn=True \
     model.dropout=0.1 \
     model.n_blocks=1 \
     model.cycle=True \
+    model.attn_mode="linear" \
+    model.pos_encoding=$ENCODEING \
     model.encoder.name=raw_dgcnn \
     model.encoder.emb_dims=512 \
     model.encoder.norm=BN \
-    model.encoder.output_num=1024 \
+    model.encoder.output_num=$POINTS \
     model.encoder.dropout=0.1 \
-    model.head.head_type=rl_residual \
-    model.head.project_corrs=True \
+    model.encoder.pos_encoding=$ENCODEING \
+    model.head.head_type=rl_transformer \
+    model.head.project_corrs=False \
     model.head.project_corrs_mode="moe" \
     model.head.norm=LN \
     model.head.head_bias=False \
@@ -55,9 +63,9 @@ bash ./my_launch.sh local $GPU_INDEX \
     model.head.pred_weight=True \
     model.head.reparam=False \
     rl.reward_model_path="/home/yan/pose_estimation/taxpose/trained_models/reward_w.ckpt" \
-    rl.base_model_path="/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-10/13-05-52/checkpoints/last.ckpt" \
+    rl.base_model_path="/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-15/00-24-25/checkpoints/last.ckpt" \
     rl.group=16 \
-    rl.update_base_every=100 \
+    rl.update_base_every=20 \
     rl.kl_coef=0.02 \
     rl.clip_eps=0.2 \
     rl.grpo_iter=1 \

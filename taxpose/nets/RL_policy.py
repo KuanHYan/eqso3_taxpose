@@ -28,6 +28,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
         pos_encoding=False,
         group=32,
         n_blocks=1,
+        attn_mode="torch.nn",
         manual_reawrd=False,
     ):
         super(PolicyModel, self).__init__(
@@ -44,7 +45,8 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
             conditional,
             dropout,
             pos_encoding,
-            n_blocks
+            n_blocks,
+            attn_mode=attn_mode
         )
         assert reward_model_path is not None or manual_reawrd == False
         if not manual_reawrd:
@@ -281,10 +283,11 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
             action_attn,
             anchor_attn
         ) = self._backbone(action_embedding, anchor_embedding, action_pt_pos, anchor_pt_pos)
-
+        assert action_attn is not None, "Attention scores are required for log_prob computation"
         logP = self.head_action.log_probs(
             action_embedding_tf,
             action_embedding,
+            anchor_embedding,
             action_points,
             anchor_points,
             act_down_sample,
@@ -296,6 +299,7 @@ class PolicyModel(ResidualFlow_DiffEmbTransformer):
             logP_anch = self.head_anchor.log_probs(
                 anchor_embedding_tf,
                 anchor_embedding,
+                action_embedding,
                 anchor_points,
                 action_points,
                 anch_down_sample,

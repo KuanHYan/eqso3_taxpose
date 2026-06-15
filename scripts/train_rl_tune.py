@@ -201,7 +201,8 @@ def main(cfg):
     )
     trainer.print(f"use {device_count} GPUs")
     dm = MultiviewDataModule(
-        batch_size=cfg.training.batch_size,
+        trainbatch_size=cfg.dm.train_mini_batch_size,
+        valbatch_size=cfg.dm.val_mini_batch_size * 2,
         num_workers=cfg.resources.num_workers,
         cfg=cfg.dm,
     )
@@ -220,6 +221,7 @@ def main(cfg):
         pos_encoding=cfg.model.pos_encoding,
         group=cfg.rl.group,
         n_blocks=int(cfg.model.n_blocks),
+        attn_mode=cfg.model.attn_mode,
         manual_reawrd=True
     )
 
@@ -272,8 +274,6 @@ def main(cfg):
         ],
     )
     if not cfg.eval:
-        # model.eval()
-        # validationer.validate(model, dm, ckpt_path=resume_ckpt)
         model.train()
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
 

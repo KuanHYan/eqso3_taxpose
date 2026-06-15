@@ -13,8 +13,8 @@ cd "$ROOT_DIR" || exit 1
 
 # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
-ENCODEING=False
-POINTS=1024
+ENCODEING=True
+POINTS=920
 
 bash "./my_launch.sh" local $GPU_INDEX \
     python "./scripts/train_residual_flow.py" \
@@ -27,7 +27,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     training.lr=6.25e-5 \
     training.min_lr=6.25e-6 \
     training.warmup_ratio=0.02 \
-    training.weight_decay=1e-3 \
+    training.weight_decay=1e-2 \
     training.precision='32' \
     training.scheduler=linear \
     training.num_gpus=$NUM_GPUS \
@@ -40,7 +40,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     dm.train_dset.demo_dset.occlusion_cfg.random_dropout=False \
     dm.train_dset.demo_dset.occlusion_cfg.anisotropic_scaling=False \
     dm.train_dset.demo_dset.occlusion_cfg.gaussian_noise=False \
-    dm.train_dset.demo_dset.occlusion_cfg.occlusion_class=0 \
+    dm.train_dset.demo_dset.occlusion_cfg.occlusion_class="all" \
     dm.train_dset.anchor_rot_sample_method=axis_angle \
     dm.train_dset.anchor_rotation_variance=3.141592653 \
     model.freeze_embnn=True \

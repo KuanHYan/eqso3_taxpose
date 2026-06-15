@@ -16,10 +16,11 @@ def parallel_iterate(dataset, n_jobs):
 
 
 class MultiviewDataModule(pl.LightningDataModule):
-    def __init__(self, batch_size=8, num_workers=8, cfg=None):
+    def __init__(self, trainbatch_size=8, valbatch_size=8, num_workers=8, cfg=None):
         super().__init__()
         self.cfg = cfg
-        self.batch_size = batch_size
+        self.trainbatch_size = trainbatch_size
+        self.valbatch_size = valbatch_size
         self.num_workers = num_workers
 
     def pass_loss(self, loss):
@@ -47,7 +48,7 @@ class MultiviewDataModule(pl.LightningDataModule):
         # num_workers = 0
         return DataLoader(
             self.train_dataset,
-            batch_size=self.batch_size,
+            batch_size=self.trainbatch_size,
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
@@ -59,7 +60,7 @@ class MultiviewDataModule(pl.LightningDataModule):
         # num_workers = 0
         return DataLoader(
             self.val_dataset,
-            batch_size=self.batch_size * 2,
+            batch_size=self.valbatch_size,
             num_workers=num_workers,
             pin_memory=False,
             persistent_workers=num_workers > 0,

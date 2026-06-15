@@ -9,6 +9,8 @@ train_folder: train_data
 test_folder: val_data
 root: ${..data_root}
 dataset_type: "asm_pair"
+train_mini_batch_size: ${..training.batch_size}
+val_mini_batch_size: ${..training.batch_size}
 
 train_dset:
   demo_dset:

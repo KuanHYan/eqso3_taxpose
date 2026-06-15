@@ -53,7 +53,6 @@ class TransformerHead(nn.Module):
         point_encoder_fun=None,
         emb_dims=512,
         output_num=1024,
-        pos_enc_dim=0,
         pred_weight=True,
         residual_on=True,
         pos_enc=False,
@@ -67,8 +66,6 @@ class TransformerHead(nn.Module):
         self.emb_dims = emb_dims
         self.pred_weight = pred_weight
         self.pos_enc = pos_enc
-        if self.pos_enc:
-            assert pos_enc_dim > 0
         
         # 共享特征提取
         self.shared_point_importance = PointwiseMLP(
@@ -76,7 +73,7 @@ class TransformerHead(nn.Module):
         )
         if self.pred_weight:
             self.proj_flow_weight = nn.Conv1d(emb_dims, 1, 1)
-        self.score = nn.Conv1d(emb_dims + pos_enc_dim, 1, 1)
+        self.score = nn.Conv1d(emb_dims, 1, 1)
         self.head_tf = CustomTransformer(
             emb_dims=emb_dims,
             n_blocks=1,
@@ -108,12 +105,12 @@ class TransformerHead(nn.Module):
             self.project_bias = MOELayer(emb_dims, output_num, 16, 1)
 
     def forward(self, *input, scores):
-        action_embedding = input[0]  # B, C, N
+        action_embedding_tf = input[0]  # B, C, N
         action_embedding_raw = input[1]
         anchor_embedding = input[2]
         action_points = input[3]     # B, 3, N
         anchor_points = input[4]
-        if action_embedding.shape[2] != action_points.shape[2]:
+        if action_embedding_tf.shape[2] != action_points.shape[2]:
             # NOTE: 1_dim is for channel dim, 2_dim is for points dim
             action_points = input[5]
             anchor_points = input[6]
@@ -124,7 +121,7 @@ class TransformerHead(nn.Module):
             if not isinstance(self.project_pts, MOELayer):
                 inputs = corr_points-corr_points_center
             else:
-                inputs = (corr_points-corr_points_center, action_embedding)
+                inputs = (corr_points-corr_points_center, action_embedding_tf)
             corr_points = self.project_pts(inputs)
             corr_points += corr_points_center
 
@@ -132,7 +129,7 @@ class TransformerHead(nn.Module):
         corr_flow = corr_points - action_points
 
         # global point is to compute relative vector
-        weight_input = torch.cat([action_embedding, anchor_embedding], dim=1)  # (B, 2*emb, N)
+        weight_input = torch.cat([action_embedding_tf, anchor_embedding], dim=1)  # (B, 2*emb, N)
         weight_shared_embedding = self.shared_point_importance(weight_input)
         pt_scores = self.score(weight_shared_embedding).transpose(2, 1).contiguous()  # B, C, N --> B, N, 1
         pt_scores = F.softmax(pt_scores, dim=1)
@@ -460,7 +457,6 @@ class ReparamTransformerHead(TransformerHead, ReparamResidualMLPHead):
         point_encoder_fun=None,
         emb_dims=512,
         output_num=1024,
-        pos_enc_dim=0,
         pred_weight=True,
         residual_on=True,
         pos_enc=False,
@@ -470,7 +466,7 @@ class ReparamTransformerHead(TransformerHead, ReparamResidualMLPHead):
     ):
         super().__init__(
             point_encoder_fun, emb_dims,
-            output_num, pos_enc_dim, pred_weight,
+            output_num, pred_weight,
             residual_on, pos_enc,
             norm, project_corrs, project_corrs_mode
         )
@@ -633,7 +629,6 @@ class TransformerHead4RL(TransformerHead, ResidualMLPHead4RL):
         point_encoder_fun=None,
         emb_dims=512,
         output_num=1024,
-        pos_enc_dim=0,
         pred_weight=True,
         residual_on=True,
         pos_enc=False,
@@ -643,9 +638,9 @@ class TransformerHead4RL(TransformerHead, ResidualMLPHead4RL):
         weight_beta: float = 0.1,
         attn_mode: str = "torch_attn",
     ):
-        super().__init__(
+        super(TransformerHead4RL, self).__init__(
             point_encoder_fun, emb_dims,
-            output_num, pos_enc_dim, pred_weight,
+            output_num, pred_weight,
             residual_on, pos_enc,
             norm, project_corrs, project_corrs_mode,
             attn_mode
@@ -654,6 +649,8 @@ class TransformerHead4RL(TransformerHead, ResidualMLPHead4RL):
             [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm
         )
         self.weight_beta = weight_beta
+        if getattr(self, "proj_flow", None) is not None:
+            del self.proj_flow  # 删除父类中的 proj_flow，避免冗余计算
 
     def forward(self, *input, scores, sample=False):
         """
