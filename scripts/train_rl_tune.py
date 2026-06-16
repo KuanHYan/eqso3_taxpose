@@ -11,7 +11,7 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies import DDPStrategy
 from taxpose.datasets.point_cloud_data_module import MultiviewDataModule
 from taxpose.training.rl_fine_tune import RLTrainingModule
-from taxpose.nets.RL_policy import PolicyModel
+from taxpose.nets.RL_policy import create_policy_model
 from taxpose.utils.load_model import get_weights_path
 
 def load_emb_weights(checkpoint_reference, wandb_cfg=None, run=None):
@@ -56,7 +56,8 @@ def maybe_load_from_wandb(checkpoint_reference, wandb_cfg, run):
     return ckpt_file
 
 
-def set_cfg_fpr_debug(cfg):
+def set_cfg_for_debug(cfg):
+    ## --config-name train_ndf dataset@dm=tax_pose
     torch.cuda.set_device(0)
     OmegaConf.update(cfg, "job_type", "rl_tune")
     OmegaConf.update(cfg, "data_root", "/home/yan/pose_estimation/taxpose/data/ideal_pair_models")
@@ -65,19 +66,22 @@ def set_cfg_fpr_debug(cfg):
     OmegaConf.update(cfg, "training.batch_size", 8)
     OmegaConf.update(cfg, "training.lr", 1e-6)
     OmegaConf.update(cfg, "training.min_lr", 1e-7)
-    OmegaConf.update(cfg, "training.warmup_ratio", 0.1)
+    OmegaConf.update(cfg, "training.warmup_ratio", 0.02)
+    OmegaConf.update(cfg, "training.weight_decay", 0.0)
     OmegaConf.update(cfg, "training.precision", '32')
     OmegaConf.update(cfg, "training.num_gpus", 1)
     OmegaConf.update(cfg, "training.accumulate_grad_batches", 2)
-    OmegaConf.update(cfg, "training.scheduler", "linear")
-    OmegaConf.update(cfg, "dm.train_dset.demo_dset.num_demo", 600)
-    OmegaConf.update(cfg, "dm.train_dset.dataset_size", 640)
+    OmegaConf.update(cfg, "training.scheduler", "constant")
+    OmegaConf.update(cfg, "dm.train_dset.demo_dset.num_demo", 6000)
+    OmegaConf.update(cfg, "dm.train_dset.dataset_size", 6000)
     OmegaConf.update(cfg, "dm.train_dset.anchor_rot_sample_method", "axis_angle")
     OmegaConf.update(cfg, "dm.train_dset.anchor_rotation_variance", 3.141592653589793)
     OmegaConf.update(cfg, "model.freeze_embnn", True)
     OmegaConf.update(cfg, "model.dropout", 0.1)
     OmegaConf.update(cfg, "model.n_blocks", 1)
     OmegaConf.update(cfg, "model.cycle", True)
+    OmegaConf.update(cfg, "model.model_type", "rl_flow")
+    OmegaConf.update(cfg, "model.attn_mode", "torch_attn")
     OmegaConf.update(cfg, "model.encoder.name", "raw_dgcnn")
     OmegaConf.update(cfg, "model.encoder.emb_dims", 512)
     OmegaConf.update(cfg, "model.encoder.norm", "BN")
@@ -90,8 +94,8 @@ def set_cfg_fpr_debug(cfg):
     OmegaConf.update(cfg, "model.head.head_bias", False)
     OmegaConf.update(cfg, "model.head.residual_on", True)
     OmegaConf.update(cfg, "model.head.pred_weight", True)
-    OmegaConf.update(cfg, "model.head.reparam", False)
-    OmegaConf.update(cfg, "rl.group", 8)
+    OmegaConf.update(cfg, "model.head.reparam", True)
+    OmegaConf.update(cfg, "rl.group", 64)
     OmegaConf.update(cfg, "rl.update_base_every", 100)
     OmegaConf.update(cfg, "rl.kl_coef", 0.02)
     OmegaConf.update(cfg, "rl.clip_eps", 0.2)
@@ -100,7 +104,8 @@ def set_cfg_fpr_debug(cfg):
     OmegaConf.update(cfg, "debug", False)
     OmegaConf.update(cfg, "eval", False)
     OmegaConf.update(cfg, "rl.reward_model_path", "/home/yan/pose_estimation/taxpose/trained_models/reward_w.ckpt")
-    OmegaConf.update(cfg, "rl.base_model_path", "/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-10/13-05-52/checkpoints/last.ckpt")
+    OmegaConf.update(cfg, "rl.base_model_path", "/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-13/01-05-28/checkpoints/last.ckpt")
+    # OmegaConf.update(cfg, "resume_ckpt", "/home/yan/pose_estimation/taxpose/logs/rl_tune/2026-06-15/21-57-18/checkpoints/last.ckpt")
     return cfg
 
 @hydra.main(version_base="1.1", config_path="../configs", config_name="train_ndf")
@@ -112,7 +117,7 @@ def main(cfg):
     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
 
     ## debug
-    # cfg = set_cfg_fpr_debug(cfg)
+    # cfg = set_cfg_for_debug(cfg)
 
     if cfg.resume_ckpt:
         print("Resuming from checkpoint")
@@ -209,21 +214,7 @@ def main(cfg):
 
     dm.setup()
     cfg.rl.reward_model_path = hydra.utils.to_absolute_path(cfg.rl.reward_model_path)
-    network = PolicyModel(
-        cfg.model.encoder,
-        cfg.model.head,
-        cfg.rl.reward_model_path,
-        cfg.model.cycle,
-        center_feature=cfg.model.center_feature,
-        freeze_embnn=cfg.model.freeze_embnn,
-        return_attn=cfg.model.return_attn,
-        dropout=cfg.model.dropout,
-        pos_encoding=cfg.model.pos_encoding,
-        group=cfg.rl.group,
-        n_blocks=int(cfg.model.n_blocks),
-        attn_mode=cfg.model.attn_mode,
-        manual_reawrd=True
-    )
+    network = create_policy_model(cfg)
 
     trainer.print(network)
     device_count = device_count * cfg.training.accumulate_grad_batches
@@ -266,14 +257,18 @@ def main(cfg):
 
     model.cuda()
     model.train()
-    base_model_path = hydra.utils.to_absolute_path(cfg.rl.base_model_path)
-    trainer.print(f"loaded base model from: {base_model_path}")
-    model.load_state_dict(
-        torch.load(base_model_path)[
-            "state_dict"
-        ],
-    )
+    if cfg.rl.base_model_path not in [None, "None", "none", ""] and resume_ckpt is None:
+        base_model_path = hydra.utils.to_absolute_path(cfg.rl.base_model_path)
+        trainer.print(f"loaded base model from: {base_model_path}")
+        model.load_state_dict(
+            torch.load(base_model_path)[
+                "state_dict"
+            ],
+        )
+
     if not cfg.eval:
+        model.eval()
+        validationer.validate(model, dm, ckpt_path=resume_ckpt)
         model.train()
         trainer.fit(model, dm, ckpt_path=resume_ckpt)
 

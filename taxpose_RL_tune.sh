@@ -15,6 +15,7 @@ ENCODEING=True
 POINTS=920
 
 # train taxpose network
+#"/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-15/00-24-25/checkpoints/last.ckpt"
 bash ./my_launch.sh local $GPU_INDEX \
     python "./scripts/train_rl_tune.py" \
     --config-name train_ndf \
@@ -42,6 +43,7 @@ bash ./my_launch.sh local $GPU_INDEX \
     dm.train_dset.anchor_rot_sample_method=axis_angle \
     dm.train_dset.anchor_rotation_variance=3.141592653589793 \
     dm.test_folder=val_data \
+    model.model_type=rl_se3 \
     model.freeze_embnn=True \
     model.dropout=0.1 \
     model.n_blocks=1 \
@@ -54,7 +56,7 @@ bash ./my_launch.sh local $GPU_INDEX \
     model.encoder.output_num=$POINTS \
     model.encoder.dropout=0.1 \
     model.encoder.pos_encoding=$ENCODEING \
-    model.head.head_type=rl_transformer \
+    model.head.head_type=transformer \
     model.head.project_corrs=False \
     model.head.project_corrs_mode="moe" \
     model.head.norm=LN \
@@ -64,8 +66,8 @@ bash ./my_launch.sh local $GPU_INDEX \
     model.head.reparam=False \
     rl.reward_model_path="/home/yan/pose_estimation/taxpose/trained_models/reward_w.ckpt" \
     rl.base_model_path="/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-15/00-24-25/checkpoints/last.ckpt" \
-    rl.group=16 \
-    rl.update_base_every=20 \
+    rl.group=64 \
+    rl.update_base_every=100 \
     rl.kl_coef=0.02 \
     rl.clip_eps=0.2 \
     rl.grpo_iter=1 \

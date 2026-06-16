@@ -13,18 +13,19 @@ from taxpose.utils.se3 import (
     get_translation,
     mse_criterion,
 )
+from taxpose.utils.lr import MilestoneScheduler, LinearAnnealingWarmup
 
 
 class RLTrainingModule(PointCloudTrainingModule):
     def __init__(
         self,
-        model: PolicyModel,
-        lr=1e-3,
+        model,
+        lr=1e-6,
         lr_cfg: dict = {
             "scheduler": "constant",
             "max_steps": 400,
             "warmup_ratio": 0.1,
-            "min_lr": 1e-5,
+            "min_lr": 1e-7,
             "by_epoch": True,
             "weight_decay": 0.0,
         },
@@ -47,7 +48,7 @@ class RLTrainingModule(PointCloudTrainingModule):
             optimization_mode=optimization_mode,
             **lr_cfg,
         )
-        self.model: PolicyModel = model
+        self.model = model
         self.lr = lr
         self.image_log_period = image_log_period
         self.action_weight = action_weight
@@ -102,11 +103,11 @@ class RLTrainingModule(PointCloudTrainingModule):
             )
             state_act = batch["points_action_trans"]  # B,N,3
             state_anch = batch["points_anchor_trans"]
-            flow_act = samples['flow_act']  # B, G, N, 3
-            flow_anch = samples['flow_anch']
+            act_1 = samples['act_1']  # B, G, N, 3
+            act_2 = samples['act_2']
             samples["log_p_old"] = samples["log_prob"]
             samples["log_p_base"] = self.base_model.log_probs(
-                state_act, state_anch, flow_act, flow_anch, cache=samples["cache"])
+                state_act, state_anch, act_1, act_2, cache=samples["cache"])
 
         if self._automatic_optimization:
             total_grpo_loss = self.compute_loss(samples, batch, log_values)
@@ -167,15 +168,15 @@ class RLTrainingModule(PointCloudTrainingModule):
         """
         state_act = batch["points_action_trans"]  # B,N,3
         state_anch = batch["points_anchor_trans"]
-        flow_act = samples['flow_act']  # B, 3, N ??
-        flow_anch = samples['flow_anch']
+        act_1 = samples['act_1']  # B, 3, N ??
+        act_2 = samples['act_2']
         adv = samples['adv']            # 形状 [B, G]，组内标准化后的优势
         log_p_base = samples['log_p_base']
         log_p_old = samples['log_p_old']
 
         # ---- 当前策略的对数概率 ----
         log_p = self.model.log_probs(
-            state_act, state_anch, flow_act, flow_anch, samples['cache'])  # [G, B]
+            state_act, state_anch, act_1, act_2, samples['cache'])  # [G, B]
         # ---- GRPO 策略损失 (带裁剪) ----
         log_ratio = log_p - log_p_old
         # 安全范围，避免 exp 溢出
@@ -365,6 +366,56 @@ class RLTrainingModule(PointCloudTrainingModule):
         log_values[loss_prefix + "error_t_mean"] = error_t_mean
 
         return loss, log_values
+
+    def configure_optimizers(self):
+        # 使用 Policy 的 get_param_groups 接口, 支持不同参数组使用不同学习率
+        # SE3PolicyModel 的方差头 (translate_var / rotate_var) 会获得更高 LR
+        if hasattr(self.model, 'get_param_groups'):
+            param_groups = self.model.get_param_groups(self.lr)
+        else:
+            param_groups = self.parameters()
+
+        optimizer = torch.optim.AdamW(
+            param_groups, weight_decay=self.weight_decay)
+        self._optimizer_ = optimizer
+
+        if self.warmup_steps <= 0:
+            return optimizer
+
+        if self.lr_scheduler == 'constant':
+            milestones = [self.end_lr_steps]
+            self.scheduler = scheduler = MilestoneScheduler(
+                optimizer,
+                milestones=milestones, gamma=1.0,
+                max_lr=self.lr, min_lr=self.min_lr,
+                warmup_steps=self.warmup_steps,
+            )
+        elif self.lr_scheduler == 'milestone':
+            milestones = [int(self.end_lr_steps * stone)
+                          for stone in [0.5, 0.75, 0.9]]
+            self.scheduler = scheduler = MilestoneScheduler(
+                optimizer,
+                milestones=milestones, gamma=0.5,
+                max_lr=self.lr, min_lr=self.min_lr,
+                warmup_steps=self.warmup_steps,
+            )
+        elif self.lr_scheduler == 'linear':
+            self.scheduler = scheduler = LinearAnnealingWarmup(
+                optimizer,
+                total_steps=self.end_lr_steps,
+                max_lr=self.lr, min_lr=self.min_lr,
+                warmup_steps=self.warmup_steps,
+            )
+        else:
+            return optimizer
+
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler': scheduler,
+                'interval': 'epoch' if self.by_epoch else 'step',
+            },
+        }
 
     def extract_flow_and_weight(self, x):
         # x: Batch, num_points, 4

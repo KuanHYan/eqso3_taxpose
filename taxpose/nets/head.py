@@ -349,6 +349,7 @@ class ReparamResidualMLPHead(ResidualMLPHead):
         project_corrs=False,
         project_corrs_mode='vn',
         output_num=1024,
+        weight_beta: float = 0.1,     # 采样 log_prob 对 weight 的调制强度
     ):
         super(ReparamResidualMLPHead, self).__init__(
             emb_dims, pred_weight,
