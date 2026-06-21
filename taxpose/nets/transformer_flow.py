@@ -17,8 +17,9 @@ from taxpose.nets.transformer_flow_pm import CustomTransformer
 from taxpose.nets.tv_mlp import MLP as TVMLP
 from taxpose.utils.multilateration import estimate_p
 from third_party.dcp.model import DGCNN
-from taxpose.nets.raw_dgcnn import DGCNN4TaxPose, DGCNN_VAE, VN_DGCNN, VNArgs
-from taxpose.nets.dgcnn_group import DGCNN_Grouper
+from taxpose.nets.raw_dgcnn import DGCNN4TaxPose, DGCNN_VAE
+from taxpose.nets.vn_dgcnn import VN_DGCNN_iqSO3, VNArgs
+from taxpose.nets.dgcnn_group_v2 import DGCNN_Grouper_V2
 from taxpose.nets.head import create_head, HeadConfig
 from taxpose.nets.gemo_fea import ManualPointWiseGemoFea
 from taxpose.nets.huggingface_tf import Transformer
@@ -394,13 +395,26 @@ def create_embedding_network(cfg) -> nn.Module:
     if cfg.name == "dgcnn":
         network: nn.Module = DGCNN(emb_dims=cfg.emb_dims)
     elif cfg.name == "vn_dgcnn":
-        args = VNArgs()
-        network = VN_DGCNN(args, num_part=cfg.emb_dims, gc=False)
+        print(f"Using {cfg.name} with iqSO3 pooling")
+        network = VN_DGCNN_iqSO3(
+            emb_dims=cfg.emb_dims,
+            knn=cfg.knn,
+            down_sample=cfg.down_ratio > 1,
+            down_ratio=cfg.down_ratio,
+            output_num=cfg.output_num,
+            pos_encoding=cfg.pos_encoding,
+            norm_mode=cfg.norm,
+            pooling=cfg.pooling,
+        )
     elif cfg.name == "raw_dgcnn":
+        print(f"Using {cfg.name}")
         network: nn.Module = DGCNN4TaxPose(cfg.emb_dims, cfg.knn, cfg.dropout, cfg.norm)
     elif cfg.name == "dgcnn_group":
-        network = DGCNN_Grouper(cfg.emb_dims, cfg.output_num, cfg.knn, cfg.dropout, cfg.norm)
+        print(f"Using {cfg.name} with grouping")
+        network = DGCNN_Grouper_V2(
+            cfg.emb_dims, cfg.output_num, cfg.knn, cfg.dropout, cfg.norm)
     elif cfg.name == "vae_dgcnn":
+        print(f"Using {cfg.name}")
         network = DGCNN_VAE(
             cfg,
             pos_encoding=cfg.pos_encoding,
@@ -561,8 +575,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 anchor_embedding, pts = anchor_embedding
                 anch_down_sample = pts + anchor_points.mean(dim=2, keepdim=True)
                 # anchor_points = pts + anchor_points.mean(dim=2, keepdim=True)
-            action_embedding = F.normalize(action_embedding, dim=1)
-            anchor_embedding = F.normalize(anchor_embedding, dim=1)
+            # action_embedding = F.normalize(action_embedding, dim=1)
+            # anchor_embedding = F.normalize(anchor_embedding, dim=1)
             del action_points_dmean, anchor_points_dmean
             if self.feature_channels > 0:
                 # Add a symmetry label to the embeddings.
@@ -601,8 +615,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             if self.pos_encoding:
                 action_pt_pos = self.pos_encoder(action_points)  # B,C,N
                 anchor_pt_pos = self.pos_encoder(anchor_points)
-                action_embedding += F.normalize(action_pt_pos)
-                anchor_embedding += F.normalize(anchor_pt_pos)
+                action_embedding += action_pt_pos
+                anchor_embedding += anchor_pt_pos
             return (
                 action_points, anchor_points,
                 action_embedding, anchor_embedding,
@@ -625,11 +639,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         if not self.return_attn:
             action_attn = None
             anchor_attn = None
-        # 理论上， action_embedding_tf = action_embedding + residual(action_embedding)
-        # action_embedding_tf = action_embedding + F.normalize(action_embedding_tf, dim=1)
-        # anchor_embedding_tf = anchor_embedding + F.normalize(anchor_embedding_tf, dim=1)
-
-        if self.return_attn:
+        else:
             action_attn = action_attn.mean(dim=1)  # b, h，N, M -> b, N, M
             anchor_attn = anchor_attn.mean(dim=1)
 
@@ -729,81 +739,6 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
     def set_residual_on(self, on):
         self.head_action.residual_on = on
         self.head_anchor.residual_on = on
-
-
-class ResidualFlow_DiffEmbTransformer_MultiBlock(ResidualFlow_DiffEmbTransformer):
-    def __init__(
-        self,
-        encoder_cfg,
-        head_cfg,
-        n_blocks=2,
-        cycle=True,
-        center_feature=False,
-        freeze_embnn=False,
-        return_attn=True,
-        multilaterate=False,
-        mlat_sample: bool = False,
-        mlat_nkps: int = 100,
-        feature_channels=0,  # Number of extra channels we'll pass into the network.
-        conditional: bool = False,
-        dropout=0.1,
-    ):
-        super(ResidualFlow_DiffEmbTransformer_MultiBlock, self).__init__(
-            encoder_cfg,
-            head_cfg,
-            cycle=cycle,
-            center_feature=center_feature,
-            freeze_embnn=freeze_embnn,
-            return_attn=return_attn,
-            feature_channels=feature_channels,
-            conditional=conditional,
-            dropout=dropout,
-        )
-        assert not head_cfg.up_sample, "up_sample not supported for this model"
-        output_num = encoder_cfg.output_num
-
-        class Backbone(nn.Module):
-            def __init__(self, n_blocks, tf_layer):
-                super(Backbone, self).__init__()
-                self.tf_layer = self.clones(tf_layer, n_blocks)
-                self.output_num = output_num
-                score_project = nn.Sequential(
-                    nn.Conv1d(encoder_cfg.emb_dims, output_num, 1, bias=False),
-                    nn.ReLU(),
-                    LayerNorm1d(output_num),
-                    nn.Conv1d(output_num, output_num, 1, bias=False),
-                    LayerNorm1d(output_num),
-                )
-                self.score_project = self.clones(score_project, n_blocks)
-
-            def forward(self, *input):
-                act_emb = input[0]
-                anch_emb = input[1]
-                bz, c, n = act_emb.shape
-                assert (
-                    n == self.output_num
-                ), f"shape mismatch: {act_emb.shape} vs {self.output_num}"
-                # output = {"score": torch.ones((bz, n, n)).to(act_emb.device)}
-                output = {}
-                for tf, score_project in zip(self.tf_layer, self.score_project):
-                    output.update(tf(act_emb, anch_emb))
-                    act_emb = output["src_embedding"]  # NOTE: shape is (bz, c, n)
-                    if "score" in output:
-                        output["score"] = output["score"] @ score_project(
-                            act_emb
-                        ).transpose(1, 2)
-                    else:
-                        output["score"] = score_project(act_emb).transpose(1, 2)
-                output["src_attn"] = output["score"].unsqueeze(1)
-                output.pop("score")
-                return output
-
-            @staticmethod
-            def clones(module, N):
-                return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
-
-        self.transformer_action = Backbone(n_blocks, self.transformer_action)
-        self.transformer_anchor = Backbone(n_blocks, self.transformer_anchor)
 
 
 class Flow_DiffEmbTransformer(ResidualFlow_DiffEmbTransformer):
@@ -1035,24 +970,6 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             pos_encoding=cfg.pos_encoding,
             n_blocks=int(cfg.n_blocks),
             attn_mode=cfg.attn_mode,
-        )
-    elif cfg.model_type == "residual_flow_diff_emb_transformer_multi_block":
-        r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
-        network: nn.Module = ResidualFlow_DiffEmbTransformer_MultiBlock(
-            n_blocks=cfg.n_blocks,
-            encoder_cfg=r_cfg.encoder,
-            head_cfg=r_cfg.head,
-            cycle=r_cfg.cycle,
-            center_feature=r_cfg.center_feature,
-            freeze_embnn=r_cfg.freeze_embnn,
-            return_attn=r_cfg.return_attn,
-            multilaterate=r_cfg.multilaterate,
-            mlat_sample=r_cfg.mlat_sample,
-            mlat_nkps=r_cfg.mlat_nkps,
-            feature_channels=r_cfg.feature_channels,
-            conditional=r_cfg.conditional,
-            dropout=r_cfg.dropout,
-            pos_encoding=cfg.pos_encoding,
         )
     elif cfg.model_type == "direct_correspondence_points_prediction":
         r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)

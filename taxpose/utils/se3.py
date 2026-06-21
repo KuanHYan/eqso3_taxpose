@@ -21,22 +21,34 @@ class PointCloudLoss(nn.Module):
         super(PointCloudLoss, self).__init__()
         self.type_key = type_key
         self.reduction = reduction
-        if self.type_key not in ["MSE", "mse", "CD", "cd"]:
+        if self.type_key not in ["MSE", "mse", "CD", "cd", "L2D", "l2d"]:
             raise ValueError(
-                "Loss type {} is not supported. Please use MSE or CD.".format(
+                "Loss type {} is not supported. Please use MSE, CD, or L2D.".format(
                     self.type_key
                 )
             )
 
-    def forward(self, x, y):
-        if self.type_key in ["CD", "cd"]:
-            loss = chamfer_distance(
-                x, y,
-                point_reduction=self.reduction)[0]
+    def forward(self, x, y, weights=None):
+        reduce_ops = torch.mean if self.reduction == "mean" else torch.sum
+        if weights is None:
+            weights = torch.ones(x.shape[0], x.shape[1]).to(x.device)
         else:
-            bz = x.shape[0]
-            loss = F.mse_loss(x, y, reduction=self.reduction) / bz
-        return loss
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        if self.type_key in ["CD", "cd"]:
+            return chamfer_distance(
+                x, y,
+                weights=weights,
+                point_reduction=self.reduction)[0]
+        elif self.type_key in ["L2D", "l2d"]:
+            # L2 distance between two point clouds, averaged over the batch and point dimension
+            l2_dist = torch.norm(x - y, dim=-1)
+            loss = reduce_ops(l2_dist, dim=-1)
+            return loss.mean()
+        else:
+            loss_per_point = F.mse_loss(x, y, reduction='none')   # (B, N, 3)
+            loss_per_point = loss_per_point.sum(dim=-1)  # (B, N)
+            loss = reduce_ops(loss_per_point*weights, dim=-1)
+            return loss.mean()
 
     def set_type_key(self, type_key):
         self.type_key = type_key

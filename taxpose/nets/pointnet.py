@@ -171,4 +171,3 @@ class ResidualPointNet(nn.Module):
         coords: (B, 3, N)
         """
         return self.pos_encoder.get_geom_fea(coords, downsample_num=coords.shape[2])
-

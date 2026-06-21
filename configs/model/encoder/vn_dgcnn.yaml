@@ -1,2 +1,8 @@
 name: vn_dgcnn
 emb_dims: 512
+knn: 20
+norm: BN
+down_ratio: 1
+output_num: 1024
+pos_encoding: True
+pooling: max

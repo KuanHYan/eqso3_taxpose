@@ -113,7 +113,7 @@ def main(cfg):
     if __name__ == "__main__":
         print(OmegaConf.to_yaml(cfg, resolve=True))
 
-    torch.set_float32_matmul_precision("medium")
+    torch.set_float32_matmul_precision("high")
     TESTING = os.environ.get("PYTEST_CURRENT_TEST", 'False').lower() == "True".lower()
 
     ## debug
@@ -214,6 +214,9 @@ def main(cfg):
 
     dm.setup()
     cfg.rl.reward_model_path = hydra.utils.to_absolute_path(cfg.rl.reward_model_path)
+    if cfg.rl.base_model_path not in [None, "None", "none", ""] and resume_ckpt is None:
+        cfg.rl.base_model_path = hydra.utils.to_absolute_path(cfg.rl.base_model_path)
+        trainer.print(f"loaded base model from: {cfg.rl.base_model_path}")
     network = create_policy_model(cfg)
 
     trainer.print(network)
@@ -256,15 +259,6 @@ def main(cfg):
     )
 
     model.cuda()
-    model.train()
-    if cfg.rl.base_model_path not in [None, "None", "none", ""] and resume_ckpt is None:
-        base_model_path = hydra.utils.to_absolute_path(cfg.rl.base_model_path)
-        trainer.print(f"loaded base model from: {base_model_path}")
-        model.load_state_dict(
-            torch.load(base_model_path)[
-                "state_dict"
-            ],
-        )
 
     if not cfg.eval:
         model.eval()

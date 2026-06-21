@@ -25,6 +25,7 @@ head:
   project_corrs: False
   project_corrs_mode: mlp
   up_sample: False
+  up_sample_ratio: 1
   reparam: False
   attn_mode: ${..attn_mode}
 

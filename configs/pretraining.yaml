@@ -37,7 +37,7 @@ resources:
   num_workers: 16
 
 resume_ckpt: null
-
+eval: False
 wandb:
   group: Null
   run_id_override: Null

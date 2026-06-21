@@ -1,5 +1,9 @@
 from typing import Any
 import wandb
+import random
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 import torch
 from torch import nn
@@ -16,7 +20,7 @@ from taxpose.utils.se3 import (
     flow2pose,
     get_degree_angle,
     get_translation,
-    mse_criterion,
+    PointCloudLoss,
 )
 
 import matplotlib.cm as cm
@@ -38,8 +42,8 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             "weight_decay": 1e-2,
         },
         image_log_period=500,
-        action_weight=1,
-        anchor_weight=1,
+        action_weight=0.5,
+        anchor_weight=0.5,
         displace_loss_weight=1,
         consistency_loss_weight=0.1,
         direct_correspondence_loss_weight=1,
@@ -64,8 +68,9 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             optimization_mode=optimization_mode,
             **lr_cfg,
         )
-        if mse_criterion.type_key != point_cloud_loss:
-            mse_criterion.set_type_key(point_cloud_loss)
+        self.point_cloud_loss = PointCloudLoss(point_cloud_loss, reduction="sum")
+        self.dense_flow_loss = PointCloudLoss("MSE", reduction="sum")
+        self.smooth_flow_loss = PointCloudLoss(point_cloud_loss, reduction="sum")
         self.model = model
         self.lr = lr
         self.image_log_period = image_log_period
@@ -178,7 +183,9 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             # Loss associated with ground truth transform
             pred_points_action = pred_T_action.transform_points(points_trans_action)
             points_action_target = T1.transform_points(points_action)
-            point_loss_action = mse_criterion(pred_points_action, points_action_target)
+            point_loss_action = self.point_cloud_loss(
+                pred_points_action, points_action_target,
+            )
 
             # ##
             # pa = points_action_target.detach()
@@ -192,16 +199,15 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             induced_flow_action = (
                 pred_T_action.transform_points(input_act_pts) - input_act_pts
             ).detach()
-            smoothness_loss_action = mse_criterion(
-                pred_flow_action, induced_flow_action
+            smoothness_loss_action = self.smooth_flow_loss(
+                pred_flow_action, induced_flow_action,
             )
             # loss associated with dense flow
             # pred_T_action=T1T0^-1
             gt_T_action = T0.inverse().compose(T1)
-            dense_loss_action = dense_flow_loss(
-                points=input_act_pts,
-                flow_pred=pred_flow_action,
-                trans_gt=gt_T_action,
+            dense_loss_action = self.dense_flow_loss(
+                pred_flow_action,
+                gt_T_action.transform_points(input_act_pts) - input_act_pts,
             )
             # dense_loss_action = dense_flow_distribution_loss(
             #     points=input_act_pts,
@@ -213,7 +219,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             # Loss associated with ground truth transform
             pred_points_anchor = pred_T_anchor.transform_points(points_trans_anchor)
             points_anchor_target = T0.transform_points(points_anchor)
-            point_loss_anchor = mse_criterion(
+            point_loss_anchor = self.point_cloud_loss(
                 pred_points_anchor,
                 points_anchor_target,
             )
@@ -222,7 +228,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             induced_flow_anchor = (
                 pred_T_anchor.transform_points(inputs_anch_pts) - inputs_anch_pts
             ).detach()
-            smoothness_loss_anchor = mse_criterion(
+            smoothness_loss_anchor = self.smooth_flow_loss(
                 pred_flow_anchor,
                 induced_flow_anchor,
             )
@@ -230,11 +236,11 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             # loss associated with dense flow
             # pred_T_action=T1T0^-1
             gt_T_anchor = T1.inverse().compose(T0)
-            dense_loss_anchor = dense_flow_loss(
-                points=inputs_anch_pts,
-                flow_pred=pred_flow_anchor,
-                trans_gt=gt_T_anchor,
+            dense_loss_anchor = self.dense_flow_loss(
+                pred_flow_anchor,
+                gt_T_anchor.transform_points(inputs_anch_pts) - inputs_anch_pts,
             )
+
             # dense_loss_anchor = dense_flow_distribution_loss(
             #     points=inputs_anch_pts,
             #     flow_pred=pred_flow_anchor,
@@ -242,12 +248,12 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             #     trans_gt=gt_T_anchor,
             # )
 
-            self.action_weight = (self.action_weight) / (
-                self.action_weight + self.anchor_weight
-            )
-            self.anchor_weight = (self.anchor_weight) / (
-                self.action_weight + self.anchor_weight
-            )
+            # self.action_weight = (self.action_weight) / (
+            #     self.action_weight + self.anchor_weight
+            # )
+            # self.anchor_weight = (self.anchor_weight) / (
+            #     self.action_weight + self.anchor_weight
+            # )
 
         elif self.flow_supervision == "action2anchor":
             pred_T_action = flow2pose(
@@ -277,21 +283,20 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             )
 
             # Loss associated with ground truth transform
-            point_loss_action = mse_criterion(
+            point_loss_action = self.point_cloud_loss(
                 pred_points_action,
                 points_action_target,
             )
 
             # Loss associated flow vectors matching a consistent rigid transform
-            smoothness_loss_action = mse_criterion(
+            smoothness_loss_action = self.smooth_flow_loss(
                 pred_flow_action,
                 induced_flow_action,
             )
 
-            dense_loss_action = dense_flow_loss(
-                points=points_trans_action,
-                flow_pred=pred_flow_action,
-                trans_gt=gt_T_action,
+            dense_loss_action = self.dense_flow_loss(
+                pred_flow_action,
+                gt_T_action.transform_points(points_trans_action) - points_trans_action,
             )
 
             # Zero anchor terms
@@ -330,20 +335,19 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             )
 
             # Loss associated with ground truth transform
-            point_loss_anchor = mse_criterion(
+            point_loss_anchor = self.point_cloud_loss(
                 pred_points_anchor,
                 points_anchor_target,
             )
 
             # Loss associated flow vectors matching a consistent rigid transform
-            smoothness_loss_anchor = mse_criterion(
+            smoothness_loss_anchor = self.smooth_flow_loss(
                 pred_flow_anchor,
                 induced_flow_anchor,
             )
-            dense_loss_anchor = dense_flow_loss(
-                points=points_trans_anchor,
-                flow_pred=pred_flow_anchor,
-                trans_gt=gt_T_anchor,
+            dense_loss_anchor = self.dense_flow_loss(
+                pred_flow_anchor,
+                gt_T_anchor.transform_points(points_trans_anchor) - points_trans_anchor,
             )
             # Zero action terms
             self.action_weight = 0
@@ -405,9 +409,9 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
                     :, inv_perm_b
                 ]
             ww = self.indirect_correspondence_loss_weight
-            loss_indirect = ww * mse_criterion(
+            loss_indirect = ww * self.point_cloud_loss(
                 pred_flow_action, shuffled_act_corr
-            ) + ww * mse_criterion(pred_flow_anchor, shuffled_anch_corr)
+            ) + ww * self.point_cloud_loss(pred_flow_anchor, shuffled_anch_corr)
             loss += (loss_indirect,)
             log_values[loss_prefix + "indirect_loss"] = loss_indirect.detach()
             del shuffled_output, shuffled_act_corr, shuffled_anch_corr
@@ -433,12 +437,12 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         if "act_emb_similarity" in model_output:
             loss += (self.compute_emb_sim_loss(model_output, log_values, loss_prefix),)
 
-        log_values[loss_prefix + "point_loss"] = self.displace_loss_weight * point_loss
+        log_values[loss_prefix + "point_loss"] = self.displace_loss_weight * point_loss.detach()
         log_values[loss_prefix + "smoothness_loss"] = (
-            self.consistency_loss_weight * smoothness_loss
+            self.consistency_loss_weight * smoothness_loss.detach()
         )
         log_values[loss_prefix + "dense_loss"] = (
-            self.direct_correspondence_loss_weight * dense_loss
+            self.direct_correspondence_loss_weight * dense_loss.detach()
         )
         # centered_pred_ps_A = pred_points_action.detach()
         # centered_pred_ps_A = centered_pred_ps_A - centered_pred_ps_A.mean(
@@ -500,7 +504,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             delta = pred_res_flow.detach()
             gathered_feat = delta.reshape(-1, c)[idx_flat, :].view(b, n, k, -1)
 
-        loss_smooth = mse_criterion(
+        loss_smooth = self.smooth_flow_loss(
             pred_res_flow.unsqueeze(2).expand(-1, -1, k, -1), gathered_feat
         )
         return loss_smooth
@@ -871,16 +875,153 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             w_0 = 100 * pred_w_action[0].unsqueeze(-1).expand(-1, 3).cpu()
         else:
             w_0 = 1.0
-        maybe_corr = pred_flow_action[0].cpu() + points_trans_action[0].cpu()
+        input_act_pts_target = T0.inverse().compose(T1).transform_points(input_act_pts)
+        maybe_corr = pred_flow_action[0].cpu() + input_act_pts[0].cpu()
         maybe_corr = maybe_corr - maybe_corr.mean(dim=0, keepdim=True)
         draw_points = get_color(
             tensor_list=[
-                w_0 * (points_action_target[0].cpu() - points_action_target[0].cpu().mean(dim=0, keepdim=True)),
+                w_0 * (input_act_pts_target[0].cpu() - input_act_pts_target[0].cpu().mean(dim=0, keepdim=True)),
                 w_0 * corr_points,
                 w_0 * maybe_corr,
             ],
             color_list=["blue", "red", "green"],
         )
         res_images["corr_points_action"] = wandb.Object3D(draw_points)
-
+        res_images.update(
+            EquivarianceTrainingModule._make_weight_visualizations(
+                model=self.model,
+                batch=batch,
+                idx=0,
+                model_output_cache={
+                    "pred_flow_action": pred_flow_action,
+                    "pred_w_action": pred_w_action,
+                    "input_points": input_act_pts,
+                    "gt_points_action": input_act_pts_target,
+                }))
         return res_images
+
+
+    # ─── Weight 可视化 (人工分析逐点权重质量) ───
+
+    @torch.no_grad()
+    @staticmethod
+    def _make_weight_visualizations(model, batch, idx,
+                                    max_samples: int = 4,
+                                    model_output_cache=None):
+        """生成逐点权重的多种可视化, 返回 wandb 日志字典.
+
+        可视化方案:
+          1. weight_colored_pts  — 点云按权重着色 (红=高权, 蓝=低权)
+          2. weight_vs_error      — 权重 vs flow 误差散点图 (检验相关性)
+          3. weight_histogram     — 权重分布直方图
+          4. topk_weighted_pts   — 高亮 Top-K 权重点的 flow 向量
+        """
+        model.eval()
+        T0 = Transform3d(matrix=batch["T0"])
+        T1 = Transform3d(matrix=batch["T1"])
+        gt_T_action = T0.inverse().compose(T1)  # (B, N, 3)
+
+        res = {}
+
+        # ── 确定性前向, 拿到逐点 weight ──
+        if model_output_cache is None:
+            pts_trans_action = batch["points_action_trans"]  # (B, N, 3)
+            pts_trans_anchor = batch["points_anchor_trans"]  # (B, N, 3)
+            B = min(pts_trans_action.shape[0], max_samples)
+            b = random.randint(0, B-1)
+            model_output = model(
+                pts_trans_action[b:b+1], pts_trans_anchor[b:b+1])
+            flow_act = model_output["flow_action"]              # (1, N, 4)
+            pred_flow = flow_act[0, :, :3]                      # (N, 3)
+            pred_w = torch.sigmoid(flow_act[0, :, 3])           # (N,)
+            # GT 刚性流: gt_T(p) - p  (只算当前样本)
+            point_target_b = gt_T_action.transform_points(
+                pts_trans_action[b:b+1])[0]                      # (N, 3)
+            gt_flow = point_target_b - pts_trans_action[b]       # (N, 3)
+        else:
+            pts_trans_action = model_output_cache["input_points"]
+            b = idx
+            pred_flow = model_output_cache["pred_flow_action"][b]  # (N, 3)
+            # 注意: cache 中的 weight 可能已经 sigmoid 过,
+            # 统一在此确保 [0,1] 范围
+            w_raw = model_output_cache["pred_w_action"][b]
+            pred_w = w_raw if ((w_raw >= 0).all() and (w_raw <= 1).all()) \
+                     else torch.sigmoid(w_raw)
+            point_target_b = model_output_cache["gt_points_action"][b]  # (N, 3)
+            gt_flow = point_target_b - pts_trans_action[b]              # (N, 3)
+
+        # 逐点 flow 误差
+        flow_err = (pred_flow - gt_flow).norm(p=2, dim=-1)   # (N,)
+
+        pts = pts_trans_action[b].cpu().numpy()              # (N, 3)
+        w = pred_w.cpu().numpy()
+        ferr = flow_err.cpu().numpy()
+        pred_f = pred_flow.cpu().numpy()
+
+        # ── 1. 按权重着色的点云 ──
+        w_norm = (w - w.min()) / (w.max() - w.min() + 1e-8)
+        # colors = np.stack([w_norm, 0.2, 1 - w_norm], axis=-1) * 255  # 红→蓝
+        color_dist = (
+            255 * cm.coolwarm(w_norm)[:, :3]
+        )
+        pts_rgb = np.concatenate([pts, color_dist], axis=1)
+        res["weight_colored_pts"] = wandb.Object3D(pts_rgb)
+
+        # ── 2. 权重 vs flow 误差散点图 ──
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        # 散点
+        axes[0].scatter(w, ferr, c=w_norm, cmap='coolwarm',
+                        alpha=0.5, s=10, edgecolors='none')
+        axes[0].set_xlabel("Predicted Weight")
+        axes[0].set_ylabel("Flow Error (L2)")
+        axes[0].set_title("Weight vs Flow Error")
+        # 分箱统计 (binned mean ± std)
+        bins = np.linspace(0, 1, 11)
+        bin_idx = np.digitize(w, bins) - 1
+        bin_mean = [ferr[bin_idx == i].mean() if (bin_idx == i).sum() > 0
+                    else np.nan for i in range(10)]
+        bin_std = [ferr[bin_idx == i].std() if (bin_idx == i).sum() > 0
+                    else np.nan for i in range(10)]
+        bin_c = (bins[:-1] + bins[1:]) / 2
+        axes[1].bar(bin_c, bin_mean, width=0.08, yerr=bin_std,
+                    color='steelblue', alpha=0.7, capsize=3)
+        axes[1].set_xlabel("Predicted Weight (binned)")
+        axes[1].set_ylabel("Mean Flow Error")
+        axes[1].set_title("Binned Weight vs Mean Error")
+        plt.tight_layout()
+        res["weight_vs_error"] = wandb.Image(fig)
+        plt.close(fig)
+
+        # ── 3. 权重分布直方图 ──
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.hist(w, bins=50, color='steelblue', alpha=0.8, edgecolor='white')
+        ax.axvline(w.mean(), color='red', linestyle='--', label=f'mean={w.mean():.3f}')
+        ax.set_xlabel("Weight")
+        ax.set_ylabel("Count")
+        ax.set_title("Weight Distribution")
+        ax.legend()
+        plt.tight_layout()
+        res["weight_histogram"] = wandb.Image(fig)
+        plt.close(fig)
+
+        # ── 4. Top-K 高权重点 + flow 向量 ──
+        K = min(50, pts.shape[0])
+        topk_idx = np.argsort(w)[-K:]
+        # 高权重点 (绿色) vs 低权重点 (灰色)
+        topk_pts = pts[topk_idx]
+        bottomk_idx = np.argsort(w)[:K]
+        bottomk_pts = pts[bottomk_idx]
+        # # 高权重点 + flow 末端
+        # flow_end = topk_pts + pred_f[topk_idx]
+        # red = np.tile([255, 0, 0], (K, 1))
+        # 拼接: 低权灰 + 高权绿(起点) + 高权红(flow末端)
+        gray = np.zeros((K, 3)) + 128
+        green = np.tile([0, 255, 0], (K, 1))
+        all_pts = np.concatenate([
+            np.concatenate([bottomk_pts, gray], axis=1),
+            np.concatenate([topk_pts, green], axis=1),
+        ], axis=0)
+        res["topk_weighted_pts"] = wandb.Object3D(all_pts)
+
+        model.train()
+        return res

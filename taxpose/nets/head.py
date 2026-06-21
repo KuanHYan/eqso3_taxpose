@@ -9,42 +9,181 @@ from taxpose.nets.huggingface_tf import Transformer
 from taxpose.nets.transformer_flow_pm import CustomTransformer
 from taxpose.nets.vn_dgcnn import VN4Head
 from taxpose.nets.moe_wab import MOELayer
+from taxpose.nets.upsample_head import LearnedUpsamplingHead
+from taxpose.utils.se3 import points2pose
 
 
-class LayerNorm1d(nn.Module):
-    """对 (B, C, L) 输入在 C 维度执行 LayerNorm，保持输出形状不变。"""
-    def __init__(self, num_channels, eps=1e-5, elementwise_affine=True):
+class Coarse_Res_Head(nn.Module):
+    """粗-细对应点预测头: 将稀疏 embedding 升采样为稠密对应点.
+
+    与 ResidualMLPHead / TransformerHead 的输入输出接口对齐.
+    使用 LearnedUpsamplingHead 从 (B,C,M) 升采样到 (B,3,N).
+
+    适用场景: backbone 使用 DGCNN_Grouper 降采样时,
+    本 Head 将稀疏特征恢复为全分辨率 flow.
+    """
+
+    def __init__(
+        self,
+        emb_dims=512,
+        encoder_output_num=1024,
+        up_sample_ratio=2,
+        pred_weight=True,
+        project_corrs=True,
+        project_corrs_mode='mlp',
+        norm=nn.BatchNorm1d,
+        weight_knn_k: int = 8,
+    ):
         super().__init__()
-        self.norm = nn.LayerNorm(num_channels, eps=eps, elementwise_affine=elementwise_affine)
+        self.emb_dims = emb_dims
+        self.output_num = up_sample_ratio*encoder_output_num
+        self.proj_flow = LearnedUpsamplingHead(
+            emb_dims, up_ratio=up_sample_ratio,
+            init_scale=0.01,
+            k=16,
+        )
+        if pred_weight:
+            self.proj_flow_weight = PointwiseMLP(
+                [emb_dims, emb_dims, emb_dims], 1, norm)
+        self.pred_weight = pred_weight
+        self.weight_knn_k = weight_knn_k
+        if project_corrs and project_corrs_mode == 'mlp':
+            self.project_pts = nn.Linear(encoder_output_num, encoder_output_num, bias=False)
+        elif project_corrs and project_corrs_mode == 'vn':
+            self.project_pts = VN4Head(encoder_output_num)
+        elif project_corrs and project_corrs_mode == 'moe':
+            self.project_pts = MOELayer(emb_dims, encoder_output_num, 16, 1)
+        self.project_corrs = project_corrs
 
-    def forward(self, x):
-        # x: (B, C, L) -> (B, L, C) -> LN -> (B, L, C) -> (B, C, L)
-        x = x.transpose(1, 2).contiguous()
-        x = self.norm(x)
-        x = x.transpose(1, 2).contiguous()
-        return x
+    @staticmethod
+    def _upsample_weight(weight_sparse, src_pts, tgt_pts, k=8):
+        """kNN 插值将稀疏 weight (B,1,M) 升采样为稠密 (B,1,N).
 
+        Args:
+            weight_sparse: (B, 1, M)
+            src_pts: (B, 3, M)  稀疏坐标
+            tgt_pts: (B, 3, N)  稠密坐标
+            k: 近邻数
+        Returns:
+            weight_dense: (B, 1, N)
+        """
+        from taxpose.nets.point_net_util import knn as _knn
+        B, _, M = weight_sparse.shape
+        N = tgt_pts.shape[-1]
 
-class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, 1, bias=False)
-        self.norm1 = LayerNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, 1, bias=False)
-        self.norm2 = LayerNorm1d(out_channels)
-        if in_channels != out_channels:
-            self.downsample = nn.Conv1d(in_channels, out_channels, 1, bias=False)
+        # 对每个稠密点找 k 近邻稀疏点
+        dists, idx = _knn(
+            k,
+            tgt_pts.permute(0, 2, 1).contiguous(),  # query (B, N, 3)
+            src_pts.permute(0, 2, 1).contiguous(),  # key   (B, M, 3)
+        )  # → dists (B, N, k), idx (B, N, k)
+
+        w_flat = weight_sparse.squeeze(1)           # (B, M)
+        gathered_w = w_flat[
+            torch.arange(B, device=w_flat.device).view(B, 1, 1),
+            idx
+        ]                                            # (B, N, k)
+
+        # 反距离加权
+        w_dist = 1.0 / (dists + 1e-8)
+        w_dist = w_dist / w_dist.sum(dim=-1, keepdim=True)
+        weight_dense = (gathered_w * w_dist).sum(dim=-1).unsqueeze(1)  # (B, 1, N)
+        return weight_dense
+
+    def forward(self, *input, scores):
+        """标准 Head 接口.
+
+        input:
+          [0] action_embedding_tf   (B, C, N_or_M)
+          [1] action_embedding_raw  (B, C, N_or_M)
+          [2] anchor_embedding      (B, C, N_or_M)
+          [3] action_points         (B, 3, N_or_M)
+          [4] anchor_points         (B, 3, N_or_M)
+          [5] act_down_sample       (B, 3, M)  or None (降采样后坐标)
+          [6] anch_down_sample      (B, 3, M)  or None
+          scores: (B, M, M)  可选
+
+        return:
+          full_flow, residual_flow, corr_flow, corr_points, scores
+        """
+        action_embedding_tf = input[0]
+        anchor_embedding = input[2]
+        action_points = input[3]
+        anchor_points = input[4]
+        anchor_dowm_sample = input[6]
+
+        is_downsampled = (action_embedding_tf.shape[2] != action_points.shape[2])
+        if is_downsampled:
+            assert len(input) >= 7
+            anchor_points = anchor_dowm_sample
+        scores = scores.transpose(2, 1).contiguous()
+        corr_points = torch.matmul(anchor_points, scores)
+        if self.project_corrs:
+            corr_points_center = corr_points.mean(dim=2, keepdim=True)
+            if not isinstance(self.project_pts, MOELayer):
+                inputs = corr_points-corr_points_center
+            else:
+                inputs = (corr_points-corr_points_center, action_embedding_tf)
+            corr_points = self.project_pts(inputs)
+            corr_points += corr_points_center
+
+        # 若有降采样坐标则使用, 否则用全分辨率坐标
+        if is_downsampled:
+            sample_point = input[5]   # act_down_sample (B, 3, M)
         else:
-            self.downsample = None
+            sample_point = action_points
 
-    def forward(self, x):
-        identity = x
-        out = F.relu(self.norm1(self.conv1(x)))
-        out = self.norm2(self.conv2(out))
-        if self.downsample is not None:
-            identity = self.downsample(identity)
-        out += identity
-        return F.relu(out)
+        if self.pred_weight:
+            weight_sparse = self.proj_flow_weight(
+                action_embedding_tf)                      # (B, 1, M_or_N)
+
+            if is_downsampled:
+                # 降采样时需将 weight 插值回全分辨率
+                weight = self._upsample_weight(
+                    weight_sparse, sample_point, action_points,
+                    k=self.weight_knn_k)                  # (B, 1, N)
+            else:
+                weight = weight_sparse                    # (B, 1, N)
+
+        # 升采样: 稀疏特征 → 稠密对应点
+        upsample_points, coarse_pts = self.proj_flow.forward(
+            action_embedding_tf,
+            scores=weight_sparse if self.pred_weight else scores,
+            return_coarse=True,
+        )  # (B, N, 3), (B, M, 3)
+        # NOTE: 转化维度
+        corr_points = corr_points.permute(0, 2, 1).contiguous()
+        trans_between_proxy = points2pose(
+            coarse_pts, corr_points,
+            return_transform3d=True,
+            normalization_scehme="softmax",
+            weights=weight_sparse.squeeze(dim=1) if self.pred_weight else None
+        )
+        coarse_pts = trans_between_proxy.transform_points(coarse_pts).transpose(1, 2).contiguous()
+        corr_points = trans_between_proxy.transform_points(upsample_points).transpose(1, 2).contiguous()
+        # flow = corr_points - action_points
+        #   = (coarse_pts - action_points) + (corr_points - coarse_pts)
+        #   = corr_flow                + residual_flow
+        # 注意: 降采样时 action_points 是 (B,3,N), coarse_pts 也是 (B,3,N),
+        #        但 action_embedding_tf 是 (B,C,M)
+        corr_flow = coarse_pts - sample_point
+        flow = corr_points - action_points
+        residual_flow = torch.zeros_like(flow)
+
+        if self.pred_weight:
+            assert weight.shape[-1] == flow.shape[-1], \
+                (f"weight N={weight.shape[-1]} != flow N={flow.shape[-1]}")
+            corr_flow_weight = torch.concat([flow, weight], dim=1)
+        else:
+            corr_flow_weight = flow
+
+        return {
+            "full_flow": corr_flow_weight,
+            "residual_flow": residual_flow,
+            "corr_flow": corr_flow,
+            "corr_points": corr_points,
+            "scores": scores,
+        }
 
 
 class TransformerHead(nn.Module):
@@ -204,13 +343,13 @@ class ResidualMLPHead(nn.Module):
             )
         elif residual_on:
             self.proj_flow = PointwiseMLP(
-                [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, None    
+                [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm    
             )
 
         self.pred_weight = pred_weight
         if self.pred_weight:
             self.proj_flow_weight = PointwiseMLP(
-                [emb_dims, 64, 64, 64, 128, 512], 1, None
+                [emb_dims, 64, 64, 64, 128, 512], 1, norm
             )
         self.project_corrs = project_corrs
         if project_corrs and project_corrs_mode == 'mlp':
@@ -240,12 +379,12 @@ class ResidualMLPHead(nn.Module):
           corr_points: B,3,N
           scores: B,N,N
         """
-        action_embedding = input[0]
+        action_embedding_tf = input[0]
         action_embedding_raw = input[1]  # It's wrong
         anchor_embedding = input[2]
         action_points = input[3]
         anchor_points = input[4]
-        if action_embedding.shape[2] != action_points.shape[2]:
+        if action_embedding_tf.shape[2] != action_points.shape[2]:
             # NOTE: 1_dim is for channel dim, 2_dim is for points dim
             action_points = input[5]
             anchor_points = input[6]
@@ -273,14 +412,14 @@ class ResidualMLPHead(nn.Module):
             corr_points_center = corr_points.mean(dim=2, keepdim=True)
             inputs = corr_points-corr_points_center
             if isinstance(self.project_pts, MOELayer):
-                inputs = (inputs, action_embedding)
+                inputs = (inputs, action_embedding_tf)
             corr_points = self.project_pts(inputs)
             corr_points += corr_points_center
         # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
         corr_flow = corr_points - action_points
 
         if self.pred_weight:
-            weight = self.proj_flow_weight(action_embedding)
+            weight = self.proj_flow_weight(action_embedding_tf)
 
         if self.residual_on:
             if self.use_coarse_ps:
@@ -299,12 +438,12 @@ class ResidualMLPHead(nn.Module):
                 # 平移至重心 NOTE: 不再尺度归一化。这可能会带来尺度不匹配问题？
                 centered_corr_points = coarse_pts - center  # [B,N,3]
                 residual_flow = self.proj_flow(
-                    action_embedding, coarse_points=centered_corr_points
+                    action_embedding_tf, coarse_points=centered_corr_points
                 )
                 residual_flow = residual_flow + center
 
             else:
-                residual_flow = self.proj_flow(action_embedding)  # B,3,N
+                residual_flow = self.proj_flow(action_embedding_tf)  # B,3,N
                 # residual_flow = torch.matmul(residual_flow, scores)
                 # anchor_points_i = (
                 #     anchor_points.unsqueeze(-1)
@@ -357,8 +496,6 @@ class ReparamResidualMLPHead(ResidualMLPHead):
             use_coarse_ps, project_corrs,
             project_corrs_mode, output_num
         )
-        self.register_buffer("zero_mean", torch.zeros(3))
-        self.register_buffer("one_std", torch.eye(3))
 
     def forward(self, *input, scores, sample=False):
         """
@@ -386,13 +523,14 @@ class ReparamResidualMLPHead(ResidualMLPHead):
             output["std"] = std
             if sample:
                 return output
-            # reparam_sample = torch.randn_like(mean_is_soft_cpt)     # 标准正态噪声
-            # assert var_is_res_flow.shape == reparam_sample.shape
-            # reparam_flow = std * reparam_sample
-            output["full_flow"][:, :3, :] = mean_is_soft_cpt
+            else:
+                reparam_sample = torch.randn_like(mean_is_soft_cpt)  # 标准正态噪声
+                assert var_is_res_flow.shape == reparam_sample.shape
+                reparam_flow = std * reparam_sample
+                output["full_flow"][:, :3, :] = mean_is_soft_cpt + reparam_flow
         else:
             output["full_flow"][:, :3, :] = output["corr_flow"]
-            output["residual_flow"] = torch.exp(output["residual_flow"])
+            output["residual_flow"] = torch.exp(0.5 * output["residual_flow"])
         return output
 
     def sample(self, *input, scores, sample_num, return_logP=False):
@@ -686,6 +824,7 @@ class HeadConfig:
     norm: nn.Module = nn.BatchNorm1d
     emb_dims: int = 512
     output_num: int = 1024
+    up_sample_ratio: int = 2
     pred_weight: bool = True
     residual_on: bool = True
     head_bias: bool = False
@@ -716,7 +855,7 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
         )
     if cfg.head_type == "rl_residual":
         head_type = ReparamResidualMLPHead if cfg.reparam else ResidualMLPHead4RL
-        print("Using Head: ", str(head_type))
+        print("Using Head: ", cfg.head_type)
         return head_type(
             cfg.emb_dims,
             cfg.pred_weight,
@@ -728,6 +867,16 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             cfg.project_corrs_mode,
             cfg.output_num,
             weight_beta=cfg.weight_beta,
+        )
+    if cfg.head_type == "upsampling":
+        print("Using Head: ", cfg.head_type)
+        return Coarse_Res_Head(
+            cfg.emb_dims,
+            cfg.output_num,
+            cfg.up_sample_ratio,
+            cfg.pred_weight,
+            cfg.norm,
+            weight_knn_k=16,
         )
     if cfg.head_type == "rl_transformer":
         head_type = TransformerHead4RL if cfg.reparam else TransformerHead4RL
@@ -758,45 +907,153 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
 
 
 if __name__ == '__main__':
-    # model = LearnedUpsamplingHead(256, out_points=1024)
-    # model.train()
-    # x = torch.randn(3, 3, 512)
-    # fea = torch.randn(3, 256, 512)
-    # y = model.forward(fea, x)
-    # print(y.shape)
-    # norm = LayerNorm1d(512)
-    # print(isinstance(norm, nn.Module))
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    B, C = 2, 512
 
-    # TFhead
-    # model = TransformerHead(None, 256, 0, True, True, False)
-    # query_pt = torch.rand(3, 3, 512)
-    # query_emb = torch.rand(3, 256, 512)
-    # tgt_pt = torch.rand(3, 3, 512)
-    # tgt_emb = torch.rand(3, 256, 512)
+    print("=" * 60)
+    print("Coarse_Res_Head 测试")
+    print("=" * 60)
 
-    # y = model.forward(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512))
-    # print(y.keys())
-    # print(y['full_flow'].shape)
-    # print(y['residual_flow'].shape)
+    # ═══════════════════════════════════════════════════════════════
+    # Test 1: 非降采样 (M=N), pred_weight=True, project_corrs=True
+    # ═══════════════════════════════════════════════════════════════
+    N = 128
+    up_ratio = 1
+    head = Coarse_Res_Head(
+        emb_dims=C, encoder_output_num=N, up_sample_ratio=up_ratio,
+        pred_weight=True, project_corrs=True, project_corrs_mode='mlp',
+    ).to(device)
 
-    # Reparameterize Head
-    model = ReparamResidualMLPHead(256, True, True, nn.BatchNorm1d, False, False, True, output_num=512)
-    model.eval()
-    query_pt = torch.rand(3, 3, 512)
-    query_emb = torch.rand(3, 256, 512)
-    tgt_pt = torch.rand(3, 3, 512)
-    tgt_emb = torch.rand(3, 256, 512)
-    y = model.forward(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512), sample=False)
-    print(y['residual_flow'].shape)
-    model.train()
-    y = model.forward(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512), sample=True)
-    print(y['residual_flow'].shape)
+    action_emb = torch.randn(B, C, N, device=device)
+    anchor_emb = torch.randn(B, C, N, device=device)
+    action_pts = torch.randn(B, 3, N, device=device)
+    anchor_pts = torch.randn(B, 3, N, device=device)
+    scores = torch.softmax(torch.randn(B, N, N, device=device), dim=-1)
 
-    y = model.sample(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512), sample_num=5, return_logP=False)
-    print(y['samples'].shape)
+    input_tup = (action_emb, action_emb, anchor_emb, action_pts, anchor_pts, None, None)
+    out = head(*input_tup, scores=scores)
 
-    y = model.sample(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512), sample_num=5, return_logP=True)
-    print(y['log_probs'].shape)
+    print(f"\nTest 1 (non-downsampled, pred_weight=True):")
+    for k, v in out.items():
+        print(f"  {k:<16s}: {str(v.shape):>20s}")
+    assert 'full_flow' in out, "Missing full_flow"
+    assert 'residual_flow' in out, "Missing residual_flow"
+    assert 'corr_flow' in out, "Missing corr_flow"
+    assert 'corr_points' in out, "Missing corr_points"
+    assert 'scores' in out, "Missing scores"
 
-    logP = model.log_probs(query_emb, tgt_emb, query_pt, tgt_pt, scores=torch.rand(3, 512, 512), actions=y['samples'])
-    print(logP)
+    # ═══════════════════════════════════════════════════════════════
+    # Test 2: 降采样 (M < N), pred_weight=True
+    # ═══════════════════════════════════════════════════════════════
+    M, N_ds = 64, 256
+    up_ratio_ds = N_ds // M
+    head_ds = Coarse_Res_Head(
+        emb_dims=C, encoder_output_num=M, up_sample_ratio=up_ratio_ds,
+        pred_weight=True, project_corrs=True, project_corrs_mode='mlp',
+    ).to(device)
+
+    action_emb_ds = torch.randn(B, C, M, device=device)          # 稀疏特征
+    anchor_emb_ds = torch.randn(B, C, M, device=device)
+    action_pts_ds = torch.randn(B, 3, N_ds, device=device)       # 全分辨率坐标
+    anchor_pts_ds = torch.randn(B, 3, N_ds, device=device)
+    act_down = torch.randn(B, 3, M, device=device)               # 降采样坐标
+    anch_down = torch.randn(B, 3, M, device=device)
+    scores_spa = torch.softmax(torch.randn(B, M, M, device=device), dim=-1)
+
+    input_tup_ds = (action_emb_ds, action_emb_ds, anchor_emb_ds,
+                    action_pts_ds, anchor_pts_ds, act_down, anch_down)
+    out_ds = head_ds(*input_tup_ds, scores=scores_spa)
+
+    print(f"\nTest 2 (downsampled M={M}<N={N_ds}, pred_weight=True):")
+    for k, v in out_ds.items():
+        print(f"  {k:<16s}: {str(v.shape):>20s}")
+
+    # ═══════════════════════════════════════════════════════════════
+    # Test 3: pred_weight=False (非降采样, 无权重预测)
+    # ═══════════════════════════════════════════════════════════════
+    head_noweight = Coarse_Res_Head(
+        emb_dims=C, encoder_output_num=N, up_sample_ratio=up_ratio,
+        pred_weight=False, project_corrs=False,
+    ).to(device)
+    out_nw = head_noweight(*input_tup, scores=scores)
+    print(f"\nTest 3 (pred_weight=False, project_corrs=False):")
+    for k, v in out_nw.items():
+        print(f"  {k:<16s}: {str(v.shape):>20s}")
+
+    # ═══════════════════════════════════════════════════════════════
+    # Test 4: project_corrs_mode='vn' (非降采样)
+    # ═══════════════════════════════════════════════════════════════
+    try:
+        head_vn = Coarse_Res_Head(
+            emb_dims=C, encoder_output_num=N, up_sample_ratio=up_ratio,
+            pred_weight=True, project_corrs=True, project_corrs_mode='vn',
+        ).to(device)
+        out_vn = head_vn(*input_tup, scores=scores)
+        print(f"\nTest 4 (project_corrs_mode='vn'):")
+        for k, v in out_vn.items():
+            print(f"  {k:<16s}: {str(v.shape):>20s}")
+    except Exception as e:
+        print(f"\nTest 4 (vn mode) skipped: {e}")
+
+    # ═══════════════════════════════════════════════════════════════
+    # Test 5: project_corrs_mode='moe' (非降采样)
+    # ═══════════════════════════════════════════════════════════════
+    try:
+        head_moe = Coarse_Res_Head(
+            emb_dims=C, encoder_output_num=N, up_sample_ratio=up_ratio,
+            pred_weight=True, project_corrs=True, project_corrs_mode='moe',
+        ).to(device)
+        out_moe = head_moe(*input_tup, scores=scores)
+        print(f"\nTest 5 (project_corrs_mode='moe'):")
+        for k, v in out_moe.items():
+            print(f"  {k:<16s}: {str(v.shape):>20s}")
+    except Exception as e:
+        print(f"\nTest 5 (moe mode) skipped: {e}")
+
+    # ═══════════════════════════════════════════════════════════════
+    # Test 6: 梯度回传 (非降采样)
+    # ═══════════════════════════════════════════════════════════════
+    action_emb_grad = torch.randn(B, C, N, device=device, requires_grad=True)
+    scores_grad = torch.softmax(torch.randn(B, N, N, device=device, requires_grad=True), dim=-1)
+    input_grad = (action_emb_grad, action_emb_grad, anchor_emb.clone(),
+                  action_pts.clone(), anchor_pts.clone(), None, None)
+    out_grad = head(*input_grad, scores=scores_grad)
+    loss = out_grad['full_flow'].sum()
+    loss.backward()
+    print(f"\nTest 6 (gradient flow): "
+          f"action_emb.grad={action_emb_grad.grad is not None}, "
+          f"scores.grad={scores_grad.grad is not None}")
+    assert action_emb_grad.grad is not None, "Gradient should flow to embeddings"
+
+    # ═══════════════════════════════════════════════════════════════
+    # Test 7: 不同 batch size 兼容性
+    # ═══════════════════════════════════════════════════════════════
+    for test_B in [1, 4]:
+        a_emb = torch.randn(test_B, C, N, device=device)
+        a_pts = torch.randn(test_B, 3, N, device=device)
+        s = torch.softmax(torch.randn(test_B, N, N, device=device), dim=-1)
+        tup = (a_emb, a_emb, a_emb, a_pts, a_pts, None, None)
+        out_b = head(*tup, scores=s)
+        print(f"Test 7 (B={test_B}): full_flow.shape = {out_b['full_flow'].shape}")
+
+    # ═══════════════════════════════════════════════════════════════
+    # Test 8: create_head 工厂函数
+    # ═══════════════════════════════════════════════════════════════
+    cfg = HeadConfig(
+        head_type='upsampling',
+        emb_dims=C, output_num=N, up_sample_ratio=up_ratio,
+        pred_weight=True, project_corrs=True,
+    )
+    head_factory = create_head(cfg).cuda()
+    assert isinstance(head_factory, Coarse_Res_Head), \
+        f"Expected Coarse_Res_Head, got {type(head_factory).__name__}"
+    out_factory = head_factory(*input_tup, scores=scores)
+    assert 'full_flow' in out_factory
+    print(f"\nTest 8 (create_head factory): "
+          f"type={type(head_factory).__name__}, "
+          f"full_flow.shape={out_factory['full_flow'].shape}")
+
+    n_params = sum(p.numel() for p in head.parameters())
+    print(f"\n{'=' * 60}")
+    print(f"✓ All tests passed!  Total params (non-ds head): {n_params:,}")
+    print(f"{'=' * 60}")

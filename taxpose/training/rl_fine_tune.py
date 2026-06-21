@@ -2,6 +2,10 @@ import copy
 from typing import Any, Mapping
 import wandb
 import torch
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
 from pytorch3d.transforms import Transform3d
 from taxpose.training.point_cloud_training_module import PointCloudTrainingModule
 from taxpose.nets.RL_policy import PolicyModel
@@ -65,19 +69,6 @@ class RLTrainingModule(PointCloudTrainingModule):
         self.base_model.eval()
         self.grpo_iter = grpo_iter
 
-    def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False):
-        # 仅加载 self.model 在 state_dict 有的参数
-        model_dict = self.state_dict()
-        pretrained_dict = {k: v for k, v in state_dict.items()
-                   if k in model_dict and v.shape == model_dict[k].shape}
-        model_dict.update(pretrained_dict)
-        super().load_state_dict(
-            model_dict,
-            strict=strict,
-            assign=assign,
-        )
-        return
-
     def on_train_epoch_start(self) -> None:
         if self.current_epoch % self.update_base_every == 0:
             self.print(f"update base model at: {self.current_epoch}")
@@ -117,7 +108,7 @@ class RLTrainingModule(PointCloudTrainingModule):
                 opt.zero_grad()
                 loss = self.compute_loss(samples, batch, log_values)
                 loss.backward()
-                self.clip_gradients(opt, 10.0, 'norm')
+                self.clip_gradients(opt, 1.0, 'norm')
                 opt.step()
                 total_grpo_loss += loss.detach()
 
@@ -366,6 +357,152 @@ class RLTrainingModule(PointCloudTrainingModule):
         log_values[loss_prefix + "error_t_mean"] = error_t_mean
 
         return loss, log_values
+
+    # ─── Weight 可视化 (人工分析逐点权重质量) ───
+
+    @torch.no_grad()
+    def _make_weight_visualizations(self, batch, batch_idx,
+                                     max_samples: int = 4):
+        """生成逐点权重的多种可视化, 返回 wandb 日志字典.
+
+        可视化方案:
+          1. weight_colored_pts_b{N}  — 点云按权重着色 (红=高权, 蓝=低权)
+          2. weight_vs_error_b{N}     — 权重 vs flow 误差散点图 (检验相关性)
+          3. weight_histogram_b{N}    — 权重分布直方图
+          4. topk_weighted_pts_b{N}  — 高亮 Top-K 权重点的 flow 向量
+        """
+        self.model.eval()
+        pts_trans_action = batch["points_action_trans"]   # (B, N_in, 3)
+        pts_trans_anchor = batch["points_anchor_trans"]
+        T0 = Transform3d(matrix=batch["T0"])
+        T1 = Transform3d(matrix=batch["T1"])
+        gt_T_action = T0.inverse().compose(T1)
+
+        B = min(pts_trans_action.shape[0], max_samples)
+        res = {}
+
+        b = torch.randint(0, B, (1,))
+        try:
+            # ── 确定性前向, 拿到逐点 flow 与 weight ──
+            model_output = self.model(
+                pts_trans_action[b:b+1], pts_trans_anchor[b:b+1])
+            flow_act = model_output["flow_action"]           # (1, N_out, C)
+
+            # flow_act 通道: [:,:,:3] = flow, [:,:,3] = weight logit（如果 pred_weight）
+            if flow_act.shape[-1] < 4:
+                # pred_weight=False 时没有 weight 通道, 跳过该样本
+                return res
+
+            pred_flow = flow_act[0, :, :3]                  # (N_out, 3)
+            pred_w = torch.sigmoid(flow_act[0, :, 3])       # (N_out,)
+            N_out = pred_flow.shape[0]
+
+            # GT 刚性流: 对模型输出对应的点集计算 GT flow
+            # 注意: Coarse_Res_Head 升采样时 N_out ≠ N_in,
+            #  此时用模型输出的点数作为基准, 从输入中 FPS 采样匹配
+            if N_out == pts_trans_action.shape[1]:
+                pts_for_gt = pts_trans_action[b:b+1]         # (1, N, 3)
+            else:
+                # 点数不匹配 (升采样/降采样场景):
+                # 对输入点做随机采样或 FPS 以对齐 N_out
+                n_in = pts_trans_action.shape[1]
+                if N_out < n_in:
+                    idx = torch.randperm(n_in, device=pts_trans_action.device)[:N_out]
+                    pts_for_gt = pts_trans_action[b:b+1, idx, :]
+                else:
+                    # N_out > n_in: 重复采样
+                    idx = torch.randint(0, n_in, (N_out,), device=pts_trans_action.device)
+                    pts_for_gt = pts_trans_action[b:b+1, idx, :]
+
+            gt_flow = (gt_T_action.transform_points(pts_for_gt) - pts_for_gt)[0]  # (N_out, 3)
+
+            # 逐点 flow 误差
+            flow_err = (pred_flow - gt_flow).norm(p=2, dim=-1)  # (N_out,)
+
+            pts = pts_for_gt[0].cpu().numpy()                   # (N_out, 3)
+            w = pred_w.cpu().numpy()
+            ferr = flow_err.cpu().numpy()
+
+            # ── 1. 按权重着色的点云 ──
+            w_min, w_max = w.min(), w.max()
+            w_range = w_max - w_min
+            w_norm = (w - w_min) / (w_range + 1e-8) if w_range > 1e-8 else np.full_like(w, 0.5)
+            colors = np.stack([w_norm, 0.2, 1 - w_norm], axis=-1) * 255  # 红→蓝
+            pts_rgb = np.concatenate([pts, colors], axis=1)
+            res[f"weight_colored_pts_b{b}"] = wandb.Object3D(pts_rgb)
+
+            # ── 2. 权重 vs flow 误差散点图 ──
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            # 散点
+            axes[0].scatter(w, ferr, c=w_norm, cmap='coolwarm',
+                            alpha=0.5, s=10, edgecolors='none')
+            axes[0].set_xlabel("Predicted Weight")
+            axes[0].set_ylabel("Flow Error (L2)")
+            axes[0].set_title(f"Sample {b}: Weight vs Flow Error")
+            # 分箱统计 (binned mean ± std)
+            bins = np.linspace(0, 1, 11)
+            bin_idx = np.clip(np.digitize(w, bins) - 1, 0, 9)
+            bin_mean = [ferr[bin_idx == i].mean() if (bin_idx == i).sum() > 0
+                        else np.nan for i in range(10)]
+            bin_std = [ferr[bin_idx == i].std() if (bin_idx == i).sum() > 0
+                        else np.nan for i in range(10)]
+            bin_c = (bins[:-1] + bins[1:]) / 2
+            axes[1].bar(bin_c, bin_mean, width=0.08, yerr=bin_std,
+                        color='steelblue', alpha=0.7, capsize=3)
+            axes[1].set_xlabel("Predicted Weight (binned)")
+            axes[1].set_ylabel("Mean Flow Error")
+            axes[1].set_title("Binned Weight vs Mean Error")
+            plt.tight_layout()
+            res[f"weight_vs_error_b{b}"] = wandb.Image(fig)
+            plt.close(fig)
+
+            # ── 3. 权重分布直方图 ──
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.hist(w, bins=50, color='steelblue', alpha=0.8, edgecolor='white')
+            ax.axvline(w.mean(), color='red', linestyle='--',
+                        label=f'mean={w.mean():.3f}')
+            ax.set_xlabel("Weight")
+            ax.set_ylabel("Count")
+            ax.set_title(f"Sample {b}: Weight Distribution")
+            ax.legend()
+            plt.tight_layout()
+            res[f"weight_histogram_b{b}"] = wandb.Image(fig)
+            plt.close(fig)
+
+            # ── 4. Top-K 高权重点 + flow 向量 ──
+            K = min(50, pts.shape[0])
+            topk_idx = np.argsort(w)[-K:]
+            bottomk_idx = np.argsort(w)[:K]
+            topk_pts = pts[topk_idx]
+            bottomk_pts = pts[bottomk_idx]
+
+            gray = np.full((K, 3), 128)
+            green = np.tile([0, 255, 0], (K, 1))
+            all_pts = np.concatenate([
+                np.concatenate([bottomk_pts, gray], axis=1),
+                np.concatenate([topk_pts, green], axis=1),
+            ], axis=0)
+            res[f"topk_weighted_pts_b{b}"] = wandb.Object3D(all_pts)
+
+        except Exception as e:
+            self.print(f"[WARN] weight viz sample {b} failed: {e}")
+        finally:
+            del model_output
+            torch.cuda.empty_cache()
+
+        self.model.train()
+        return res
+
+    # def visualize_results(self, batch, batch_idx):
+    #     """重载: 追加权重可视化."""
+    #     res = super().visualize_results(batch, batch_idx)
+    #     try:
+    #         weight_viz = self._make_weight_visualizations(batch, batch_idx)
+    #         res.update(weight_viz)
+    #     except Exception as e:
+    #         # 可视化失败不应中断训练
+    #         self.print(f"[WARN] weight visualization failed: {e}")
+    #     return res
 
     def configure_optimizers(self):
         # 使用 Policy 的 get_param_groups 接口, 支持不同参数组使用不同学习率

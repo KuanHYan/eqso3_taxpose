@@ -83,18 +83,18 @@ class CustomTransformer(nn.Module):
         return src_attn.mean(dim=1), emb  # B, H, N, M --> B, N, M
 
     def forward(self, *input):
-        src = input[0]
-        tgt = input[1]
-        src = src.transpose(2, 1).contiguous()
-        tgt = tgt.transpose(2, 1).contiguous()
-        src_embedding = self.model.forward(tgt, src, None, None).transpose(2, 1).contiguous()
+        query = input[0]
+        key = input[1]
+        query = query.transpose(2, 1).contiguous()
+        key = key.transpose(2, 1).contiguous()
+        src_embedding = self.model.forward(key, query, None, None).transpose(2, 1).contiguous()
         src_attn = self.model.decoder.layers[-1].src_attn.attn
 
         outputs = {"src_embedding": src_embedding, "src_attn": src_attn}
 
         if self.bidirectional:
             tgt_embedding = (
-                self.model(src, tgt, None, None).transpose(2, 1).contiguous()
+                self.model(query, key, None, None).transpose(2, 1).contiguous()
             )
             tgt_attn = self.model.decoder.layers[-1].src_attn.attn
 

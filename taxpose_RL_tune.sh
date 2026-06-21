@@ -11,8 +11,8 @@ cd "$ROOT_DIR" || exit 1
 
 # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
-ENCODEING=True
-POINTS=920
+ENCODEING=False
+POINTS=1024
 
 # train taxpose network
 #"/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-15/00-24-25/checkpoints/last.ckpt"
@@ -23,7 +23,7 @@ bash ./my_launch.sh local $GPU_INDEX \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=8 \
+    training.batch_size=16 \
     training.lr=1e-6 \
     training.min_lr=1e-7 \
     training.warmup_ratio=0.02 \
@@ -39,7 +39,7 @@ bash ./my_launch.sh local $GPU_INDEX \
     dm.train_dset.demo_dset.occlusion_cfg.random_dropout=False \
     dm.train_dset.demo_dset.occlusion_cfg.anisotropic_scaling=False \
     dm.train_dset.demo_dset.occlusion_cfg.gaussian_noise=False \
-    dm.train_dset.demo_dset.occlusion_cfg.occlusion_class="all" \
+    dm.train_dset.demo_dset.occlusion_cfg.occlusion_class=0 \
     dm.train_dset.anchor_rot_sample_method=axis_angle \
     dm.train_dset.anchor_rotation_variance=3.141592653589793 \
     dm.test_folder=val_data \
@@ -56,8 +56,8 @@ bash ./my_launch.sh local $GPU_INDEX \
     model.encoder.output_num=$POINTS \
     model.encoder.dropout=0.1 \
     model.encoder.pos_encoding=$ENCODEING \
-    model.head.head_type=transformer \
-    model.head.project_corrs=False \
+    model.head.head_type=residual \
+    model.head.project_corrs=True \
     model.head.project_corrs_mode="moe" \
     model.head.norm=LN \
     model.head.head_bias=False \
@@ -65,7 +65,7 @@ bash ./my_launch.sh local $GPU_INDEX \
     model.head.pred_weight=True \
     model.head.reparam=False \
     rl.reward_model_path="/home/yan/pose_estimation/taxpose/trained_models/reward_w.ckpt" \
-    rl.base_model_path="/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-15/00-24-25/checkpoints/last.ckpt" \
+    rl.base_model_path="/home/yan/pose_estimation/taxpose/logs/train_taxpose/2026-06-16/17-51-00/checkpoints/L2D_sum_residual.ckpt" \
     rl.group=64 \
     rl.update_base_every=100 \
     rl.kl_coef=0.02 \

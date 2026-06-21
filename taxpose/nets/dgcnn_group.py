@@ -1,7 +1,6 @@
 import torch
 from torch import nn
-from pointnet2_ops import pointnet2_utils
-from taxpose.nets.point_net_util import get_graph_feature
+from taxpose.nets.point_net_util import get_graph_feature, fps_downsample
 # knn = KNN(k=16, transpose_mode=False)
 
 
@@ -63,47 +62,30 @@ class DGCNN_Grouper(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.output_num = output_num
 
-    @staticmethod
-    def fps_downsample(coor, x, num_group):
-        xyz = coor.transpose(1, 2).contiguous() # b, n, 3
-        fps_idx = pointnet2_utils.furthest_point_sample(xyz, num_group)
-
-        combined_x = torch.cat([coor, x], dim=1)
-
-        new_combined_x = (
-            pointnet2_utils.gather_operation(
-                combined_x, fps_idx
-            )
-        )
-
-        new_coor = new_combined_x[:, :3]
-        new_x = new_combined_x[:, 3:]
-
-        return new_coor, new_x
-
     def forward(self, x, down=True):
 
         # x: bs, 3, np
         coor = x
         f1 = self.input_trans(x)
 
-        f = get_graph_feature(coor, f1, coor, f1, self.k)
+        f = get_graph_feature(x_q=f1, k=self.k, coord_q=coor)
         f = self.dropout(self.layer1(f))
         f2 = f.max(dim=-1, keepdim=False)[0]  # bs, 64, np//2, k -> bs, 64, np//2
 
         f_ = torch.cat([f1, f2], dim=1)
 
         if down:
-            coor_q, f_q = self.fps_downsample(coor, f_, self.output_num)
+            coor_q, f_q = fps_downsample(coor, f_, self.output_num)
         else:
             coor_q, f_q = coor, f_
         
-        f = get_graph_feature(coor_q, f_q, coor, f_, self.k)
+        f = get_graph_feature(f_q, f_, self.k, coord_q=coor_q, coord_k=coor)
         f = self.dropout(self.layer2(f))
         f3 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 64, onp
         coor = coor_q
 
-        f = get_graph_feature(coor, f3, coor, f3, self.k)
+        # f = get_graph_feature(coor, f3, coor, f3, self.k)
+        f = get_graph_feature(f3, k=self.k, coord_q=coor)
         f = self.dropout(self.layer3(f))
         f4 = f.max(dim=-1, keepdim=False)[0]  # bs, 128, onp, k -> bs, 128, onp
 
@@ -121,8 +103,11 @@ class DGCNN_Grouper(nn.Module):
 
 
 if __name__ == '__main__':
-    x = torch.rand(2, 3, 1024).cuda()
-    grouper = DGCNN_Grouper(emb_dims=512, output_num=512).cuda()
+    x = torch.rand(2, 3, 1024)
+    grouper = DGCNN_Grouper(emb_dims=512, output_num=512)
+    state_dict = torch.load("/home/yan/pose_estimation/taxpose/trained_models/5000pts_group_dgcnn.ckpt")['state_dict']
+    state_dict = {k.replace('model.emb_nn.', ''): v for k, v in state_dict.items()}
+    grouper.load_state_dict(state_dict)
     coor, f = grouper(x)
     print(coor.shape)
     print(f.shape)

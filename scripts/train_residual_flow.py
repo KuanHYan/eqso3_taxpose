@@ -73,34 +73,34 @@ def set_cfg_fpr_debug(cfg):
     OmegaConf.update(cfg, "training.num_gpus", 1)
     OmegaConf.update(cfg, "training.accumulate_grad_batches", 1)
     OmegaConf.update(cfg, "training.scheduler", "linear")
-    OmegaConf.update(cfg, "dm.train_dset.demo_dset.num_demo", 600)
-    OmegaConf.update(cfg, "dm.train_dset.dataset_size", 640)
+    OmegaConf.update(cfg, "dm.train_dset.demo_dset.num_demo", 6000)
+    OmegaConf.update(cfg, "dm.train_dset.dataset_size", 6000)
     OmegaConf.update(cfg, "dm.train_dset.anchor_rot_sample_method", "axis_angle")
     OmegaConf.update(cfg, "dm.train_dset.anchor_rotation_variance", 3.141592653589793)
     OmegaConf.update(cfg, "model.freeze_embnn", True)
     OmegaConf.update(cfg, "model.dropout", 0.1)
     OmegaConf.update(cfg, "model.n_blocks", 1)
     OmegaConf.update(cfg, "model.cycle", True)
-    OmegaConf.update(cfg, "model.encoder.name", "raw_dgcnn")
+    OmegaConf.update(cfg, "model.encoder.name", "dgcnn_group")
     OmegaConf.update(cfg, "model.encoder.emb_dims", 512)
     OmegaConf.update(cfg, "model.encoder.norm", "BN")
     OmegaConf.update(cfg, "model.encoder.output_num", 1024)
     OmegaConf.update(cfg, "model.encoder.dropout", 0.1)
-    OmegaConf.update(cfg, "model.head.head_type", "rl_residual")
+    OmegaConf.update(cfg, "model.head.head_type", "residual")
     OmegaConf.update(cfg, "model.head.project_corrs", True)
     OmegaConf.update(cfg, "model.head.project_corrs_mode", "moe")
     OmegaConf.update(cfg, "model.head.norm", "LN")
     OmegaConf.update(cfg, "model.head.head_bias", False)
     OmegaConf.update(cfg, "model.head.residual_on", True)
-    OmegaConf.update(cfg, "model.head.pred_weight", False)
-    OmegaConf.update(cfg, "model.head.reparam", True)
+    OmegaConf.update(cfg, "model.head.pred_weight", True)
+    OmegaConf.update(cfg, "model.head.reparam", False)
     OmegaConf.update(cfg, "rl.group", 8)
     OmegaConf.update(cfg, "wandb.name", "debug")
     OmegaConf.update(cfg, "wandb.offline", True)
     OmegaConf.update(cfg, "debug", False)
     OmegaConf.update(cfg, "eval", False)
-    OmegaConf.update(cfg, "model.pretraining.action.ckpt_path", "taxpose/trained_models/5000pts_dgcnn.ckpt")
-    OmegaConf.update(cfg, "model.pretraining.anchor.ckpt_path", "taxpose/trained_models/5000pts_dgcnn.ckpt")
+    OmegaConf.update(cfg, "model.pretraining.action.ckpt_path", "taxpose/logs/pretrain_embedding/2026-06-19/12-53-55/checkpoints/last.ckpt")
+    OmegaConf.update(cfg, "model.pretraining.anchor.ckpt_path", "taxpose/logs/pretrain_embedding/2026-06-19/12-53-55/checkpoints/last.ckpt")
     return cfg
 
 
@@ -155,13 +155,14 @@ def main(cfg):
         offline=cfg.wandb.offline or TESTING or cfg.debug,
         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
     )
-
+    # TODO: If encoder is raw_dgcnn, there is a bug in DDP with sync_batchnorm=True
+    sync_batchnorm = device_count > 1 and cfg.encoder.name != "raw_dgcnn"
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
         accelerator="gpu",
         strategy=DDPStrategy(find_unused_parameters=True) if device_count > 1 else "auto",
         devices=device_count,
-        sync_batchnorm=False,
+        sync_batchnorm=sync_batchnorm,
         log_every_n_steps=cfg.training.log_every_n_steps,
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         # reload_dataloaders_every_n_epochs=1,
@@ -194,6 +195,7 @@ def main(cfg):
         fast_dev_run=20 if TESTING else False,
         precision=cfg.training.precision,
         accumulate_grad_batches=cfg.training.accumulate_grad_batches,
+        gradient_clip_val=cfg.training.gradient_clip_val,
     )
     trainer.print(OmegaConf.to_yaml(cfg, resolve=True))
     trainer.print(f"use {device_count} gpus")

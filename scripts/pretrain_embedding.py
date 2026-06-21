@@ -91,6 +91,7 @@ def main(cfg):
         check_val_every_n_epoch=cfg.training.check_val_every_n_epoch,
         max_epochs=cfg.training.epochs,
         precision=cfg.training.precision,
+        accumulate_grad_batches=2,
         callbacks=(
             [
                 # This checkpoint callback saves the latest model during training, i.e. so we can resume if it crashes.
@@ -143,8 +144,12 @@ def main(cfg):
         con_weighting=cfg.training.con_weighting,
         lr_cfg=scheduler_cfg,
     )
-
-    trainer.fit(model, dm, ckpt_path=resume_ckpt)
+    if cfg.eval:
+        dm.setup("fit")
+        model.eval()
+        trainer.validate(model, dm, ckpt_path=resume_ckpt)
+    else:
+        trainer.fit(model, dm, ckpt_path=resume_ckpt)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch.distributions import MultivariateNormal
 from pytorch3d.loss import chamfer_distance
 from pytorch3d.transforms import Transform3d
-from pytorch3d.transforms import matrix_to_quaternion, quaternion_to_matrix
+from pytorch3d.transforms import matrix_to_quaternion, quaternion_to_matrix, quaternion_multiply
 from taxpose.nets.transformer_flow import ResidualFlow_DiffEmbTransformer
 from taxpose.nets.transformer_flow_pm import CustomTransformer
 from taxpose.nets.RL_tune import RewardModel
@@ -341,6 +341,7 @@ class SE3PolicyModel(ResidualFlow_DiffEmbTransformer):
         encoder_cfg,
         head_cfg,
         reward_model_path=None,
+        base_model_path=None,
         cycle=True,
         center_feature=False,
         freeze_embnn=False,
@@ -354,7 +355,7 @@ class SE3PolicyModel(ResidualFlow_DiffEmbTransformer):
         pos_encoding=False,
         group=32,
         n_blocks=1,
-        attn_mode="torch.nn",
+        attn_mode="torch_attn",
         manual_reawrd=False,
     ):
         assert head_cfg.head_type in ["residual", "transformer"], \
@@ -382,6 +383,11 @@ class SE3PolicyModel(ResidualFlow_DiffEmbTransformer):
                 encoder_cfg, cycle, False, feature_channels, dropout, False)
             self.reward_load_state_dict(reward_model_path)
             self.reward_model.eval()
+        if base_model_path is not None:
+            base_model_dict = torch.load(base_model_path)["state_dict"]
+            base_model_dict = {k.removeprefix("model."): v for k, v in base_model_dict.items()}
+            self.load_state_dict(base_model_dict, strict=True)
+        # str(self.reward_model).removeprefix()
         emb_dims = encoder_cfg.emb_dims
         # 方差预测头: pool 到全局 → MLP → 直接输出全局 log-variance
         self.translate_var = nn.Sequential(
@@ -400,7 +406,7 @@ class SE3PolicyModel(ResidualFlow_DiffEmbTransformer):
             nn.Linear(emb_dims, emb_dims // 2),
             nn.LayerNorm(emb_dims // 2),
             nn.GELU(),
-            nn.Linear(emb_dims // 2, 4),       # (B, 4)
+            nn.Linear(emb_dims // 2, 3),       # (B, 3) — so(3) 切空间
         )
         self.manual_reawrd = manual_reawrd
         self.group = group
@@ -475,6 +481,57 @@ class SE3PolicyModel(ResidualFlow_DiffEmbTransformer):
         mat[:, :3, 3] = t_flat
         return Transform3d(matrix=mat)
 
+    # ---- so(3) 切空间采样 (替代 4D 独立高斯) ----
+
+    @staticmethod
+    def _sample_quaternion_tangent(quat_mean, rot_logvar, group):
+        """在 so(3) 切空间采样, 通过指数映射到 S³.
+
+        原理:
+          - 四元数在 S³ 上, 只有 3 个自由度
+          - 在均值 q_mean 处的切空间是 so(3) ≅ ℝ³
+          - 在 ℝ³ 中采样 ε ~ N(0, diag(σ²)), 然后用指数映射:
+            δq = (cos(|ε|/2), sin(|ε|/2) · ε/|ε|)  天然在 S³ 上
+          - 最终: q_sample = q_mean ⊗ δq
+
+        Args:
+            quat_mean:  (B, 4)  均值四元数 (w,x,y,z)
+            rot_logvar: (B, 3)  so(3) 切空间对数方差
+            group:      int      每组采样数
+        Returns:
+            quat_samples: (G, B, 4)  采样四元数
+            log_prob:     (G, B)     切空间对数概率
+        """
+        B = quat_mean.shape[0]
+        device = quat_mean.device
+        eps = 1e-8
+
+        # 1. 在 ℝ³ 切空间采样
+        rot_dist = MultivariateNormal(
+            torch.zeros(3, device=device),
+            torch.diag_embed(rot_logvar.exp()))
+        epsilon = rot_dist.sample((group,))                 # (G, B, 3)
+        log_prob = rot_dist.log_prob(epsilon)               # (G, B)
+
+        # 2. 指数映射 ℝ³ → S³ (轴角 → 四元数)
+        theta = epsilon.norm(p=2, dim=-1, keepdim=True)     # (G, B, 1)
+        safe_theta = torch.where(theta < eps, torch.ones_like(theta), theta)
+        axis = epsilon / safe_theta                          # (G, B, 3)
+
+        cos_half = torch.cos(theta / 2.0)
+        sin_half = torch.sin(theta / 2.0)
+        delta_q = torch.cat([cos_half, sin_half * axis], dim=-1)  # (G, B, 4)
+
+        # 3. 左乘均值四元数
+        G = group
+        quat_mean_exp = quat_mean.unsqueeze(0).expand(G, -1, -1)
+        quat_samples = quaternion_multiply(
+            quat_mean_exp.reshape(-1, 4),
+            delta_q.reshape(-1, 4),
+        ).reshape(G, B, 4)
+
+        return quat_samples, log_prob
+
     # ---- reward functions ----
     def ideal_reward(self,
                      pred_trans: Transform3d, s_next,
@@ -496,31 +553,31 @@ class SE3PolicyModel(ResidualFlow_DiffEmbTransformer):
         gt_trans_group = Transform3d(matrix=gt_trans_mat)
 
         # --- action 侧 ---
-        gt_transformed_pts = gt_trans_group.transform_points(act_pts)
-        point_dist_a = (s_next - gt_transformed_pts).norm(p=2, dim=-1).mean(dim=-1)
-        r_point_a = torch.clamp_max(1.0 / (point_dist_a + 1e-6), max=1e6)
+        # gt_transformed_pts = gt_trans_group.transform_points(act_pts)
+        # point_dist_a = (s_next - gt_transformed_pts).norm(p=2, dim=-1).max(dim=-1)[0]
+        # r_point_a = torch.clamp_max(1.0 / (point_dist_a + 1e-6), max=1e6)
 
-        # error_mat = gt_trans_group.compose(pred_trans.inverse())
-        # error_R_a = get_degree_angle(error_mat, return_batch=True)[0]
-        # error_t_a = get_translation(error_mat, return_batch=True)[0]
-        # r_pose_a = torch.clamp_max(1.0 / (error_R_a + error_t_a + 1e-6), max=1e6)
+        error_mat = gt_trans_group.compose(pred_trans.inverse())
+        error_R_a = get_degree_angle(error_mat, return_batch=True)[0]
+        error_t_a = get_translation(error_mat, return_batch=True)[0]
+        r_pose_a = torch.clamp_max(1.0 / (error_R_a + error_t_a + 1e-6), max=1e6)
 
-        r_point = r_point_a # + r_pose_a
+        r_point = r_pose_a # + r_pose_a
 
         # --- anchor 侧 (cycle 模式) ---
         if s_next_inv is not None:
-            gt_inv_pts = gt_trans_group.inverse().transform_points(anchor_pts)
-            point_dist_b = (s_next_inv - gt_inv_pts).norm(p=2, dim=-1).mean(dim=-1)
-            r_point_b = torch.clamp_max(1.0 / (point_dist_b + 1e-6), max=1e6)
+            # gt_inv_pts = gt_trans_group.inverse().transform_points(anchor_pts)
+            # point_dist_b = (s_next_inv - gt_inv_pts).norm(p=2, dim=-1).max(dim=-1)[0]
+            # r_point_b = torch.clamp_max(1.0 / (point_dist_b + 1e-6), max=1e6)
 
             # pred_trans.inverse() 是 pred_T_anchor, GT 是 gt_T.inverse()
-            # error_mat_b = gt_trans_group.inverse().compose(pred_trans)
-            # error_R_b = get_degree_angle(error_mat_b, return_batch=True)[0]
-            # error_t_b = get_translation(error_mat_b, return_batch=True)[0]
-            # r_pose_b = torch.clamp_max(1.0 / (error_R_b + error_t_b + 1e-6), max=1e6)
+            error_mat_b = gt_trans_group.inverse().compose(pred_trans)
+            error_R_b = get_degree_angle(error_mat_b, return_batch=True)[0]
+            error_t_b = get_translation(error_mat_b, return_batch=True)[0]
+            r_pose_b = torch.clamp_max(1.0 / (error_R_b + error_t_b + 1e-6), max=1e6)
 
-            r_point = (r_point_a + r_point_b) / 2.0
-            # r_pose = (r_pose_a + r_pose_b) / 2.0
+            # r_point = (r_point_a + r_point_b) / 2.0
+            r_point = (r_pose_a + r_pose_b) / 2.0
 
         return r_point # + r_pose
 
@@ -666,17 +723,15 @@ class SE3PolicyModel(ResidualFlow_DiffEmbTransformer):
         # global_emb = self._global_pool(concat_emb)              # (B, 2*emb)
 
         trans_logvar = self.translate_var(global_emb)            # (B, 3)
-        rot_logvar = self.rotate_var(global_emb)                 # (B, 4)
+        rot_logvar = self.rotate_var(global_emb)                 # (B, 3) — so(3) 切空间
 
         # 5. 构建分布并采样
         trans_dist = MultivariateNormal(
             t_mean, torch.diag_embed(trans_logvar.exp()))
-        rot_dist = MultivariateNormal(
-            quat_mean, torch.diag_embed(rot_logvar.exp()))
 
-        t_samples = trans_dist.sample((self.group,))           # (G, B, 3)
-        quat_samples = rot_dist.sample((self.group,))          # (G, B, 4)
-        quat_samples = F.normalize(quat_samples, dim=-1)       # 投影回 S³
+        t_samples = trans_dist.sample((self.group,))                      # (G, B, 3)
+        quat_samples, logP_r_sampled = self._sample_quaternion_tangent(
+            quat_mean, rot_logvar, self.group)                            # (G, B, 4), (G, B)
 
         # ### DEBUG: 计算 base model预测均值的reward
         # rewards, _ = self.compute_reward(
@@ -694,8 +749,7 @@ class SE3PolicyModel(ResidualFlow_DiffEmbTransformer):
 
         # 7. 计算 log 概率
         logP_t = trans_dist.log_prob(t_samples)                 # (G, B)
-        logP_r = rot_dist.log_prob(quat_samples)                # (G, B)
-        logP = (logP_t + logP_r) / 2.0
+        logP = (logP_t + logP_r_sampled) / 2.0
 
         return {
             "act_1": quat_samples,
@@ -801,11 +855,30 @@ class SE3PolicyModel(ResidualFlow_DiffEmbTransformer):
         # 计算给定动作的 log prob
         trans_dist = MultivariateNormal(
             t_mean, torch.diag_embed(trans_logvar.exp()))
-        rot_dist = MultivariateNormal(
-            quat_mean, torch.diag_embed(rot_logvar.exp()))
-
         logP_t = trans_dist.log_prob(t_actions)   # (G, B)
-        logP_r = rot_dist.log_prob(quat_actions)  # (G, B)
+
+        # so(3) 切空间: 反推 quat_actions 对应的 ε
+        # q_act = q_mean ⊗ δq  →  δq = conj(q_mean) ⊗ q_act
+        # δq = (cos(θ/2), sin(θ/2)·axis) → ε = θ · axis
+        quat_mean_inv = quat_mean * torch.tensor(
+            [1, -1, -1, -1], device=quat_mean.device, dtype=quat_mean.dtype)
+        G = quat_actions.shape[0]
+        delta_q = quaternion_multiply(
+            quat_mean_inv.unsqueeze(0).expand(G, -1, -1).reshape(-1, 4),
+            quat_actions.reshape(-1, 4),
+        ).reshape(G, -1, 4)                                     # (G, B, 4)
+
+        cos_half = delta_q[..., 0:1].clamp(-1.0, 1.0)
+        theta = 2.0 * torch.acos(cos_half)                      # (G, B, 1)
+        sin_part = delta_q[..., 1:4]                            # (G, B, 3)
+        sin_norm = sin_part.norm(p=2, dim=-1, keepdim=True) + 1e-8
+        axis = sin_part / sin_norm
+        epsilon = theta * axis                                  # (G, B, 3)
+
+        rot_dist = MultivariateNormal(
+            torch.zeros(3, device=quat_mean.device),
+            torch.diag_embed(rot_logvar.exp()))
+        logP_r = rot_dist.log_prob(epsilon)                     # (G, B)
         return (logP_t + logP_r) / 2.0
 
 
@@ -838,6 +911,7 @@ def create_policy_model(cfg):
             cfg.model.encoder,
             cfg.model.head,
             cfg.rl.reward_model_path,
+            cfg.rl.base_model_path,
             cfg.model.cycle,
             center_feature=cfg.model.center_feature,
             freeze_embnn=cfg.model.freeze_embnn,

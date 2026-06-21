@@ -5,3 +5,5 @@ dropout: 0.3
 norm: BN
 output_num: 512
 pos_encoding: False
+down_ratio: 1
+pooling: max

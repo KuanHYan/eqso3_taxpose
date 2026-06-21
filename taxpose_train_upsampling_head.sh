@@ -14,7 +14,7 @@ cd "$ROOT_DIR" || exit 1
 # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
 ENCODEING=False
-POINTS=1024
+POINTS=512
 
 bash "./my_launch.sh" local $GPU_INDEX \
     python "./scripts/train_residual_flow.py" \
@@ -23,21 +23,22 @@ bash "./my_launch.sh" local $GPU_INDEX \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=18 \
-    training.lr=1e-4 \
-    training.min_lr=1e-5 \
-    training.warmup_ratio=0.025 \
-    training.weight_decay=1e-4 \
+    training.batch_size=40 \
+    training.lr=2e-4 \
+    training.min_lr=2e-5 \
+    training.warmup_ratio=0.05 \
+    training.weight_decay=0.0001 \
     training.precision='32' \
     training.scheduler=linear \
     training.num_gpus=$NUM_GPUS \
     training.accumulate_grad_batches=$GRAD_ACC \
-    training.point_cloud_loss="MSE" \
+    training.point_cloud_loss="CD" \
+    training.consistency_loss_weight=1.0 \
     dataset@dm=tax_pose \
     dm.test_folder=val_data \
-    dm.train_dset.dataset_size=6000 \
+    dm.train_dset.dataset_size=6400 \
     dm.train_dset.demo_dset.num_demo=6000 \
-    dm.train_dset.demo_dset.min_num_points=$POINTS \
+    dm.train_dset.demo_dset.min_num_points=1024 \
     dm.train_dset.demo_dset.occlusion_cfg.random_dropout=False \
     dm.train_dset.demo_dset.occlusion_cfg.anisotropic_scaling=False \
     dm.train_dset.demo_dset.occlusion_cfg.gaussian_noise=False \
@@ -49,12 +50,12 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.n_blocks=1 \
     model.attn_mode="linear" \
     model.pos_encoding=$ENCODEING \
-    model.encoder.name=raw_dgcnn \
+    model.encoder.name=dgcnn_group \
     model.encoder.norm=BN \
     model.encoder.emb_dims=512 \
     model.encoder.pos_encoding=$ENCODEING \
     model.encoder.output_num=$POINTS \
-    model.head.head_type=residual \
+    model.head.head_type=upsampling \
     model.head.project_corrs=True \
     model.head.project_corrs_mode="moe" \
     model.head.norm=LN \
@@ -63,8 +64,8 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.head.pred_weight=True \
     model.head.reparam=False \
     wandb.name=$WANDB_NAME \
-    'model.pretraining.action.ckpt_path="trained_models/5000pts_dgcnn.ckpt"' \
-    'model.pretraining.anchor.ckpt_path="trained_models/5000pts_dgcnn.ckpt"' \
+    'model.pretraining.action.ckpt_path="trained_models/5000pts_group_dgcnn.ckpt"' \
+    'model.pretraining.anchor.ckpt_path="trained_models/5000pts_group_dgcnn.ckpt"' \
     wandb.offline=$EVAL \
     debug=False \
     eval=$EVAL \
