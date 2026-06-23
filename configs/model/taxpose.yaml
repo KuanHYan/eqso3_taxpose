@@ -7,3 +7,5 @@ dropout: 0.0
 pos_encoding: False
 n_blocks: 1
 attn_mode: "custom"  # "linear", "torch_attn", "custom"
+fine_tune: False
+weight_beta: 0.5

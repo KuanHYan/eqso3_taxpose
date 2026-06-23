@@ -24,6 +24,7 @@ from taxpose.nets.head import create_head, HeadConfig
 from taxpose.nets.gemo_fea import ManualPointWiseGemoFea
 from taxpose.nets.huggingface_tf import Transformer
 from taxpose.nets.head import TransformerHead
+from taxpose.utils.se3 import dualflow2pose, flow2pose
 
 
 class EquivariantFeatureEmbeddingNetwork(nn.Module):
@@ -448,7 +449,9 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         dropout=0.1,
         pos_encoding=False,
         n_blocks=1,
-        attn_mode="torch.nn"
+        attn_mode="torch.nn",
+        fine_tune=False,
+        weight_beta=0.1,
     ):
         super(ResidualFlow_DiffEmbTransformer, self).__init__()
         self.cycle = cycle
@@ -536,6 +539,9 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         self.pos_encoding = pos_encoding
         if pos_encoding:
             self.pos_encoder = ManualPointWiseGemoFea(True, emb_dims)
+
+        self.fine_tune = fine_tune
+        self.weight_beta = weight_beta
 
     def _action_embedding(self, points):
         self.emb_nn_action.eval()
@@ -650,21 +656,19 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         del transformer_action_outputs, transformer_anchor_outputs
         return action_embedding_tf, anchor_embedding_tf, action_attn, anchor_attn
 
-    def forward(self, *input):
-        (
-            action_points, anchor_points,
-            action_embedding, anchor_embedding,
-            action_pt_pos, anchor_pt_pos,
-            act_down_sample, anch_down_sample
-        ) = self._embedding(*input)
-
-        (
+    def coarse_step(
+            self,
             action_embedding_tf,
             anchor_embedding_tf,
+            action_embedding,
+            anchor_embedding,
+            action_points,
+            anchor_points,
+            act_down_sample,
+            anch_down_sample,
             action_attn,
             anchor_attn
-        ) = self._backbone(action_embedding, anchor_embedding, action_pt_pos, anchor_pt_pos)
-
+            ):
         head_action_output = self.head_action(
             action_embedding_tf,
             action_embedding,
@@ -732,6 +736,120 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 outputs["sampled_ixs_anchor"] = head_anchor_output["A_ixs"]
 
             del head_anchor_output
+        return outputs
+
+    def fine_step(
+            self,
+            action_points, anchor_points,
+            action_attn, anchor_attn,
+            action_embedding_tf,
+            anchor_embedding_tf,
+            action_embedding,
+            anchor_embedding,
+            act_down_sample,
+            anch_down_sample,
+            flow_action,
+            flow_anchor,
+            ):
+        """精调步骤
+        输入：
+        action_points: B, N, 3
+        anchor_points: B, M, 3
+        action_attn: B, N, M
+        anchor_attn: B, N, M
+        flow_action: B, N, 4
+        flow_anchor: B, M, 4
+        """
+        pred_flow_action, pred_w_action = flow_action[:, :, :3], flow_action[:, :, 3]
+        pred_flow_anchor, pred_w_anchor = flow_anchor[:, :, :3], flow_anchor[:, :, 3]
+        action_bn3 = action_points.transpose(1, 2)
+        anchor_bn3 = anchor_points.transpose(1, 2)
+        coarse_trans = dualflow2pose(
+                xyz_src=action_bn3,
+                xyz_tgt=anchor_bn3,
+                flow_src=pred_flow_action,
+                flow_tgt=pred_flow_anchor,
+                weights_src=torch.sigmoid(pred_w_action),
+                weights_tgt=torch.sigmoid(pred_w_anchor),
+                return_transform3d=True,
+                normalization_scehme='l1',
+                training=True
+        )
+        points_pred = coarse_trans.transform_points(action_bn3)
+        flow_action_err = torch.norm(
+            points_pred - action_bn3 - pred_flow_action, dim=-1)
+
+        # Anchor: T^{-1}(q) ≈ q + pred_flow → q ≈ T(q + pred_flow)
+        anchor_rigid = coarse_trans.transform_points(
+            anchor_bn3 + pred_flow_anchor)
+        flow_anchor_err = (
+            anchor_bn3 - anchor_rigid).norm(p=2, dim=-1)          # (B, M)
+        
+        # ── 4. 注意力重加权: 高误差 → 低权重 ──
+        beta = getattr(self, 'weight_beta', 0.5)
+        adj_action = (1.0 - beta * torch.sigmoid(flow_action_err)
+                      ).clamp(min=0.1)                               # (B, N)
+        adj_anchor = (1.0 - beta * torch.sigmoid(flow_anchor_err)
+                      ).clamp(min=0.1)                               # (B, M)
+        # action_attn (B,N,M): 每行乘 action 调整因子 → (B,N,M)*(B,N,1)
+        action_attn = action_attn * adj_action.unsqueeze(-1)
+        # anchor_attn (B,N,M): 每列乘 anchor 调整因子 → (B,N,M)*(B,1,M)
+        anchor_attn = anchor_attn * adj_anchor.unsqueeze(1)
+        # ── 5. 重跑 head (修正后的 attention) ──
+        refined = self.coarse_step(
+            action_embedding_tf, anchor_embedding_tf,
+            action_embedding, anchor_embedding,
+            action_points, anchor_points,
+            act_down_sample, anch_down_sample,
+            action_attn, anchor_attn,
+        )
+        return refined
+
+    def forward(self, *input, compute_loss=None):
+        (
+            action_points, anchor_points,
+            action_embedding, anchor_embedding,
+            action_pt_pos, anchor_pt_pos,
+            act_down_sample, anch_down_sample
+        ) = self._embedding(*input)
+
+        (
+            action_embedding_tf,
+            anchor_embedding_tf,
+            action_attn,
+            anchor_attn
+        ) = self._backbone(action_embedding, anchor_embedding, action_pt_pos, anchor_pt_pos)
+
+        outputs = self.coarse_step(
+            action_embedding_tf,
+            anchor_embedding_tf,
+            action_embedding,
+            anchor_embedding,
+            action_points,
+            anchor_points,
+            act_down_sample,
+            anch_down_sample,
+            action_attn,
+            anchor_attn
+        )
+        if self.fine_tune:
+            if compute_loss is not None:
+                coarse_loss, _ = compute_loss(outputs)
+                outputs.update(coarse_loss=coarse_loss)
+            outputs.update(self.fine_step(
+                action_points,
+                anchor_points,
+                action_attn,
+                anchor_attn,
+                action_embedding_tf,
+                anchor_embedding_tf,
+                action_embedding,
+                anchor_embedding,
+                act_down_sample,
+                anch_down_sample,
+                outputs["flow_action"].detach(),
+                outputs["flow_anchor"].detach(),
+            ))
         #  *************************DEBUG*************************
         outputs.update(attns=action_attn)
         return outputs
@@ -912,6 +1030,179 @@ class Flow_DiffEmbTransformer(ResidualFlow_DiffEmbTransformer):
         return outputs
        
 
+class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
+    """两阶段流预测 + GRU 迭代精调 (方案 E).
+
+    阶段 1: 继承父类 coarse_step — 标准粗流预测
+    阶段 2: GRU 迭代修正 — 每步 SVD → 刚性流 → 误差 → GRU → delta_flow
+
+    架构:
+      Encoder (一次) ─→ coarse_step ─→ flow_0
+         │                                  │
+         └── action_embedding_tf ──────────[GRU]←── SVD(T) − predicted
+                                            │
+                                         delta_head → flow_{t+1} = flow_t + delta
+    """
+
+    def __init__(
+        self,
+        encoder_cfg,
+        head_cfg,
+        *args,
+        num_refine_steps: int = 3,
+        refine_hidden_dim: int = 128,
+        **kwargs,
+    ):
+        super().__init__(encoder_cfg, head_cfg, *args, **kwargs)
+        self.num_refine_steps = num_refine_steps
+        self.refine_hidden_dim = refine_hidden_dim
+        emb_dims = encoder_cfg.emb_dims
+
+        # ── 上下文编码: [embedding(C) + pr(3) + flow(3)] → hidden ──
+        context_in = emb_dims + 6
+        gn_groups = max(1, refine_hidden_dim // 16)
+        self.context_encoder = nn.Sequential(
+            nn.Conv1d(context_in, refine_hidden_dim, 1),
+            nn.GroupNorm(gn_groups, refine_hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(refine_hidden_dim, refine_hidden_dim, 1),
+        )
+
+        # ── GRU 时序记忆 ──
+        self.gru_action = nn.GRUCell(refine_hidden_dim, refine_hidden_dim)
+        self.gru_anchor = nn.GRUCell(refine_hidden_dim, refine_hidden_dim)
+
+        # ── delta 预测头: hidden → delta_flow(3) + [delta_weight(1)] ──
+        dim_flow = 4 if self.head_action.pred_weight else 3
+        self.delta_head = nn.Sequential(
+            nn.Conv1d(refine_hidden_dim, refine_hidden_dim // 2, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(refine_hidden_dim // 2, dim_flow, 1),
+        )
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward(self, *input, **kwargs):
+        # ═══════════════ 阶段 1: 粗预测 (复用父类) ═══════════════
+        (
+            action_points, anchor_points,
+            action_embedding, anchor_embedding,
+            action_pt_pos, anchor_pt_pos,
+            act_down_sample, anch_down_sample,
+        ) = self._embedding(*input)
+
+        (
+            action_embedding_tf, anchor_embedding_tf,
+            action_attn, anchor_attn,
+        ) = self._backbone(
+            action_embedding, anchor_embedding,
+            action_pt_pos, anchor_pt_pos)
+
+        outputs = self.coarse_step(
+            action_embedding_tf, anchor_embedding_tf,
+            action_embedding, anchor_embedding,
+            action_points, anchor_points,
+            act_down_sample, anch_down_sample,
+            action_attn, anchor_attn)
+
+        if self.num_refine_steps <= 0:
+            outputs.update(attns=action_attn)
+            return outputs
+        if "compute_loss" in kwargs:
+            coarse_loss, _ = kwargs["compute_loss"](outputs)
+
+        # ═══════════════ 阶段 2: GRU 迭代精调 ═══════════════
+        flow_action = outputs["flow_action"]                 # (B, N, 4)
+        has_anchor = ("flow_anchor" in outputs
+                      and outputs["flow_anchor"] is not None)
+
+        B, N, _ = flow_action.shape
+        action_bn3 = input[0]
+        anchor_bn3 = input[1] if has_anchor else None
+        # 初始化 GRU 隐状态
+        h_a = torch.zeros(B, self.refine_hidden_dim, N,
+                          device=flow_action.device)
+        h_b = torch.zeros(B, self.refine_hidden_dim, N,
+                          device=flow_action.device) if has_anchor else None
+
+        refined_loss_list = []
+        for step in range(self.num_refine_steps):
+            # ── SVD: 从当前 flow 解位姿 (detach, 不穿梯度) ──
+            fa = flow_action.detach()
+            pf_a = fa[:, :, :3]                                  # (B, N, 3)
+            pw_a = torch.sigmoid(fa[:, :, 3])                    # (B, N)
+
+            if has_anchor:
+                fb = outputs["flow_anchor"].detach()
+                pf_b = fb[:, :, :3]
+                pw_b = torch.sigmoid(fb[:, :, 3])
+                T = dualflow2pose(
+                    xyz_src=action_bn3, xyz_tgt=anchor_bn3,
+                    flow_src=pf_a, flow_tgt=pf_b,
+                    weights_src=pw_a, weights_tgt=pw_b,
+                    return_transform3d=True,
+                    normalization_scehme='l1', training=True)
+            else:
+                T = flow2pose(
+                    xyz=action_bn3, flow=pf_a, weights=pw_a,
+                    return_transform3d=True,
+                    normalization_scehme='l1')
+
+            # ── Action 侧精调 ──
+            rigid_a = T.transform_points(action_bn3) - action_bn3  # (B,N,3)
+            error_a = rigid_a - pf_a                                      # (B,N,3)
+            ctx_a = torch.cat(
+                [
+                    action_embedding_tf.detach(),
+                    pf_a.transpose(1, 2),
+                    error_a.transpose(1, 2)
+                ], dim=1)     # (B,C+6,N)
+            ctx_a = self.context_encoder(ctx_a)                           # (B,H,N)
+
+            # GRU 更新
+            ctx_flat = ctx_a.permute(0, 2, 1).reshape(B * N, -1)
+            hid_flat = h_a.permute(0, 2, 1).reshape(B * N, -1)
+            h_new = self.gru_action(ctx_flat, hid_flat)
+            h_a = h_new.reshape(B, N, -1).permute(0, 2, 1)
+
+            delta_a = self.delta_head(h_a).permute(0, 2, 1)              # (B,N,4)
+            outputs["flow_action"] = flow_action = flow_action + delta_a
+
+            # ── Anchor 侧精调 (对称) ──
+            if has_anchor:
+                rigid_b = T.inverse().transform_points(
+                    anchor_bn3) - anchor_bn3
+                error_b = rigid_b - pf_b
+                ctx_b = torch.cat(
+                    [
+                        anchor_embedding_tf.detach(),
+                        pf_b.transpose(1, 2),
+                        error_b.transpose(1, 2),
+                    ], dim=1)
+                ctx_b = self.context_encoder(ctx_b)
+
+                ctx_flat_b = ctx_b.permute(0, 2, 1).reshape(B * N, -1)
+                hid_flat_b = h_b.permute(0, 2, 1).reshape(B * N, -1)
+                h_new_b = self.gru_anchor(ctx_flat_b, hid_flat_b)
+                h_b = h_new_b.reshape(B, N, -1).permute(0, 2, 1)
+
+                delta_b = self.delta_head(h_b).permute(0, 2, 1)
+                outputs["flow_anchor"] = outputs["flow_anchor"] + delta_b
+
+            if "compute_loss" in kwargs and step < self.num_refine_steps - 1:
+                # 最后一次的精调损失由外部计算，保证统一接口
+                refined_loss, _ = kwargs["compute_loss"](outputs)
+                refined_loss_list.append(sum(refined_loss))
+
+        if "compute_loss" in kwargs:
+            outputs.update(coarse_loss=coarse_loss)
+            outputs.update(refined_loss=refined_loss_list)
+        outputs.update(attns=action_attn)
+        return outputs
+
+
 class ModelConfig(Protocol):
     model_type: str
 
@@ -970,6 +1261,29 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             pos_encoding=cfg.pos_encoding,
             n_blocks=int(cfg.n_blocks),
             attn_mode=cfg.attn_mode,
+            fine_tune=getattr(cfg, 'fine_tune', False),
+            weight_beta=getattr(cfg, 'weight_beta', 0.5),
+        )
+    elif cfg.model_type == "two_stage_flow_transformer":
+        r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
+        network: nn.Module = TwoStageFlowTransformer(
+            encoder_cfg=r_cfg.encoder,
+            head_cfg=r_cfg.head,
+            cycle=r_cfg.cycle,
+            center_feature=r_cfg.center_feature,
+            freeze_embnn=r_cfg.freeze_embnn,
+            return_attn=r_cfg.return_attn,
+            multilaterate=r_cfg.multilaterate,
+            mlat_sample=r_cfg.mlat_sample,
+            mlat_nkps=r_cfg.mlat_nkps,
+            feature_channels=r_cfg.feature_channels,
+            conditional=r_cfg.conditional,
+            dropout=r_cfg.dropout,
+            pos_encoding=cfg.pos_encoding,
+            n_blocks=int(cfg.n_blocks),
+            attn_mode=cfg.attn_mode,
+            num_refine_steps=getattr(cfg, 'num_refine_steps', 3),
+            refine_hidden_dim=getattr(cfg, 'refine_hidden_dim', 128),
         )
     elif cfg.model_type == "direct_correspondence_points_prediction":
         r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)

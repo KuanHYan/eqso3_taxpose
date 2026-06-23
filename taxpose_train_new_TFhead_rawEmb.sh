@@ -32,7 +32,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     training.scheduler=linear \
     training.num_gpus=$NUM_GPUS \
     training.accumulate_grad_batches=$GRAD_ACC \
-    training.point_cloud_loss="MSE" \
+    training.point_cloud_loss="L2D" \
     dataset@dm=tax_pose \
     dm.test_folder=val_data \
     dm.train_dset.dataset_size=6000 \
@@ -44,11 +44,13 @@ bash "./my_launch.sh" local $GPU_INDEX \
     dm.train_dset.demo_dset.occlusion_cfg.occlusion_class=0 \
     dm.train_dset.anchor_rot_sample_method=axis_angle \
     dm.train_dset.anchor_rotation_variance=3.141592653 \
+    model.model_type=two_stage_flow_transformer \
     model.freeze_embnn=True \
     model.dropout=0.1 \
     model.n_blocks=1 \
     model.attn_mode="linear" \
     model.pos_encoding=$ENCODEING \
+    model.fine_tune=True \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \
     model.encoder.emb_dims=512 \

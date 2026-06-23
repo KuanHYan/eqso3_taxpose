@@ -390,21 +390,6 @@ class ResidualMLPHead(nn.Module):
             anchor_points = input[6]
 
         assert scores is not None
-        # if scores is None:
-        #     if len(input) <= 4:
-        #         action_query = action_embedding
-        #         anchor_key = anchor_embedding
-        #     else:
-        #         action_query = input[4]
-        #         anchor_key = input[5]
-
-        #     d_k = action_query.size(1)
-        #     scores = torch.matmul(
-        #         action_query.transpose(2, 1).contiguous(), anchor_key
-        #     ) / math.sqrt(d_k)
-        #     # W_i # B, N, N (N=number of points, 1024 cur)
-        #     scores = torch.softmax(scores, dim=2)
-
         scores = scores.transpose(2, 1)
         assert anchor_points is not None, "anchor_points is None"
         corr_points = torch.matmul(anchor_points, scores)
@@ -444,19 +429,105 @@ class ResidualMLPHead(nn.Module):
 
             else:
                 residual_flow = self.proj_flow(action_embedding_tf)  # B,3,N
-                # residual_flow = torch.matmul(residual_flow, scores)
-                # anchor_points_i = (
-                #     anchor_points.unsqueeze(-1)
-                #     .expand(-1, -1, -1, anchor_points.shape[2])
-                #     .contiguous()
-                # )
-                # anchor_points_j = (
-                #     anchor_points.unsqueeze(-2)
-                #     .expand(-1, -1, anchor_points.shape[2], -1)
-                #     .contiguous()
-                # )
-                # rel_vec = anchor_points_j - anchor_points_i  # B, 3, N, N
-                # residual_flow = torch.einsum("bcnm,bmn->bcn", rel_vec, scores)
+
+            flow = residual_flow + corr_flow
+        else:
+            flow = corr_flow
+            residual_flow = torch.zeros_like(flow)
+
+        if self.pred_weight:
+            corr_flow_weight = torch.concat([flow, weight], dim=1)
+        else:
+            corr_flow_weight = flow
+        return {
+            "full_flow": corr_flow_weight,
+            "residual_flow": residual_flow,
+            "corr_flow": corr_flow,
+            "corr_points": corr_points,
+            "scores": scores,
+        }
+
+
+class TwoStageResidualMLPHead(ResidualMLPHead):
+    def forward(self, *input, scores, return_embedding=False):
+        """
+        input:
+          action_embedding: B,512,N
+          action_embedding_raw: B,512,N
+          anchor_embedding: B,512,N
+          action_points: B,3,N
+          anchor_points: B,3,N
+          scores: B,N,N, if needed, use this instead of calculating scores
+        return:
+          dict with keys:
+          full_flow: B,3,N
+          residual_flow: B,3,N
+          corr_flow: B,3,N
+          corr_points: B,3,N
+          scores: B,N,N
+        """
+        action_embedding_tf = input[0]
+        action_embedding_raw = input[1]  # It's wrong
+        anchor_embedding = input[2]
+        action_points = input[3]
+        anchor_points = input[4]
+        if action_embedding_tf.shape[2] != action_points.shape[2]:
+            # NOTE: 1_dim is for channel dim, 2_dim is for points dim
+            action_points = input[5]
+            anchor_points = input[6]
+
+        assert scores is not None
+        scores = scores.transpose(2, 1)
+        assert anchor_points is not None, "anchor_points is None"
+        corr_points = torch.matmul(anchor_points, scores)
+        if self.project_corrs:
+            corr_points_center = corr_points.mean(dim=2, keepdim=True)
+            inputs = corr_points-corr_points_center
+            if isinstance(self.project_pts, MOELayer):
+                inputs = (inputs, action_embedding_tf)
+            corr_points = self.project_pts(inputs)
+            corr_points += corr_points_center
+        # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
+        corr_flow = corr_points - action_points
+
+        if self.pred_weight:
+            weight = self.proj_flow_weight(action_embedding_tf)
+            weight_tmp = torch.sigmoid_(weight.detach()).squeeze(1)
+        else:
+            weight_tmp = None
+
+        trans_between_proxy = points2pose(
+            action_points.transpose(-1, -2), corr_points.transpose(-1, -2),
+            return_transform3d=True,
+            normalization_scehme="l1",
+            weights=weight_tmp
+        )
+
+        if self.residual_on:
+            if self.use_coarse_ps:
+                coarse_pts = corr_points.detach()
+                if self.pred_weight:
+                    _weight = weight / (
+                        weight.sum(dim=1, keepdim=True) + 1e-8
+                    )  # 归一化权重和为1
+                    center = (coarse_pts * _weight).sum(dim=1, keepdims=True)
+                    # distances = torch.norm(centered, dim=2, keepdim=False)  # [B,N]
+                    # radius = distances.max(dim=1, keepdim=True)[0].unsqueeze(-1)  # [B,1,1]
+                    # radius = torch.where(radius < 1e-8, torch.ones_like(radius), radius)
+                    # centered_corr_points = centered / radius
+                else:
+                    center = coarse_pts.mean(dim=1, keepdim=True)  # [B,1,3]
+                # 平移至重心 NOTE: 不再尺度归一化。这可能会带来尺度不匹配问题？
+                centered_corr_points = coarse_pts - center  # [B,N,3]
+                residual_flow = self.proj_flow(
+                    action_embedding_tf, coarse_points=centered_corr_points
+                )
+                residual_flow = residual_flow + center
+
+            else:
+                residual_flow = self.proj_flow(action_embedding_tf)  # B,3,N
+                residual_flow = trans_between_proxy.transform_points(
+                    residual_flow.transpose(-1, -2)).transpose(-1, -2).contiguous()
 
             flow = residual_flow + corr_flow
         else:
@@ -892,6 +963,18 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             norm=cfg.norm,
             weight_beta=cfg.weight_beta,
             attn_mode=cfg.attn_mode,
+        )
+    if cfg.head_type == "two_stage_residual":
+        return TwoStageResidualMLPHead(
+            cfg.emb_dims,
+            cfg.pred_weight,
+            cfg.residual_on,
+            cfg.norm,
+            cfg.head_bias,
+            cfg.use_coarse_soft,
+            cfg.project_corrs,
+            cfg.project_corrs_mode,
+            cfg.output_num,
         )
     return ResidualMLPHead(
         cfg.emb_dims,

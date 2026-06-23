@@ -156,7 +156,7 @@ def main(cfg):
         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
     )
     # TODO: If encoder is raw_dgcnn, there is a bug in DDP with sync_batchnorm=True
-    sync_batchnorm = device_count > 1 and cfg.encoder.name != "raw_dgcnn"
+    sync_batchnorm = device_count > 1 and cfg.model.encoder.name != "raw_dgcnn"
     trainer = pl.Trainer(
         logger=False if TESTING else logger,
         accelerator="gpu",

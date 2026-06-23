@@ -4,7 +4,7 @@ import random
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-
+from functools import partial
 import torch
 from torch import nn
 from torchvision.transforms import ToTensor
@@ -96,6 +96,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         self.indirect_correspondence_loss_weight = indirect_correspondence_loss_weight
         self.res_smooth_loss_weight = res_smooth_loss_weight
         self.res_smooth_start_epoch = start_res_flow_epoch
+        self.alpha = 1.0
 
     # def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
     #     # 仅加载 self.model 在 state_dict 有的参数
@@ -240,7 +241,6 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
                 pred_flow_anchor,
                 gt_T_anchor.transform_points(inputs_anch_pts) - inputs_anch_pts,
             )
-
             # dense_loss_anchor = dense_flow_distribution_loss(
             #     points=inputs_anch_pts,
             #     flow_pred=pred_flow_anchor,
@@ -378,6 +378,8 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             self.consistency_loss_weight * smoothness_loss,
             self.direct_correspondence_loss_weight * dense_loss,
         )
+        if "coarse_loss" in model_output:
+            loss += (self.alpha * sum(model_output["coarse_loss"]),)
 
         if self.rotate_frobenius_loss_weight > 0.0:
             R_delta = gt_T_action.get_matrix() - pred_T_action.get_matrix()
@@ -530,6 +532,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             action_features,
             anchor_features,
             phase_onehot,
+            compute_loss = partial(self.compute_loss, batch=batch) if self.train else None
         )
 
         log_values = {}
@@ -545,10 +548,8 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         ):
             self.rotate_frobenius_loss_weight = 1.0
             self.print("rotate_frobenius_loss_weight = 1.0")
-        # if self.current_epoch >= self.res_smooth_start_epoch:
-        #     self.model.set_residual_on(True)
-        # else:
-        #     self.model.set_residual_on(False)
+        progress = self.current_epoch / self.trainer.max_epochs
+        self.alpha = max(0.1, 1.0 - progress)  # 1.0 → 0.1
         return super().on_train_epoch_start()
 
     def forward(
