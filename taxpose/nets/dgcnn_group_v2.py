@@ -106,9 +106,6 @@ class ResGraphConvBlock(nn.Module):
         coord_k: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         identity = x
-        if coord_k is not None:
-            coords = None
-            coord_k = None
         # 构建图特征
         gf = get_graph_feature(
             x_q=x, x_k=x_k, k=self.k,
@@ -243,24 +240,30 @@ class DGCNN_Grouper_V2(nn.Module):
         pos = self.pos_enc(coords)                               # (B, pos_dim, N)
         feat = torch.cat([feat, pos], dim=1)                     # (B, C0+pos, N)
         down = down and x.shape[2] > self.output_num
+        down_num = len(self.downsample_layers)
+        down_ratio_perstep = (N / self.output_num) ** (1 / down_num)
+        down_output_nums = [int(N / down_ratio_perstep / (i+1)) for i in range(down_num)]
+        down_output_nums[-1] = self.output_num
         layer_features: List[torch.Tensor] = []
         current_k: Optional[torch.Tensor] = None
         current_ck: Optional[torch.Tensor] = None
-
+        final_coords = coords
         # --- Bottom-up 编码 ---
         for i, layer in enumerate(self.layers):
             feat = layer(feat, coords, x_k=current_k, coord_k=current_ck)
             layer_features.append(feat)
-
-            current_k = None
-            current_ck = None
+            current_k = feat
             # 降采样
             if down and i in self.downsample_layers:
-                current_k = feat
-                current_ck = coords  # TODO: 降采样后做跨分辨率 attention 有bbug
+                current_ck = coords  # TODO: 降采样后做跨分辨率 attention 有bug
                 coords, feat = fps_downsample(
-                    coords, feat, num_group=self.output_num
+                    final_coords, feat, num_group=down_output_nums[0]
                 )
+                down_output_nums.pop(0)
+                final_coords = coords
+            else:
+                current_ck = None
+                coords = None
 
         # --- FPN top-down 融合 (在最终分辨率上) ---
         if self.use_fpn and len(self.fpn_layers) > 0:
@@ -290,12 +293,12 @@ class DGCNN_Grouper_V2(nn.Module):
                 lf = F.interpolate(lf, size=final_res, mode='nearest')
             aligned_features.append(lf)
 
-        pos = self.pos_enc(coords)
+        pos = self.pos_enc(final_coords)
         aligned_features += [pos]
         out = torch.cat(aligned_features, dim=1)               # (B, sum_dims, M)
         out = self.output_proj(out)                             # (B, emb_dims, M)
 
-        return out, coords
+        return out, final_coords
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +333,24 @@ if __name__ == '__main__':
     feature, coords = model(x, down=False)
     print(f"\nfull-res feature: {feature.shape}")  # (2, 512, 1024)
     print(f"full-res coords:  {coords.shape}")     # (2, 3, 1024)
+
+    # Two downsampling layers
+    model = DGCNN_Grouper_V2(
+        emb_dims=512,
+        output_num=512,
+        knn=16,
+        dropout=0.1,
+        norm='BN',
+        num_layers=4,
+        layer_dims=[64, 128, 256, 512],
+        downsample_layers=[0, 2],
+        pos_enc_dim=64,
+        use_fpn=True,
+    ).to(device)
+
+    feature, coords = model(x)
+    print(f"feature: {feature.shape}")   # (2, 512, 512)
+    print(f"coords:  {coords.shape}")    # (2, 3, 512)
 
     # 统计
     n_params = sum(p.numel() for p in model.parameters())

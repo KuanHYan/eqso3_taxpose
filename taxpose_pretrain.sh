@@ -10,22 +10,23 @@ cd "$ROOT_DIR" || exit 1
 
 export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST="$TEST_MODE"
-ENCODEING=False
+ENCODEING=True
 POINTS=1024
 EMB_DIM=512
-EVAl=True
+EVAl=False
 # Pretrain embeddings network
 bash "./my_launch.sh" local $GPU_INDEX \
     python "./scripts/pretrain_embedding.py" \
     --config-name "pretraining" \
     job_type="pretrain_embedding" \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
-    training.batch_size=18 \
+    training.batch_size=16 \
     training.lr=1e-4 \
     training.precision=32 \
     training.scheduler='constant' \
-    training.epochs=30 \
+    training.epochs=400 \
     encoder.name=dgcnn_group \
+    encoder.down_layers=[1] \
     encoder.emb_dims=$EMB_DIM \
     encoder.knn=20 \
     encoder.norm=BN \
@@ -34,7 +35,8 @@ bash "./my_launch.sh" local $GPU_INDEX \
     encoder.dropout=0.1 \
     wandb.name=$WANDB_NAME \
     dataset=custom_dataset \
-    dataset.train_dset.data_size=16200 \
+    dataset.train_dset.data_size=18000 \
+    dataset.train_dset.num_points=1024 \
     wandb.offline=$EVAl \
     eval=$EVAl \
     resume_ckpt=$CKPT_PATH \

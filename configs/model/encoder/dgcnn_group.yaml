@@ -3,3 +3,4 @@ emb_dims: 256
 knn: 16
 norm: GN
 output_num: 512
+down_layers: [0, 2]

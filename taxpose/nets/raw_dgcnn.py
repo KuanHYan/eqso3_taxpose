@@ -50,6 +50,7 @@ def get_graph_feature(x, k=20, idx=None):
     feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 1, 2).contiguous()
     return feature
 
+
 class LayerNorm1d(nn.Module):
     """对 (B, C, L) 输入在 C 维度执行 LayerNorm，保持输出形状不变。"""
     def __init__(self, num_channels, eps=1e-5, elementwise_affine=True):

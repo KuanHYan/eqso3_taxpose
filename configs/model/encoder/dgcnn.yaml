@@ -7,3 +7,4 @@ output_num: 512
 pos_encoding: False
 down_ratio: 1
 pooling: max
+down_layers: [0, 2]

@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from functools import partial
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torchvision.transforms import ToTensor
 from torch.cuda.amp.autocast_mode import autocast
 from pytorch3d.transforms import Transform3d
@@ -373,11 +374,23 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             + self.anchor_weight * smoothness_loss_anchor
         )
 
-        loss = (
-            self.displace_loss_weight * point_loss,
-            self.consistency_loss_weight * smoothness_loss,
-            self.direct_correspondence_loss_weight * dense_loss,
-        )
+        if "refined_loss" in model_output:
+            # TODO: Consider using a weight beta for the refined loss
+            log_values[loss_prefix + "refined_loss"] = sum(model_output["refined_loss"])
+            loss = (sum(model_output["refined_loss"]),)
+        else:
+            loss = (
+                self.displace_loss_weight * point_loss,
+                self.consistency_loss_weight * smoothness_loss,
+                self.direct_correspondence_loss_weight * dense_loss,
+            )
+
+        if "tuned_T" in model_output:
+            # 使用MSE直接计算预测变换和真值变换的误差
+            pred_T = model_output["tuned_T"]
+            gt_T = gt_T_action
+            loss += (F.mse_loss(pred_T.get_matrix(), gt_T.get_matrix(), reduction="mean"))
+
         if "coarse_loss" in model_output:
             loss += (self.alpha * sum(model_output["coarse_loss"]),)
 
@@ -454,19 +467,19 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         # centered_gt_ps = centered_gt_ps - centered_gt_ps.mean(dim=1, keepdim=True)
         # log_values[loss_prefix + "only_Rotate_L2_pcs_distance"] = \
         #     mse_criterion(centered_pred_ps_A, centered_gt_ps)
-        log_values[loss_prefix + "R0_mean"] = R0_mean
-        log_values[loss_prefix + "R0_max"] = R0_max
-        log_values[loss_prefix + "R0_min"] = R0_min
-        log_values[loss_prefix + "R1_mean"] = R1_mean
-        log_values[loss_prefix + "R1_max"] = R1_max
-        log_values[loss_prefix + "R1_min"] = R1_min
+        # log_values[loss_prefix + "R0_mean"] = R0_mean
+        # log_values[loss_prefix + "R0_max"] = R0_max
+        # log_values[loss_prefix + "R0_min"] = R0_min
+        # log_values[loss_prefix + "R1_mean"] = R1_mean
+        # log_values[loss_prefix + "R1_max"] = R1_max
+        # log_values[loss_prefix + "R1_min"] = R1_min
 
-        log_values[loss_prefix + "t0_mean"] = t0_mean
-        log_values[loss_prefix + "t0_max"] = t0_max
-        log_values[loss_prefix + "t0_min"] = t0_min
-        log_values[loss_prefix + "t1_mean"] = t1_mean
-        log_values[loss_prefix + "t1_max"] = t1_max
-        log_values[loss_prefix + "t1_min"] = t1_min
+        # log_values[loss_prefix + "t0_mean"] = t0_mean
+        # log_values[loss_prefix + "t0_max"] = t0_max
+        # log_values[loss_prefix + "t0_min"] = t0_min
+        # log_values[loss_prefix + "t1_mean"] = t1_mean
+        # log_values[loss_prefix + "t1_max"] = t1_max
+        # log_values[loss_prefix + "t1_min"] = t1_min
 
         log_values[loss_prefix + "error_R_mean"] = error_R_mean
         log_values[loss_prefix + "error_t_mean"] = error_t_mean
@@ -881,9 +894,9 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         maybe_corr = maybe_corr - maybe_corr.mean(dim=0, keepdim=True)
         draw_points = get_color(
             tensor_list=[
-                w_0 * (input_act_pts_target[0].cpu() - input_act_pts_target[0].cpu().mean(dim=0, keepdim=True)),
-                w_0 * corr_points,
-                w_0 * maybe_corr,
+                input_act_pts_target[0].cpu(),
+                corr_points,
+                maybe_corr,
             ],
             color_list=["blue", "red", "green"],
         )
