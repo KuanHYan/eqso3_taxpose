@@ -53,7 +53,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.attn_mode="linear" \
     model.pos_encoding=$ENCODEING \
     model.fine_tune=False \
-    model.num_refine_steps=2 \
+    model.num_refine_steps=0 \
     model.refine_hidden_dim=128 \
     model.stage_num=2 \
     model.encoder.name=raw_dgcnn \

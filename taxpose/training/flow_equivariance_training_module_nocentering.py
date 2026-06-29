@@ -566,8 +566,8 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         ):
             self.rotate_frobenius_loss_weight = 1.0
             self.print("rotate_frobenius_loss_weight = 1.0")
-        progress = self.current_epoch / self.trainer.max_epochs
-        self.alpha = max(0.1, 1.0 - progress)  # 1.0 → 0.1
+        # progress = self.current_epoch / self.trainer.max_epochs
+        self.alpha = 1.0  # max(0.1, 1.0 - progress)  # 1.0 → 0.1
         return super().on_train_epoch_start()
 
     def forward(

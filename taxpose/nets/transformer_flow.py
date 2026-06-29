@@ -1408,8 +1408,8 @@ class CascadeFlowTransformer(nn.Module):
                 outputs.update(
                     refined_loss=[sum(kwargs["compute_loss"](outputs)[0])]
                 )
-            staged_coarse_loss += outputs.pop("coarse_loss", [0.0])
-            staged_refined_loss += outputs.pop("refined_loss", [0.0])
+            staged_coarse_loss += outputs.pop("coarse_loss", [torch.zeros(1,).to(input[0].device)])
+            staged_refined_loss += outputs.pop("refined_loss", [torch.zeros(1,).to(input[0].device)])
 
         outputs.update(
             coarse_loss=staged_coarse_loss,
