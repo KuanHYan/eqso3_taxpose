@@ -11,9 +11,9 @@ cd "$ROOT_DIR" || exit 1
 export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST="$TEST_MODE"
 ENCODEING=True
-POINTS=1024
-EMB_DIM=512
-EVAl=False
+POINTS=768
+EMB_DIM=384
+EVAl=True
 # Pretrain embeddings network
 bash "./my_launch.sh" local $GPU_INDEX \
     python "./scripts/pretrain_embedding.py" \
@@ -25,7 +25,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     training.precision=32 \
     training.scheduler='constant' \
     training.epochs=400 \
-    encoder.name=dgcnn_group \
+    encoder.name=raw_dgcnn \
     encoder.down_layers=[1] \
     encoder.emb_dims=$EMB_DIM \
     encoder.knn=20 \

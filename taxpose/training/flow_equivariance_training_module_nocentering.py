@@ -374,10 +374,11 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             + self.anchor_weight * smoothness_loss_anchor
         )
 
-        if "refined_loss" in model_output:
+        if model_output.get("refined_loss", None) is not None:
             # TODO: Consider using a weight beta for the refined loss
-            log_values[loss_prefix + "refined_loss"] = sum(model_output["refined_loss"])
-            loss = (sum(model_output["refined_loss"]),)
+            refined_loss = sum(model_output["refined_loss"])
+            log_values[loss_prefix + "refined_loss"] = refined_loss.detach()
+            loss = (refined_loss,)
         else:
             loss = (
                 self.displace_loss_weight * point_loss,
@@ -391,8 +392,10 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             gt_T = gt_T_action
             loss += (F.mse_loss(pred_T.get_matrix(), gt_T.get_matrix(), reduction="mean"))
 
-        if "coarse_loss" in model_output:
-            loss += (self.alpha * sum(model_output["coarse_loss"]),)
+        if model_output.get("coarse_loss", None) is not None:
+            coarse_loss = sum(model_output["coarse_loss"])
+            log_values[loss_prefix + "coarse_loss"] = coarse_loss.detach()
+            loss += (self.alpha * coarse_loss,)
 
         if self.rotate_frobenius_loss_weight > 0.0:
             R_delta = gt_T_action.get_matrix() - pred_T_action.get_matrix()
@@ -539,13 +542,15 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         else:
             phase_onehot = None
 
-        model_output = self.model(
+        forward_fun = self.model.forward if self.train else self.model.inference
+        compute_loss = partial(self.compute_loss, batch=batch) if self.train else None
+        model_output = forward_fun(
             points_trans_action,
             points_trans_anchor,
             action_features,
             anchor_features,
             phase_onehot,
-            compute_loss = partial(self.compute_loss, batch=batch) if self.train else None
+            compute_loss=compute_loss
         )
 
         log_values = {}
@@ -672,7 +677,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         T0 = Transform3d(matrix=batch["T0"])
         T1 = Transform3d(matrix=batch["T1"])
 
-        model_output = self.model(
+        model_output = self.model.inference(
             points_trans_action,
             points_trans_anchor,
             action_features,
@@ -885,16 +890,12 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
 
         corr_points = model_output["corr_points_action"][0].cpu()
         corr_points = corr_points - corr_points.mean(dim=0, keepdim=True)
-        if pred_w_action is not None:
-            w_0 = 100 * pred_w_action[0].unsqueeze(-1).expand(-1, 3).cpu()
-        else:
-            w_0 = 1.0
         input_act_pts_target = T0.inverse().compose(T1).transform_points(input_act_pts)
         maybe_corr = pred_flow_action[0].cpu() + input_act_pts[0].cpu()
         maybe_corr = maybe_corr - maybe_corr.mean(dim=0, keepdim=True)
         draw_points = get_color(
             tensor_list=[
-                input_act_pts_target[0].cpu(),
+                input_act_pts_target[0].cpu() - input_act_pts_target[0].cpu().mean(dim=0, keepdim=True),
                 corr_points,
                 maybe_corr,
             ],

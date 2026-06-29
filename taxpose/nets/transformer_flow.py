@@ -418,7 +418,10 @@ def create_embedding_network(cfg) -> nn.Module:
         )
     elif cfg.name == "raw_dgcnn":
         print(f"Using {cfg.name}")
-        network: nn.Module = DGCNN4TaxPose(cfg.emb_dims, cfg.knn, cfg.dropout, cfg.norm)
+        network: nn.Module = DGCNN4TaxPose(
+            cfg.emb_dims, cfg.knn,
+            cfg.dropout, cfg.norm,
+            output_c=cfg.output_num)
     elif cfg.name == "dgcnn_group":
         print(f"Using {cfg.name} with grouping")
         network = DGCNN_Grouper_V2(
@@ -568,14 +571,14 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         self.emb_nn_action.eval()
         points = points - points.mean(dim=2, keepdim=True)
         embedding = self.emb_nn_action(points, down=allow_down)
-        embedding = F.normalize(embedding, dim=1)
+        # embedding = F.normalize(embedding, dim=1)
         return embedding
 
     def _anchor_embedding(self, points, allow_down=False):
         self.emb_nn_anchor.eval()
         points = points - points.mean(dim=2, keepdim=True)
         embedding = self.emb_nn_anchor(points, down=allow_down)
-        embedding = F.normalize(embedding, dim=1)
+        # embedding = F.normalize(embedding, dim=1)
         return embedding
 
     def _embedding(self, *input):
@@ -707,7 +710,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             anch_down_sample,
             scores=action_attn,
         )
-        to_next_stage_corr_points = action_points + head_action_output["residual_flow"] + head_action_output["corr_flow"]
+        raw_pts = action_points if act_down_sample is None else act_down_sample
+        to_next_stage_corr_points = raw_pts + head_action_output["residual_flow"] + head_action_output["corr_flow"]
         flow_action = head_action_output["full_flow"].permute(0, 2, 1).contiguous()
         residual_flow_action = head_action_output["residual_flow"].permute(0, 2, 1).contiguous()
         corr_flow_action = head_action_output["corr_flow"].permute(0, 2, 1).contiguous()
@@ -721,7 +725,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             "act_down_sample": (
                 None if act_down_sample is None else act_down_sample.permute(0, 2, 1).contiguous()
             ),
-            "b3n_act_corr_points": to_next_stage_corr_points.detach()
+            "b3n_act_corr_points": to_next_stage_corr_points
         }
 
         if "P_A" in head_action_output:
@@ -742,7 +746,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 act_down_sample,
                 scores=anchor_attn,
             )
-            to_next_anch_corr_points = anchor_points + head_anchor_output["residual_flow"] + head_anchor_output["corr_flow"]
+            raw_pts = anchor_points if anch_down_sample is None else anch_down_sample
+            to_next_anch_corr_points = raw_pts + head_anchor_output["residual_flow"] + head_anchor_output["corr_flow"]
             flow_anchor = head_anchor_output["full_flow"].permute(0, 2, 1).contiguous()
             residual_flow_anchor = head_anchor_output["residual_flow"].permute(0, 2, 1).contiguous()
             corr_flow_anchor = head_anchor_output["corr_flow"].permute(0, 2, 1).contiguous()
@@ -759,7 +764,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                     if anch_down_sample is None
                     else anch_down_sample.permute(0, 2, 1).contiguous()
                 ),
-                "b3n_anch_corr_points": to_next_anch_corr_points.detach()
+                "b3n_anch_corr_points": to_next_anch_corr_points
             }
 
             if "P_A" in head_anchor_output:
@@ -898,22 +903,25 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             ))
         #  *************************DEBUG*************************
         outputs.update(attns=action_attn)
-        if not self.is_final_stage:
-            action_cps = outputs.pop("b3n_act_corr_points")
-            anchor_cps = outputs.pop("b3n_anch_corr_points", None)
-            outputs.update(shared_args=(
-                action_points, anchor_points,
-                shared_act_embedding, shared_anch_embedding,
-                action_embedding_tf, anchor_embedding_tf,
-                action_pt_pos, anchor_pt_pos,
-                act_down_sample, anch_down_sample,
-                action_cps, anchor_cps
-            ))
+        action_cps = outputs.pop("b3n_act_corr_points")
+        anchor_cps = outputs.pop("b3n_anch_corr_points", None)
+        outputs.update(shared_args=[
+            action_points, anchor_points,
+            shared_act_embedding, shared_anch_embedding,
+            action_embedding_tf, anchor_embedding_tf,
+            action_pt_pos, anchor_pt_pos,
+            act_down_sample, anch_down_sample,
+            action_cps, anchor_cps
+        ])
         return outputs
 
     def set_residual_on(self, on):
         self.head_action.residual_on = on
         self.head_anchor.residual_on = on
+
+    @torch.no_grad()
+    def inference(self, *input, **kwargs):
+        return self.forward(*input, compute_loss=None)
 
 
 class Flow_DiffEmbTransformer(ResidualFlow_DiffEmbTransformer):
@@ -1182,16 +1190,17 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
         anchor_embedding = shared_args[3]
         # Pop TF embedding, which will not be used at next stage
         act_emb_tf = shared_args.pop(4)
-        anchor_emb_tf = shared_args.pop(5)
+        anchor_emb_tf = shared_args.pop(4)
+
         has_anchor = ("flow_anchor" in outputs
                       and outputs["flow_anchor"] is not None)
-        down_sample = shared_args[0].shape[2] != action_embedding.shape[2]
+        down_sample = input[0].shape[1] != action_embedding.shape[2]
 
         action_bn3 = input[0] if not down_sample \
             else shared_args[-4].permute(0, 2, 1).contiguous()
         anchor_bn3 = input[1] if has_anchor else None
         if has_anchor and down_sample:
-            action_bn3 = shared_args[-3].permute(0, 2, 1).contiguous()
+            anchor_bn3 = shared_args[-3].permute(0, 2, 1).contiguous()
         if "compute_loss" in kwargs:
             coarse_loss, _ = kwargs["compute_loss"](outputs)
 
@@ -1346,33 +1355,44 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
             outputs.update(coarse_loss=coarse_loss)
             outputs.update(refined_loss=refined_loss_list)
 
-        if not self.is_final_stage:
-            shared_args[-2] = shared_args[-2] + flow_action[:, :, :3].permute(0, 2, 1).contiguous()
-            if has_anchor:  # otherwise, shared_args[-1] is None
-                shared_args[-1] = shared_args[-1] + flow_anchor[:, :, :3].permute(0, 2, 1).contiguous()
+        shared_args[-2] = shared_args[-2] + flow_action[:, :, :3].permute(0, 2, 1).contiguous()
+        if has_anchor:  # otherwise, shared_args[-1] is None
+            shared_args[-1] = shared_args[-1] + flow_anchor[:, :, :3].permute(0, 2, 1).contiguous()
         return outputs
+
+    @torch.no_grad()
+    def inference(self, *input, **kwargs):
+        return self.forward(*input, compute_loss=None)
 
 
 class CascadeFlowTransformer(nn.Module):
     def __init__(
         self,
+        encoder_cfg,
+        head_cfg, 
         stage_num: int = 2,
         num_refine_steps: int = 0,
         **kwargs
     ):
         super().__init__()
+        self.emb_nn_action = create_embedding_network(encoder_cfg)
+        self.emb_nn_anchor = create_embedding_network(encoder_cfg)
         self.stage_num = stage_num
-        block_type = ResidualFlow_DiffEmbTransformer if num_refine_steps > 0 \
-            else TwoStageFlowTransformer
+        block_type = TwoStageFlowTransformer if num_refine_steps > 0 \
+            else ResidualFlow_DiffEmbTransformer
         self.blocks = nn.ModuleList()
         for i in range(stage_num):
             self.blocks.append(
                 block_type(
+                    encoder_cfg,
+                    head_cfg,
                     stage=i,
                     is_final=(i == stage_num - 1),
                     **kwargs
                 )
             )
+            self.blocks[-1].emb_nn_action = self.emb_nn_action
+            self.blocks[-1].emb_nn_anchor = self.emb_nn_anchor
 
     def forward(self, *input, **kwargs):
         staged_coarse_loss = []
@@ -1381,17 +1401,31 @@ class CascadeFlowTransformer(nn.Module):
         for i, block in enumerate(self.blocks):
             outputs = block(*input, **kwargs)
             input = outputs.pop("shared_args")
+            if len(input) == 12:
+                input.pop(4)
+                input.pop(4)
             if "refined_loss" not in outputs:
                 outputs.update(
-                    refined_loss=kwargs["compute_loss"](outputs)
+                    refined_loss=[sum(kwargs["compute_loss"](outputs)[0])]
                 )
-            staged_coarse_loss.append(outputs.pop("coarse_loss", None))
-            staged_refined_loss.append(outputs.pop("refined_loss", None))
+            staged_coarse_loss += outputs.pop("coarse_loss", [0.0])
+            staged_refined_loss += outputs.pop("refined_loss", [0.0])
 
         outputs.update(
             coarse_loss=staged_coarse_loss,
             refined_loss=staged_refined_loss
         )
+        return outputs
+
+    @torch.no_grad()
+    def inference(self, *input, **kwargs):
+        for i, block in enumerate(self.blocks):
+            outputs = block(*input)
+            input = outputs.pop("shared_args")
+            if len(input) == 12:
+                input.pop(4)
+                input.pop(4)
+        
         return outputs
 
 
@@ -1420,7 +1454,16 @@ class ResidualFlowDiffEmbTransformerConfig:
     feature_channels: int
     conditional: bool
 
-    dropout: float
+    dropout: float = 0.0
+    pos_encoding: bool = False
+    n_blocks: int = 1
+    attn_mode: str = "torch_attn"
+    # Fine-tune
+    num_refine_steps: int = 0
+    refine_hidden_dim: int = 128
+    fine_tune: bool = False
+    # Cascade
+    stage_num: int = 1
 
 
 @dataclass
@@ -1450,9 +1493,9 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             feature_channels=r_cfg.feature_channels,
             conditional=r_cfg.conditional,
             dropout=r_cfg.dropout,
-            pos_encoding=cfg.pos_encoding,
-            n_blocks=int(cfg.n_blocks),
-            attn_mode=cfg.attn_mode,
+            pos_encoding=r_cfg.pos_encoding,
+            n_blocks=r_cfg.n_blocks,
+            attn_mode=r_cfg.attn_mode,
             fine_tune=getattr(cfg, 'fine_tune', False),
             weight_beta=getattr(cfg, 'weight_beta', 0.5),
         )
@@ -1471,12 +1514,12 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             feature_channels=r_cfg.feature_channels,
             conditional=r_cfg.conditional,
             dropout=r_cfg.dropout,
-            pos_encoding=cfg.pos_encoding,
-            n_blocks=int(cfg.n_blocks),
-            attn_mode=cfg.attn_mode,
-            num_refine_steps=getattr(cfg, 'num_refine_steps', 3),
-            refine_hidden_dim=getattr(cfg, 'refine_hidden_dim', 128),
-            fine_tune_trans=getattr(cfg, 'fine_tune', False),
+            pos_encoding=r_cfg.pos_encoding,
+            n_blocks=r_cfg.n_blocks,
+            attn_mode=r_cfg.attn_mode,
+            num_refine_steps=r_cfg.num_refine_steps,
+            refine_hidden_dim=r_cfg.refine_hidden_dim,
+            fine_tune_trans=r_cfg.fine_tune,
         )
     elif cfg.model_type == "direct_correspondence_points_prediction":
         r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
@@ -1501,6 +1544,29 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             encoder_cfg=c_cfg.encoder,
             cycle=c_cfg.cycle,
             center_feature=c_cfg.center_feature,
+        )
+    elif cfg.model_type == "cascade_flow_transformer":
+        r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
+        network = CascadeFlowTransformer(
+            encoder_cfg=r_cfg.encoder,
+            stage_num=r_cfg.stage_num,
+            num_refine_steps=r_cfg.num_refine_steps,
+            head_cfg=r_cfg.head,
+            cycle=r_cfg.cycle,
+            center_feature=r_cfg.center_feature,
+            freeze_embnn=r_cfg.freeze_embnn,
+            return_attn=r_cfg.return_attn,
+            multilaterate=r_cfg.multilaterate,
+            mlat_sample=r_cfg.mlat_sample,
+            mlat_nkps=r_cfg.mlat_nkps,
+            feature_channels=r_cfg.feature_channels,
+            conditional=r_cfg.conditional,
+            dropout=r_cfg.dropout,
+            pos_encoding=r_cfg.pos_encoding,
+            n_blocks=r_cfg.n_blocks,
+            attn_mode=r_cfg.attn_mode,
+            refine_hidden_dim=r_cfg.refine_hidden_dim,
+            fine_tune_trans=r_cfg.fine_tune,
         )
     else:
         raise ValueError(f"Unknown model type: {cfg.model_type}")

@@ -9,3 +9,8 @@ n_blocks: 1
 attn_mode: "custom"  # "linear", "torch_attn", "custom"
 fine_tune: False
 weight_beta: 0.5
+# Fine-tune
+num_refine_steps: 3
+refine_hidden_dim: 128
+# Cascade
+stage_num: 2

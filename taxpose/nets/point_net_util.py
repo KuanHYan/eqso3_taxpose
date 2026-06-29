@@ -72,7 +72,7 @@ def get_graph_feature(x_q, x_k=None, k=20, coord_q=None, coord_k=None):
     
     feature = x_k.view(batch_size * num_points_k, -1)[idx, :]
     feature = feature.view(batch_size, k, num_points_q, num_dims).permute(0, 3, 2, 1).contiguous()
-    x_q = x_q.view(batch_size, num_dims, num_points_q, 1).expand(-1, -1, -1, k)
+    x_q = x_q.view(batch_size, num_points_q, 1, num_dims).expand(-1, -1, k, -1).permute(0, 3, 1, 2).contiguous()
     feature = torch.cat((feature - x_q, x_q), dim=1)
     return feature
 
@@ -81,30 +81,31 @@ def get_graph_feature_for_vndgcnn(x, k=20, idx=None, x_coord=None):
     batch_size = x.size(0)
     num_points = x.size(-1)
     x = x.view(batch_size, -1, num_points)
+    x = x.transpose(2, 1).contiguous()  # (batch_size, N, C)
     if idx is None:
         if x_coord is None: # dynamic knn graph
-            x_ = x.transpose(2, 1).contiguous()
-            _, idx = knn(k, x_, x_)
+            _, idx = knn(k, x, x)
         else:          # fixed knn graph with input point coordinates
+            if x_coord.size(1) == 3:
+                x_coord = x_coord.transpose(2, 1).contiguous()
             _, idx = knn(k, x_coord, x_coord)
+    assert idx.shape[-1] == k
+
     device = x.device
 
     idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
-
     idx = idx + idx_base
-
     idx = idx.view(-1)
- 
-    _, num_dims, _ = x.size()
-    num_dims = num_dims // 3
 
-    x = x.transpose(2, 1).contiguous()
+    num_dims = x.size(-1)
+    num_dims = num_dims // 3  # for vn
+
     feature = x.view(batch_size*num_points, -1)[idx, :]
-    feature = feature.view(batch_size, num_points, k, num_dims, 3) 
+    feature = feature.view(batch_size, num_points, k, num_dims, 3)
     x = x.view(batch_size, num_points, 1, num_dims, 3).repeat(1, 1, k, 1, 1)
-    
+
     feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 4, 1, 2).contiguous()
-  
+
     return feature
 
 

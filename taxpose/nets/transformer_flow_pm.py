@@ -85,8 +85,6 @@ class CustomTransformer(nn.Module):
     def forward(self, *input):
         query = input[0]
         key = input[1]
-        query = query.transpose(2, 1).contiguous()
-        key = key.transpose(2, 1).contiguous()
         src_embedding = self.model.forward(key, query, None, None).transpose(2, 1).contiguous()
         src_attn = self.model.decoder.layers[-1].src_attn.attn
 

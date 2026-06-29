@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from taxpose.nets.pointnet import PointwiseMLP, ResidualPointNet
+from taxpose.nets.point_net_util import fps_downsample, get_graph_feature
 from taxpose.nets.vn_layers import (
     VNLinearLeakyReLU,
     VNLinearAndLeakyReLU,
@@ -20,6 +21,7 @@ from taxpose.nets.vn_layers import (
     VNBatchNorm,
     VNLayerNorm
 )
+
 def knn(x, k):
     inner = -2*torch.matmul(x.transpose(2, 1), x)
     xx = torch.sum(x**2, dim=1, keepdim=True)
@@ -28,27 +30,27 @@ def knn(x, k):
     return idx
 
 
-def get_graph_feature(x, k=20, idx=None):
-    batch_size = x.size(0)
-    num_points = x.size(-1)
-    x = x.view(batch_size, -1, num_points)
-    if idx is None:
-        idx = knn(x, k=k)   # (batch_size, num_points, k)
-    device = x.device
+# def get_graph_feature(x, k=20, idx=None):
+#     batch_size = x.size(0)
+#     num_points = x.size(-1)
+#     x = x.view(batch_size, -1, num_points)
+#     if idx is None:
+#         idx = knn(x, k=k)   # (batch_size, num_points, k)
+#     device = x.device
 
-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1)*num_points
+#     idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1)*num_points
 
-    idx = idx + idx_base
+#     idx = idx + idx_base
 
-    idx = idx.view(-1)
-    _, num_dims, _ = x.size()
+#     idx = idx.view(-1)
+#     _, num_dims, _ = x.size()
 
-    x = x.transpose(2, 1).contiguous()   # (batch_size, num_points, num_dims)  -> (batch_size*num_points, num_dims) #   batch_size * num_points * k + range(0, batch_size*num_points)
-    feature = x.view(batch_size*num_points, -1)[idx, :]
-    feature = feature.view(batch_size, num_points, k, num_dims) 
-    x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
-    feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 1, 2).contiguous()
-    return feature
+#     x = x.transpose(2, 1).contiguous()   # (batch_size, num_points, num_dims)  -> (batch_size*num_points, num_dims) #   batch_size * num_points * k + range(0, batch_size*num_points)
+#     feature = x.view(batch_size*num_points, -1)[idx, :]
+#     feature = feature.view(batch_size, num_points, k, num_dims) 
+#     x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
+#     feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 1, 2).contiguous()
+#     return feature
 
 
 class LayerNorm1d(nn.Module):
@@ -211,6 +213,7 @@ class DGCNN4TaxPose(DGCNN):
     def __init__(self, emb_dims=512, knn_n=20, dropout=0.1, norm='BN', output_c=1):
         super().__init__(
             DGCNNArgs('raw_dgcnn', knn_n, emb_dims, dropout, norm), output_c)
+        self.output_num = output_c
         # self.conv5 = nn.Conv1d(512, emb_dims, kernel_size=1, bias=False)
         self.linear1 = None
         del self.linear1
@@ -226,12 +229,18 @@ class DGCNN4TaxPose(DGCNN):
         self.linear3 = None
         del self.linear3
 
-    def forward(self, x, down=False):
+    def forward(self, x, down=True):
         '''
         input: x with shape of [B, 3, N]
         '''
         coor = x
-        x = get_graph_feature(x, k=self.k)
+        down = down and (x.shape[2] > self.output_num)
+        # TODO: 两种模式尚待验证： 1）在输入阶段就降采样然后编码 2）输出阶段降采样选择对应特征
+        knn = self.k
+        # if down:
+        #     knn = self.k * (x.shape[2] / self.output_num)
+        #     x, _ = fps_downsample(coor, x, self.output_num)
+        x = get_graph_feature(coor, k=knn)
         x = self.conv1(x)
         x1 = x.max(dim=-1, keepdim=False)[0]
 
@@ -249,7 +258,13 @@ class DGCNN4TaxPose(DGCNN):
 
         x = torch.cat((x1, x2, x3, x4), dim=1)
 
-        x = self.conv5(x)
+        x = self.conv5(x)  # (B, C, N)
+        if down:   # mode 2
+            coor, x_down = fps_downsample(coor, x, self.output_num)
+        #     # TODO：是否聚合特征然后最大池化？
+        #     x_down = get_graph_feature(x_down, x_k=x, k=self.k)
+        #     x_down = x_down.max(dim=-1, keepdim=False)[0]
+            return self.dp1(x_down), coor
 
         return self.dp1(x)
 
@@ -327,15 +342,15 @@ class VN_DGCNN(nn.Module):
 
 if __name__ == '__main__':
     torch.cuda.manual_seed(0)
-    x = torch.rand(4, 3, 512).cuda()
-    score = torch.rand(4, 512, 512).cuda().requires_grad_(True)
+    x = torch.rand(4, 3, 1024).cuda()
+    score = torch.rand(4, 1024, 1024).cuda().requires_grad_(True)
     score = F.softmax(score, dim=1)
     score.retain_grad()
     # model = DGCNN_VAE(DGCNNArgs(norm='LN'))
     # y = model(x)
     # print(y[0].shape)
     # print(y[1].shape)
-    model = DGCNN4TaxPose().cuda()
+    model = DGCNN4TaxPose(output_c=512).cuda()
     params = torch.load('./taxpose/logs/pretrain_embedding/best_cpkg/new_dgcnn_BN_509.ckpt')['state_dict']
     model.load_state_dict({k.replace('model.emb_nn.', ''): v for k, v in params.items()})
     model.train()
