@@ -1194,13 +1194,14 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
 
         has_anchor = ("flow_anchor" in outputs
                       and outputs["flow_anchor"] is not None)
-        down_sample = input[0].shape[1] != action_embedding.shape[2]
+        down_sample = shared_args[0].shape[2] != action_embedding.shape[2]
 
-        action_bn3 = input[0] if not down_sample \
-            else shared_args[-4].permute(0, 2, 1).contiguous()
-        anchor_bn3 = input[1] if has_anchor else None
+        action_bn3 = shared_args[0] if not down_sample else shared_args[-4]
+        action_bn3 = action_bn3.permute(0, 2, 1).contiguous()
+        anchor_bn3 = shared_args[1].permute(0, 2, 1).contiguous() if has_anchor else None
         if has_anchor and down_sample:
             anchor_bn3 = shared_args[-3].permute(0, 2, 1).contiguous()
+
         if "compute_loss" in kwargs:
             coarse_loss, _ = kwargs["compute_loss"](outputs)
 

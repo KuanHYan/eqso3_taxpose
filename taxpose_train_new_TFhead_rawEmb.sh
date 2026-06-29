@@ -14,7 +14,7 @@ cd "$ROOT_DIR" || exit 1
 # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
 ENCODEING=False
-POINTS=640
+POINTS=1024
 DATA_POINTS_N=1024
 EMB_DIM=384
 
@@ -25,7 +25,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=20 \
+    training.batch_size=8 \
     training.lr=1.25e-4 \
     training.min_lr=1.25e-5 \
     training.warmup_ratio=0.025 \
@@ -53,7 +53,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.attn_mode="linear" \
     model.pos_encoding=$ENCODEING \
     model.fine_tune=False \
-    model.num_refine_steps=0 \
+    model.num_refine_steps=2 \
     model.refine_hidden_dim=128 \
     model.stage_num=2 \
     model.encoder.name=raw_dgcnn \
