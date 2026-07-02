@@ -195,7 +195,8 @@ def main(cfg):
         fast_dev_run=20 if TESTING else False,
         precision=cfg.training.precision,
         accumulate_grad_batches=cfg.training.accumulate_grad_batches,
-        gradient_clip_val=cfg.training.gradient_clip_val,
+        # gradient_clip_val=cfg.training.gradient_clip_val,
+        # gradient_clip_algorithm="norm",
     )
     trainer.print(OmegaConf.to_yaml(cfg, resolve=True))
     trainer.print(f"use {device_count} gpus")
@@ -231,11 +232,7 @@ def main(cfg):
         "weight_decay": cfg.training.weight_decay,
     }
     trainer.print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_step: {cfg.training.warmup_ratio*lr_scheduler_total_steps}")
-    if cfg.debug:
-        from torch.utils.tensorboard.writer import SummaryWriter
-        tensorboard_writer = SummaryWriter()
-    else:
-        tensorboard_writer = None
+
     model = EquivarianceTrainingModule(
         network,
         lr=cfg.training.lr,
@@ -253,7 +250,7 @@ def main(cfg):
         flow_supervision=cfg.training.flow_supervision,
         tr_super_time_ratio=cfg.training.tr_super_start_time_ratio,
         point_cloud_loss=cfg.training.point_cloud_loss,
-        tensorboard_writer=tensorboard_writer
+        debug=cfg.debug,
     )
 
     model.cuda()

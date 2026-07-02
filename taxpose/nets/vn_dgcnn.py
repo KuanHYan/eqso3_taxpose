@@ -309,7 +309,7 @@ class VN_DGCNN_iqSO3(nn.Module):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, x, l=None):
+    def forward(self, x, down=True):
         """
         Args:
             x: (B, 3, N)  输入点云
@@ -319,7 +319,7 @@ class VN_DGCNN_iqSO3(nn.Module):
         """
         B, _, N = x.shape
         ratio = N / self.output_num
-        down_sample = self.down_sample and ratio > 1
+        down_sample = self.down_sample and ratio > 1 and down
         K2 = self.output_num
 
         coor = x                                          # (B, 3, N) — 保留坐标用于 FPS & KNN
@@ -331,10 +331,10 @@ class VN_DGCNN_iqSO3(nn.Module):
         # 我们用 x_coord 显式传入正确格式的坐标.
         x_coord = coor.transpose(1, 2).contiguous()       # (B, N, 3)
 
-        # ── 位置编码 ──
-        if self.pos_encoding:
-            pe = self.pe_encoder(x_vn)                    # (B, pe_c, 3, N)
-            x_vn = torch.cat([x_vn, pe], dim=1)           # (B, 1+pe_c, 3, N)
+        # # ── 位置编码 ──
+        # if self.pos_encoding:
+        #     pe = self.pe_encoder(x_vn)                    # (B, pe_c, 3, N)
+        #     x_vn = torch.cat([x_vn, pe], dim=1)           # (B, 1+pe_c, 3, N)
 
         # ═══════════════════ Stage 1 ═══════════════════
         x = get_graph_feature_for_vndgcnn(x_vn, k=self.n_knn, x_coord=x_coord)
@@ -370,9 +370,9 @@ class VN_DGCNN_iqSO3(nn.Module):
 
         # ═══════════════════ Stage 3 ═══════════════════
         # ── 末阶段位置编码: 在降采样后坐标上编码全局结构 ──
-        if self.pos_encoding:
-            pe_last = self.pe_final(coor.unsqueeze(1))   # (B, pe_c, 3, K2)
-            x = torch.cat([x, pe_last], dim=1)           # (B, C_stage+pe_c, 3, K2)
+        # if self.pos_encoding:
+        #     pe_last = self.pe_final(coor.unsqueeze(1))   # (B, pe_c, 3, K2)
+        #     x = torch.cat([x, pe_last], dim=1)           # (B, C_stage+pe_c, 3, K2)
 
         knn3 = min(self.n_knn, coor.shape[-1])
         x = get_graph_feature_for_vndgcnn(x, k=knn3)

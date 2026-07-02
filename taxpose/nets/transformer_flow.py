@@ -17,7 +17,7 @@ from taxpose.nets.transformer_flow_pm import CustomTransformer
 from taxpose.nets.tv_mlp import MLP as TVMLP
 from taxpose.utils.multilateration import estimate_p
 from third_party.dcp.model import DGCNN
-from taxpose.nets.raw_dgcnn import DGCNN4TaxPose, DGCNN_VAE
+from taxpose.nets.raw_dgcnn import DGCNN4TaxPose, DGCNN_VAE, knn
 from taxpose.nets.vn_dgcnn import VN_DGCNN_iqSO3, VNArgs
 from taxpose.nets.dgcnn_group_v2 import DGCNN_Grouper_V2
 from taxpose.nets.head import create_head, HeadConfig
@@ -462,7 +462,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         dropout=0.1,
         pos_encoding=False,
         n_blocks=1,
-        attn_mode="torch.nn",
+        attn_mode="torch_attn",
         fine_tune=False,
         weight_beta=0.1,
         stage=0,
@@ -474,7 +474,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         self.feature_channels = feature_channels
 
         self.emb_nn_action = create_embedding_network(encoder_cfg)
-        self.emb_nn_anchor = create_embedding_network(encoder_cfg)
+        self.emb_nn_anchor = create_embedding_network(encoder_cfg) if freeze_embnn else self.emb_nn_action
         emb_dims = encoder_cfg.emb_dims
         self.freeze_embnn = freeze_embnn
         if freeze_embnn:
@@ -560,6 +560,41 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         self.weight_beta = weight_beta
         self.stage = stage
         self.is_final_stage = is_final
+        self.knn_in_tf = "knn" in attn_mode
+
+    def get_parameters(self, module: str):
+        """返回指定模块的参数列表，用于分层学习率。
+
+        Args:
+            module: 模块名，可选 "emb", "backbone", "head", "gru"
+        Returns:
+            参数迭代器或空列表
+        """
+        if module == "emb":
+            params = list(self.emb_nn_action.parameters()) + \
+                     list(self.emb_nn_anchor.parameters())
+            if self.pos_encoding:
+                params += list(self.pos_encoder.parameters())
+            if self.feature_channels > 0:
+                params += list(self.feature_channel_encoder_action.parameters())
+                params += list(self.feature_channel_encoder_anchor.parameters())
+            return params
+        elif module == "backbone":
+            params = list(self.transformer_action.parameters()) + \
+                     list(self.transformer_anchor.parameters())
+            if self.conditional:
+                params += list(self.proj_onehot.parameters())
+            return params
+        elif module == "head":
+            params = list(self.head_action.parameters())
+            if self.cycle:
+                params += list(self.head_anchor.parameters())
+            return params
+        elif module == "gru":
+            return []  # 父类无 GRU
+        else:
+            raise ValueError(f"Unknown module: {module}. "
+                             f"Expected 'emb', 'backbone', 'head', or 'gru'.")
 
     def _action_embedding(self, points, allow_down=False):
         """
@@ -568,14 +603,14 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             points: B,3,num_points
             allow_down: Allow downsampling.
         """
-        self.emb_nn_action.eval()
+        self.emb_nn_action.train(not self.freeze_embnn)
         points = points - points.mean(dim=2, keepdim=True)
         embedding = self.emb_nn_action(points, down=allow_down)
         # embedding = F.normalize(embedding, dim=1)
         return embedding
 
     def _anchor_embedding(self, points, allow_down=False):
-        self.emb_nn_anchor.eval()
+        self.emb_nn_action.train(not self.freeze_embnn)
         points = points - points.mean(dim=2, keepdim=True)
         embedding = self.emb_nn_anchor(points, down=allow_down)
         # embedding = F.normalize(embedding, dim=1)
@@ -654,15 +689,17 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 act_down_sample, anch_down_sample,
             )
 
-    def _backbone(self, action_embedding, anchor_embedding, action_pt_pos, anchor_pt_pos):
+    def _backbone(self, action_embedding, anchor_embedding,
+                  action_pt_pos, anchor_pt_pos,
+                  act_index=None, anch_index=None):
         action_embedding = action_embedding.transpose(2, 1).contiguous()
         anchor_embedding = anchor_embedding.transpose(2, 1).contiguous()
 
         transformer_action_outputs = self.transformer_action(
-            action_embedding, anchor_embedding
+            action_embedding, anchor_embedding, knn_index=act_index
         )
         transformer_anchor_outputs = self.transformer_anchor(
-            anchor_embedding, action_embedding
+            anchor_embedding, action_embedding, knn_index=anch_index
         )
         action_embedding_tf = transformer_action_outputs["src_embedding"]
         action_attn = transformer_action_outputs["src_attn"]
@@ -864,12 +901,19 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             anchor_cp_embedding = self._anchor_embedding(anchor_cps, allow_down=True)
             action_embedding = action_cp_embedding + shared_act_embedding
             anchor_embedding = anchor_cp_embedding + shared_anch_embedding
+
+        tf_act_proxys = action_points if act_down_sample is None else act_down_sample
+        tf_anch_proxys = anchor_points if anch_down_sample is None else anch_down_sample
+
+        act_index = knn(tf_act_proxys, 8) if self.knn_in_tf else None
+        anch_index = knn(tf_anch_proxys, 8) if self.knn_in_tf else None
         (
             action_embedding_tf,
             anchor_embedding_tf,
             action_attn,
             anchor_attn
-        ) = self._backbone(action_embedding, anchor_embedding, action_pt_pos, anchor_pt_pos)
+        ) = self._backbone(action_embedding, anchor_embedding,
+                           action_pt_pos, anchor_pt_pos, act_index, anch_index)
 
         outputs = self.coarse_step(
             action_embedding_tf,
@@ -914,10 +958,6 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             action_cps, anchor_cps
         ])
         return outputs
-
-    def set_residual_on(self, on):
-        self.head_action.residual_on = on
-        self.head_anchor.residual_on = on
 
     @torch.no_grad()
     def inference(self, *input, **kwargs):
@@ -1167,16 +1207,37 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
 
             # ── delta 预测头: hidden → delta_flow(3) + [delta_weight(1)] ──
             dim_trans = 6
-            self.delta_rot_scale = 5 / 180 * torch.pi   # 可学习
-            self.delta_trans_scale = 0.01
+            self.delta_rot_scale = 1.0 # 5 / 180 * torch.pi   # 可学习
+            self.delta_trans_scale = 1.0 #0.01
             self.fine_tune_trans_delta_head = nn.Sequential(
                 nn.Linear(refine_hidden_dim * 2, refine_hidden_dim),
                 nn.ReLU(inplace=True),
                 nn.Linear(refine_hidden_dim, refine_hidden_dim // 2, 1),
                 nn.ReLU(inplace=True),
                 nn.Linear(refine_hidden_dim // 2, dim_trans, 1),
-                nn.Tanh()
+                # nn.Tanh()
             )
+
+    def get_parameters(self, module: str):
+        """返回指定模块的参数列表，用于分层学习率。
+        继承父类 get_parameters，并增加 "gru" 模块。
+        """
+        if module == "gru":
+            params = list(self.context_encoder.parameters()) + \
+                     list(self.gru_action.parameters()) + \
+                     list(self.gru_anchor.parameters()) + \
+                     list(self.delta_head.parameters())
+            if self.fine_tune_trans:
+                params += list(self.fine_tune_trans_context_encoder.parameters())
+                params += list(self.fine_tune_trans_gru_action.parameters())
+                params += list(self.fine_tune_trans_gru_anchor.parameters())
+                params += list(self.fine_tune_trans_delta_head.parameters())
+            return params
+        return super().get_parameters(module)
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
 
     def forward(self, *input, **kwargs):
         # ═══════════════ 阶段 1: 粗预测 (复用父类) ══════════════
@@ -1206,6 +1267,7 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
             coarse_loss, _ = kwargs["compute_loss"](outputs)
 
         hook_trans_T = []
+        observing_deltaT = []
         # ═══════════════ 阶段 2: GRU 迭代精调 ═══════════════
         flow_action = outputs["flow_action"]                 # (B, N, 4)
         flow_anchor = outputs["flow_anchor"] if has_anchor else None
@@ -1285,20 +1347,14 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
 
                 delta_b = self.delta_head(h_b).permute(0, 2, 1)
                 flow_anchor = flow_anchor + delta_b
-            
-            outputs["flow_action"] = flow_action
-            if has_anchor:
-                outputs["flow_anchor"] = flow_anchor
-            if "compute_loss" in kwargs:
-                refined_loss, _ = kwargs["compute_loss"](outputs)
-                refined_loss_list.append(sum(refined_loss) / self.num_refine_steps)
+            hook_trans_T.append(T)
 
             if self.fine_tune_trans:
                 ctx_act = torch.cat(
                     [
                         act_emb_tf.detach(),
                         anchor_embedding.detach(),
-                        flow_action.detach().transpose(1, 2),
+                        flow_action.transpose(1, 2),
                     ], dim=1)
                 ctx_act = self.fine_tune_trans_context_encoder(ctx_act).squeeze(-1)          # (B, H)
                 h_trans_a = self.fine_tune_trans_gru_action(ctx_act, h_trans_a)  # (B, H)
@@ -1308,7 +1364,7 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
                         [
                             anchor_emb_tf.detach(),
                             action_embedding.detach(),
-                            flow_anchor.detach().transpose(1, 2),
+                            flow_anchor.transpose(1, 2),
                         ], dim=1)
                     ctx_anch = self.fine_tune_trans_context_encoder(ctx_anch).squeeze(-1)          # (B, H)
                     h_trans_b = self.fine_tune_trans_gru_anchor(ctx_anch, h_trans_b)
@@ -1332,25 +1388,35 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
                 #     delta_se3[:, 3:].norm(dim=-1).mean()     # 平移范数
                 # )
                 delta_T = Rotate(delta_R).translate(delta_t)
-                T = T.compose(delta_T)
-                flow_act_trans = T.transform_normals(flow_action[:, :, :3])
+                # T = T.compose(delta_T)
+                flow_act_trans = delta_T.transform_normals(flow_action[:, :, :3])
                 flow_action = torch.cat([flow_act_trans, flow_action[:, :, 3:]], dim=-1)
                 if has_anchor:
-                    flow_anch_trans = T.transform_normals(flow_anchor[:, :, :3])
+                    inverse_delta_T = delta_T.inverse()
+                    flow_anch_trans = inverse_delta_T.transform_normals(flow_anchor[:, :, :3])
                     flow_anchor = torch.cat([flow_anch_trans, flow_anchor[:, :, 3:]], dim=-1)
-                outputs['tuned_T'] = T
+                # outputs['tuned_T'] = T
 
-                outputs["flow_action"] = flow_action
-                if has_anchor:
-                    outputs["flow_anchor"] = flow_anchor
-                if "compute_loss" in kwargs and step < self.num_refine_steps - 1:
-                    # 最后一次的精调损失由外部计算，保证统一接口
-                    refined_loss, _ = kwargs["compute_loss"](outputs)
-                    refined_loss_list.append(sum(refined_loss) + reg_loss)
+                # outputs["flow_action"] = flow_action
+                # if has_anchor:
+                #     outputs["flow_anchor"] = flow_anchor
+                # if "compute_loss" in kwargs:
+                #     # 最后一次的精调损失由外部计算，保证统一接口
+                #     refined_loss, _ = kwargs["compute_loss"](outputs)
+                #     refined_loss_list.append(sum(refined_loss) / self.num_refine_steps)
 
-            hook_trans_T.append(T)
+                observing_deltaT += [(theta.detach(), delta_t.detach())]
+                hook_trans_T.append(T.compose(delta_T))
+            outputs["flow_action"] = flow_action
+            if has_anchor:
+                outputs["flow_anchor"] = flow_anchor
+            if "compute_loss" in kwargs:
+                refined_loss, _ = kwargs["compute_loss"](outputs)
+                refined_loss_list.append(sum(refined_loss) / self.num_refine_steps)
+
         # Hook to save trans, which are used to observe the T each fine-tune step
         outputs.update(hook_trans_T=hook_trans_T)
+        outputs.update(observing_deltaT=observing_deltaT)
 
         if "compute_loss" in kwargs:
             outputs.update(coarse_loss=coarse_loss)
@@ -1363,7 +1429,7 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
 
     @torch.no_grad()
     def inference(self, *input, **kwargs):
-        return self.forward(*input, compute_loss=None)
+        return self.forward(*input)
 
 
 class CascadeFlowTransformer(nn.Module):
@@ -1394,6 +1460,36 @@ class CascadeFlowTransformer(nn.Module):
             )
             self.blocks[-1].emb_nn_action = self.emb_nn_action
             self.blocks[-1].emb_nn_anchor = self.emb_nn_anchor
+
+    def get_parameters(self, module: str):
+        """返回指定模块的参数列表，用于分层学习率。
+        Cascade 中 emb 模块为所有 stage 共享，其余模块逐 stage 收集。
+        """
+        if module == "emb":
+            # 共享的 embedding 网络（仅一份）
+            params = list(self.emb_nn_action.parameters()) + \
+                     list(self.emb_nn_anchor.parameters())
+            # 各 block 自己的 pos_encoder / feature_channel_encoder
+            for block in self.blocks:
+                block_params = block.get_parameters("emb")
+                # 排除已被 emb_nn_action/anchor 覆盖的共享参数
+                shared_ids = {id(p) for p in params}
+                for p in block_params:
+                    if id(p) not in shared_ids:
+                        params.append(p)
+                        shared_ids.add(id(p))
+            return params
+        elif module in ("backbone", "head", "gru"):
+            params = []
+            seen_ids = set()
+            for block in self.blocks:
+                for p in block.get_parameters(module):
+                    if id(p) not in seen_ids:
+                        params.append(p)
+                        seen_ids.add(id(p))
+            return params
+        else:
+            return self.blocks[0].get_parameters(module)  # 抛出 ValueError
 
     def forward(self, *input, **kwargs):
         staged_coarse_loss = []

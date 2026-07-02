@@ -4,6 +4,27 @@ import torch.nn.functional as F
 from transformers import BertConfig, BertModel
 
 
+def get_graph_feature(feas, idx):
+    """
+    Args:
+        feas: B, N, C
+        idx: B, N, K
+    """
+    batch_size, num_points, num_dims = feas.size()
+    k = idx.shape[-1]
+    idx = idx.transpose(-1, -2).contiguous()  # B K N
+
+    idx_base = torch.arange(0, batch_size, device=feas.device).view(-1, 1, 1) * num_points
+    idx = idx + idx_base
+    idx = idx.view(-1)
+    
+    feature = feas.view(batch_size * num_points, -1)[idx, :]
+    feature = feature.view(batch_size, k, num_points, num_dims)
+    feas = feas.view(batch_size, 1, num_points, num_dims).expand(-1, k, -1, -1)
+    feature = torch.cat((feature - feas, feas), dim=-1)
+    return feature
+
+
 class Transformer(nn.Module):
     def __init__(
         self,
@@ -86,7 +107,8 @@ class Transformer(nn.Module):
 
 
 class MHAttention(nn.Module):
-    def __init__(self, n_head, d_model, dropout=0.1, project_bias=False):
+    def __init__(self, n_head, d_model, dropout=0.1,
+                 project_bias=False, need_weights=True):
         "Take in model size and number of heads."
         super(MHAttention, self).__init__()
         assert d_model % n_head == 0
@@ -97,14 +119,38 @@ class MHAttention(nn.Module):
             bias=project_bias,
             batch_first=True
         )
+        self.need_weights = need_weights
 
     def forward(self, query, key, value, mask=None):
         x, self.attn = self.attn_net.forward(
             query, key, value,
-            need_weights=True, average_attn_weights=False
+            need_weights=self.need_weights, average_attn_weights=False
         )
-
         return x
+
+
+class MHAttnWithKNN(MHAttention):
+    def __init__(self, n_head, d_model, dropout=0.1,
+                 project_bias=False, need_weights=True):
+        super().__init__(n_head, d_model, dropout,
+                         project_bias, need_weights=need_weights)
+        # PointTr: 
+        self.knn_map = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.LeakyReLU(negative_slope=0.2)
+        )
+        self.merge_map = nn.Linear(d_model*2, d_model)
+
+    def forward(self, query, key, value, mask=None, knn_index=None):
+        attn_fea = super().forward(query, key, value)
+        if knn_index is not None:
+            knn_f = get_graph_feature(query, knn_index)
+            knn_f = self.knn_map(knn_f)
+            knn_f = knn_f.max(dim=1, keepdim=False)[0]
+            attn_fea = torch.cat([attn_fea, knn_f], dim=-1)
+            attn_fea = self.merge_map(attn_fea)
+
+        return attn_fea
 
 
 # ──────────────────────────────────────────────────────────
@@ -123,7 +169,7 @@ class LinearMHAttention(nn.Module):
     """
 
     def __init__(self, n_head: int, d_model: int, dropout: float = 0.1,
-                 project_bias: bool = False):
+                 project_bias: bool = False, need_weights: bool = True):
         super().__init__()
         assert d_model % n_head == 0
         self.n_head = n_head
@@ -137,6 +183,7 @@ class LinearMHAttention(nn.Module):
         self.W_o = nn.Linear(d_model, d_model, bias=project_bias)
         self.dropout = nn.Dropout(dropout)
         self.attn = None          # stored attention weights (B,H,N,M) or (B,N,M)
+        self.need_weights = need_weights
 
     @staticmethod
     def _kernel(x: torch.Tensor) -> torch.Tensor:
@@ -185,12 +232,36 @@ class LinearMHAttention(nn.Module):
         out = out.transpose(1, 2).contiguous().view(B, N, self.d_model)
         out = self.W_o(out)
 
-        # ---- store kernel-based attention for downstream use ----
-        # attn ≈ φ(Q) φ(K)^T  (already computed: Q, K are kernel features)
-        attn = torch.matmul(Q, K.transpose(-2, -1))    # (B, H, N, M)
-        self.attn = attn / attn.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        if self.need_weights:
+            # ---- store kernel-based attention for downstream use ----
+            # attn ≈ φ(Q) φ(K)^T  (already computed: Q, K are kernel features)
+            attn = torch.matmul(Q, K.transpose(-2, -1))    # (B, H, N, M)
+            self.attn = attn / attn.sum(dim=-1, keepdim=True).clamp(min=1e-8)
 
         return out
+
+
+class LinearMHAttnWithKNN(LinearMHAttention):
+    def __init__(self, n_head, d_model, dropout=0.1,
+                 project_bias=False, need_weights=True):
+        super().__init__(n_head, d_model, dropout, project_bias, need_weights)
+        # PointTr: 
+        self.knn_map = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.LeakyReLU(negative_slope=0.2)
+        )
+        self.merge_map = nn.Linear(d_model*2, d_model)
+
+    def forward(self, query, key, value, mask=None, knn_index=None):
+        attn_fea = super().forward(query, key, value, mask)
+        if knn_index is not None:
+            knn_f = get_graph_feature(query, knn_index)
+            knn_f = self.knn_map(knn_f)
+            knn_f = knn_f.max(dim=1, keepdim=False)[0]
+            attn_fea = torch.cat([attn_fea, knn_f], dim=-1)
+            attn_fea = self.merge_map(attn_fea)
+
+        return attn_fea
 
 
 # class LinearCustomTransformer(CustomTransformer):

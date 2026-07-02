@@ -30,6 +30,9 @@ class PointCloudLoss(nn.Module):
 
     def forward(self, x, y, weights=None):
         reduce_ops = torch.mean if self.reduction == "mean" else torch.sum
+        if self.reduction == "mean":
+            x = x * 100
+            y = y * 100  # 使用平均损失时由于输入点的单位是米，导致loss过小，所以这里乘100
         if weights is None:
             weights = torch.ones(x.shape[0], x.shape[1]).to(x.device)
         else:

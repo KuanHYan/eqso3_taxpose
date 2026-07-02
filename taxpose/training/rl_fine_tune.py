@@ -42,13 +42,13 @@ class RLTrainingModule(PointCloudTrainingModule):
         clip_eps: float = 0.2,      # PPO-style 裁剪阈值
         grpo_iter: int = 10,        # GRPO单词迭代次数
         update_base_every: int = 1000,  # base model 更新频率
-        tensorboard_writer=None,
+        debug=False,
     ):
         super().__init__(
             model=model,
             lr=lr,
             image_log_period=image_log_period,
-            tensorboard_writer=tensorboard_writer,
+            debug=debug,
             optimization_mode=optimization_mode,
             **lr_cfg,
         )

@@ -13,8 +13,13 @@ class PointCloudTrainingModule(pl.LightningModule):
             scheduler: str = 'constant', max_steps: int = 100,
             warmup_ratio: float = 0.1, weight_decay=1e-4,
             by_epoch: bool = True,
-            tensorboard_writer=None, image_log_period=500,
-            optimization_mode: str = 'auto'
+            debug=False, image_log_period=500,
+            optimization_mode: str = 'auto',
+            # 分层学习率系数 (emb/backbone/head/gru 相对 base_lr 的比例)
+            emb_lr_ratio: float = 0.1,
+            backbone_lr_ratio: float = 1.0,
+            head_lr_ratio: float = 1.0,
+            gru_lr_ratio: float = 1.0,
             ):
         super().__init__()
         self.model = model
@@ -28,8 +33,12 @@ class PointCloudTrainingModule(pl.LightningModule):
         self.warmup_steps = int(warmup_ratio * self.end_lr_steps)
         self.weight_decay = weight_decay
         self._automatic_optimization = optimization_mode == 'auto'
-        if tensorboard_writer is not None:
-            self.tensorboard_writer = tensorboard_writer
+        self.emb_lr_ratio = emb_lr_ratio
+        self.backbone_lr_ratio = backbone_lr_ratio
+        self.head_lr_ratio = head_lr_ratio
+        self.gru_lr_ratio = gru_lr_ratio
+        self.debug = debug
+        if debug:
             self.shared_params = list(self.parameters())
 
     def module_step(self, batch, batch_idx):
@@ -39,11 +48,6 @@ class PointCloudTrainingModule(pl.LightningModule):
     def visualize_results(self, batch, batch_idx):
         return {}
 
-    def on_train_end(self) -> None:
-        if getattr(self, "tensorboard_writer", None) is not None:
-            self.tensorboard_writer.flush()
-        return super().on_train_end()
-    
     def on_train_epoch_start(self) -> None:
         self.print(f"Epoch: {self.current_epoch}, LR: {self._optimizer_.param_groups[0]['lr']:1.2e}")
         return super().on_train_epoch_start()
@@ -52,44 +56,107 @@ class PointCloudTrainingModule(pl.LightningModule):
         torch.cuda.empty_cache()
         return super().on_train_epoch_end()
 
-    def on_after_backward(self) -> None:
-        # 尝试获取self.writer，如果没有或者是None，则返回
-        if getattr(self, "tensorboard_writer", None) is None:
-            return super().on_after_backward()
+    def on_before_optimizer_step(self, optimizer) -> None:
+        if not self.debug:
+            return super().on_before_optimizer_step(optimizer)
+        # ── 手动梯度裁剪：逐模块独立裁剪，避免 VN-DGCNN 压制其他模块 ──
+        # module_clip_val = {
+        #     "emb": 100.0,       # VN-DGCNN 梯度大，单独收紧
+        #     "backbone": 50.0,   # Cross-Attention
+        #     "head": 50.0,       # Flow Head
+        #     "gru": 50.0,        # GRU 精调（如有）
+        # }
+
+        # pre_clip_norm = {}  # 每个模块裁剪前全局范数
+        # post_clip_norm = {}  # 每个模块裁剪后全局范数
+
+        # if getattr(self.model, "get_parameters", None) is not None:
+        #     for module_name, max_norm in module_clip_val.items():
+        #         params = self.model.get_parameters(module_name)
+        #         if not params:
+        #             continue
+
+                # 计算裁剪前该模块的范数
+                # total_norm = 0.0
+                # for p in params:
+                #     if p.grad is not None:
+                #         total_norm += p.grad.detach().norm(2).item() ** 2
+                # total_norm = total_norm ** 0.5
+                # pre_clip_norm[f"grad/pre_clip_{module_name}"] = total_norm
+
+                # 对该模块独立裁剪
+                # torch.nn.utils.clip_grad.clip_grad_norm_(params, max_norm)
+
+                # # 裁剪后范数
+                # total_norm = 0.0
+                # for p in params:
+                #     if p.grad is not None:
+                #         total_norm += p.grad.detach().norm(2).item() ** 2
+                # post_clip_norm[f"grad/post_clip_{module_name}"] = total_norm ** 0.5
+
+        # DEBUG: 尝试单独参加project_flow
+        if hasattr(self.model, "head_action"):
+            params = self.model.head_action.proj_flow.parameters()
+            torch.nn.utils.clip_grad.clip_grad_norm_(params, 10)
+        if hasattr(self.model, "head_anchor"):
+            params = self.model.head_anchor.proj_flow.parameters()
+            torch.nn.utils.clip_grad.clip_grad_norm_(params, 10)
+        if hasattr(self.model, "emb_nn_action"):
+            params = self.model.emb_nn_action.named_parameters()
+            for name, param in params:
+                if not params:
+                    continue
+                torch.nn.utils.clip_grad.clip_grad_norm_(param, 100)
+
+        # ── 梯度日志记录 ──
+        grad_log_period = getattr(self, 'image_log_period', 500)
+        if self.global_step < 500:
+            return
+        if self.global_step % grad_log_period != 0:
+            return
+
+        if wandb.run is None:
+            return
+        wandb_logs = {}
+        # wandb_logs = {
+        #     "trainer/global_step": self.global_step,
+        #     **pre_clip_norm,
+        #     **post_clip_norm,
+        # }
         for name, param in self.model.named_parameters():
             if param.grad is not None:
-                self.tensorboard_writer.add_histogram(
-                    f"grad/{name}", param.grad, self.global_step)
-                grad_norm = param.grad.norm(2)
+                grad = param.grad.detach()
+                # wandb_logs[f"grad_hist/{name}"] = wandb.Histogram(
+                #     grad.cpu().numpy())
+                grad_norm = grad.norm(2)
                 weight_norm = param.data.norm(2)
-                self.tensorboard_writer.add_scalar(
-                    f"grad_norm/{name}", grad_norm, self.global_step)
-                self.tensorboard_writer.add_scalar(
-                    f"Ratio (Grad/Weight)/{name}", grad_norm / (weight_norm + 1e-8),
-                    self.global_step
-                )
-        return super().on_after_backward()
+                wandb_logs[f"grad_norm/{name}"] = grad_norm.item()
+                wandb_logs[f"grad_weight_ratio/{name}"] = (
+                    grad_norm / (weight_norm + 1e-8)).item()
 
-    def on_before_zero_grad(self, optimizer) -> None:
-        if getattr(self, "tensorboard_writer", None) is None or \
-                getattr(self, "_ori_losses", None) is None:
-            return
-        grad_list = []
-        for l in self._ori_losses:
-            optimizer.zero_grad()
-            l.backward(retain_graph=True)
-            grad_A = [p.grad.clone().view(-1) for p in self.shared_params if p.grad is not None]
-            grad_A = torch.cat(grad_A)   # 展平为一维向量
-            grad_list.append(grad_A)
-        # 3. 计算余弦相似度
-        point_loss_grad, smoothness_loss_grad, dense_loss_grad = grad_list
-        cos_sim_pc_vpc = torch.dot(point_loss_grad, dense_loss_grad) / (torch.norm(point_loss_grad) * torch.norm(dense_loss_grad) + 1e-8)
-        cos_sim_pc_sm = torch.dot(point_loss_grad, smoothness_loss_grad) / (torch.norm(point_loss_grad) * torch.norm(smoothness_loss_grad) + 1e-8)
-        cos_sim_vpc_sm = torch.dot(dense_loss_grad, smoothness_loss_grad) / (torch.norm(dense_loss_grad) * torch.norm(smoothness_loss_grad) + 1e-8)
-        self.tensorboard_writer.add_scalar("cos_sim_pc_vpc", cos_sim_pc_vpc, self.global_step)
-        self.tensorboard_writer.add_scalar("cos_sim_pc_sm", cos_sim_pc_sm, self.global_step)
-        self.tensorboard_writer.add_scalar("cos_sim_pc_vpc_sm", cos_sim_vpc_sm, self.global_step)
-        return
+        if wandb_logs:
+            wandb.log(wandb_logs)
+
+    # def on_before_zero_grad(self, optimizer) -> None:
+    #     if getattr(self, "tensorboard_writer", None) is None or \
+    #             getattr(self, "_ori_losses", None) is None:
+    #         return
+    #     grad_list = []
+    #     for l in self._ori_losses:
+    #         optimizer.zero_grad()
+    #         l.backward(retain_graph=True)
+    #         grad_A = [p.grad.clone().view(-1) for p in self.shared_params if p.grad is not None]
+    #         grad_A = torch.cat(grad_A)   # 展平为一维向量
+    #         grad_list.append(grad_A)
+    #     # 3. 计算余弦相似度
+    #     point_loss_grad, smoothness_loss_grad, dense_loss_grad = grad_list
+    #     cos_sim_pc_vpc = torch.dot(point_loss_grad, dense_loss_grad) / (torch.norm(point_loss_grad) * torch.norm(dense_loss_grad) + 1e-8)
+    #     cos_sim_pc_sm = torch.dot(point_loss_grad, smoothness_loss_grad) / (torch.norm(point_loss_grad) * torch.norm(smoothness_loss_grad) + 1e-8)
+    #     cos_sim_vpc_sm = torch.dot(dense_loss_grad, smoothness_loss_grad) / (torch.norm(dense_loss_grad) * torch.norm(smoothness_loss_grad) + 1e-8)
+    #     self.tensorboard_writer.add_scalar("cos_sim_pc_vpc", cos_sim_pc_vpc, self.global_step)
+    #     self.tensorboard_writer.add_scalar("cos_sim_pc_sm", cos_sim_pc_sm, self.global_step)
+    #     self.tensorboard_writer.add_scalar("cos_sim_pc_vpc_sm", cos_sim_vpc_sm, self.global_step)
+    #     return
 
     def training_step(self, batch, batch_idx):
         self.train()
@@ -176,19 +243,29 @@ class PointCloudTrainingModule(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        # return example:
-        # {
-        #     "optimizer": optimizer,
-        #     "lr_scheduler": {
-        #         "scheduler": ReduceLROnPlateau(optimizer, ...),
-        #         "monitor": "metric_to_track",
-        #         "frequency": "indicates how often the metric is updated",
-        #         # If "monitor" references validation metrics, then "frequency" should be set to a
-        #         # multiple of "trainer.check_val_every_n_epoch".
-        #     },
-        # }
-        learned_params = self.parameters()
-        optimizer = torch.optim.AdamW(learned_params, self.lr, weight_decay=self.weight_decay)
+        # 分层学习率：通过 model.get_parameters(module) 获取各模块参数
+        module_lr_map = {
+            "emb": self.emb_lr_ratio,
+            "backbone": self.backbone_lr_ratio,
+            "head": self.head_lr_ratio,
+            "gru": self.gru_lr_ratio,
+        }
+        param_groups = []
+        if getattr(self.model, "get_parameters", None) is not None:
+            for module_name, ratio in module_lr_map.items():
+                params = self.model.get_parameters(module_name)
+                if params:
+                    param_groups.append({
+                        "params": params,
+                        "lr": self.lr * ratio,
+                        "name": module_name,
+                    })
+        if not param_groups:
+            # fallback：模型未实现 get_parameters，使用所有权重
+            param_groups = [{"params": self.parameters()}]
+
+        optimizer = torch.optim.AdamW(
+            param_groups, lr=self.lr, weight_decay=self.weight_decay)
         self._optimizer_ = optimizer
         if self.warmup_steps <= 0:
             return optimizer

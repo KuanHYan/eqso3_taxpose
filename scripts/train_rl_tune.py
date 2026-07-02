@@ -239,11 +239,7 @@ def main(cfg):
         "weight_decay": cfg.training.weight_decay,
     }
     trainer.print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_step: {cfg.training.warmup_ratio*lr_scheduler_total_steps}")
-    if cfg.debug:
-        from torch.utils.tensorboard.writer import SummaryWriter
-        tensorboard_writer = SummaryWriter()
-    else:
-        tensorboard_writer = None
+
     model = RLTrainingModule(
         network,
         lr=cfg.training.lr,
@@ -255,7 +251,7 @@ def main(cfg):
         update_base_every=cfg.rl.update_base_every,
         grpo_iter=cfg.rl.grpo_iter,
         optimization_mode=cfg.training.optimization_mode,
-        tensorboard_writer=tensorboard_writer
+        debug=cfg.debug
     )
 
     model.cuda()

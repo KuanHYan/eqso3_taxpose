@@ -9,15 +9,144 @@ from taxpose.nets.dgcnn_gc import DGCNN_GC
 from taxpose.nets.pointnet import PointNet
 from taxpose.utils.se3 import dualflow2pose
 from third_party.dcp.model import (
-    Decoder,
-    DecoderLayer,
-    Encoder,
-    EncoderDecoder,
-    EncoderLayer,
     PositionwiseFeedForward,
-    MultiHeadedAttention
+    SublayerConnection,
+    clones,
 )
-from taxpose.nets.huggingface_tf import MHAttention, LinearMHAttention
+from taxpose.nets.huggingface_tf import LinearMHAttnWithKNN, MHAttention, LinearMHAttention, MHAttnWithKNN
+
+
+def knn_index_to_mask(knn_index, num_points, device):
+    """将 KNN 索引 (B, N, K) 转换为注意力掩码 (B, N, N).
+    邻居位置为 0，非邻居位置为 -inf.
+    """
+    B, N, K = knn_index.shape
+    mask = torch.full((B, N, N), float('-inf'), device=device)
+    batch_idx = torch.arange(B, device=device).view(-1, 1, 1).expand(B, N, K)
+    point_idx = torch.arange(N, device=device).view(1, -1, 1).expand(B, N, K)
+    mask[batch_idx, point_idx, knn_index] = 0.0
+    return mask
+
+
+class EncoderLayer(nn.Module):
+    """支持 knn_index 的 EncoderLayer。
+
+    若传入 knn_index，自注意力将仅关注 K 近邻点；
+    否则为全注意力。
+    """
+
+    def __init__(self, size, self_attn, feed_forward, dropout):
+        super(EncoderLayer, self).__init__()
+        self.self_attn = self_attn
+        self.feed_forward = feed_forward
+        self.sublayer = clones(SublayerConnection(size, dropout), 2)
+        self.size = size
+
+    def forward(self, x, mask=None, knn_index=None):
+        # 若提供了 knn_index，构造局部注意力掩码
+        local_mask = mask
+        # if knn_index is not None:
+        #     B, N, _ = knn_index.shape
+        #     knn_mask = knn_index_to_mask(knn_index, N, x.device)
+        #     local_mask = knn_mask if mask is None else mask + knn_mask
+
+        x = self.sublayer[0](x, 
+                    lambda x: self.self_attn(x, x, x, local_mask, knn_index))
+        return self.sublayer[1](x, self.feed_forward)
+
+
+class Encoder(nn.Module):
+    """支持 knn_index 的 Encoder。"""
+
+    def __init__(self, layer, N):
+        super(Encoder, self).__init__()
+        self.layers = clones(layer, N)
+        self.norm = nn.LayerNorm(layer.size)
+
+    def forward(self, x, mask=None, knn_index=None):
+        for layer in self.layers:
+            x = layer(x, mask, knn_index)
+        return self.norm(x)
+
+
+class DecoderLayer(nn.Module):
+    """支持 knn_index 的 DecoderLayer。
+
+    自注意力可使用 knn_index 做局部约束；
+    src-attn 保持全注意力（跨点云匹配不应限制邻居）。
+    """
+
+    def __init__(self, size, self_attn, src_attn, feed_forward, dropout):
+        super(DecoderLayer, self).__init__()
+        self.size = size
+        self.self_attn = self_attn
+        self.src_attn = src_attn
+        self.feed_forward = feed_forward
+        self.sublayer = clones(SublayerConnection(size, dropout), 3)
+
+    def forward(self, x, memory, src_mask=None, tgt_mask=None, knn_index=None):
+        # self-attn: 可使用 knn_index 限制邻域
+        lc_tgt_mask = tgt_mask
+        # if knn_index is not None:
+        #     B, N, _ = knn_index.shape
+        #     knn_mask = knn_index_to_mask(knn_index, N, x.device)
+        #     lc_tgt_mask = knn_mask if tgt_mask is None else tgt_mask + knn_mask
+
+        m = memory
+        x = self.sublayer[0](x,
+                    lambda x: self.self_attn(x, x, x, lc_tgt_mask, knn_index))
+        # src-attn: 全注意力（跨点云匹配）
+        x = self.sublayer[1](x,
+                             lambda x: self.src_attn(x, m, m, src_mask))
+        return self.sublayer[2](x, self.feed_forward)
+
+
+class Decoder(nn.Module):
+    """支持 knn_index 的 Decoder。"""
+
+    def __init__(self, layer, N):
+        super(Decoder, self).__init__()
+        self.layers = clones(layer, N)
+        self.norm = nn.LayerNorm(layer.size)
+
+    def forward(self, x, memory, src_mask=None, tgt_mask=None, knn_index=None):
+        for layer in self.layers:
+            x = layer(x, memory, src_mask, tgt_mask, knn_index)
+        return self.norm(x)
+
+
+class EncoderDecoder(nn.Module):
+    """
+    A standard Encoder-Decoder architecture. Base for this and many
+    other models.
+    """
+
+    def __init__(self, encoder, decoder, src_embed, tgt_embed, generator):
+        super(EncoderDecoder, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_embed = src_embed
+        self.tgt_embed = tgt_embed
+        self.generator = generator
+
+    def forward(self, src, tgt, src_mask, tgt_mask, knn_index=None):
+        "Take in and process masked src and target sequences."
+        return self.decode(
+            self.encode(src, src_mask, knn_index=knn_index), src_mask,
+            tgt, tgt_mask,
+            knn_index=knn_index
+        )
+
+    def encode(self, src, src_mask, knn_index=None):
+        return self.encoder(self.src_embed(src), src_mask, knn_index=knn_index)
+
+    def decode(self, memory, src_mask, tgt, tgt_mask, knn_index=None):
+        return self.generator(
+            self.decoder(
+                self.tgt_embed(tgt), memory,
+                src_mask, tgt_mask,
+                knn_index=knn_index
+            ))
 
 
 class CustomTransformer(nn.Module):
@@ -36,7 +165,8 @@ class CustomTransformer(nn.Module):
         n_heads=4,
         return_attn=False,
         bidirectional=True,
-        attn_mode="torch.nn"
+        attn_mode="torch_attn",
+        **kwargs
     ):
         super(CustomTransformer, self).__init__()
         self.emb_dims = emb_dims
@@ -50,16 +180,19 @@ class CustomTransformer(nn.Module):
         c = copy.deepcopy
         if self.attn_mode == "linear":
             attn_class = LinearMHAttention
-        elif self.attn_mode == "torch_attn":
-            attn_class = MHAttention
+        elif self.attn_mode == "linear_with_knn":
+            attn_class = LinearMHAttnWithKNN
+        elif self.attn_mode == "torch_attn_with_knn":
+            attn_class = MHAttnWithKNN
         else:
-            attn_class = MultiHeadedAttention
+            attn_class = MHAttention
 
         attn = attn_class(
             self.n_heads,
             self.emb_dims,
             dropout=self.dropout,
-            project_bias=False
+            project_bias=False,
+            need_weights=self.return_attn
         )
         ff = PositionwiseFeedForward(self.emb_dims, self.ff_dims, self.dropout)
         self.model = EncoderDecoder(
@@ -73,28 +206,35 @@ class CustomTransformer(nn.Module):
             nn.Sequential(),
         )
 
-    def get_attn_scores(self, query_emb, tgt_emb, seq_dim=1):
+    def get_attn_scores(self, query_emb, tgt_emb, seq_dim=1, knn_index=None):
+        assert self.return_attn, "return_attn must be True to get attention scores"
         if seq_dim == 2:
             query_emb = query_emb.transpose(2, 1).contiguous()  # (batch, seq, channels)
             tgt_emb = tgt_emb.transpose(2, 1).contiguous()
 
-        emb = self.model.forward(query_emb, tgt_emb, None, None).transpose(2, 1).contiguous()
+        emb = self.model.forward(
+            query_emb, tgt_emb, None, None,
+            knn_index=knn_index).transpose(2, 1).contiguous()
         src_attn = self.model.decoder.layers[-1].src_attn.attn
         return src_attn.mean(dim=1), emb  # B, H, N, M --> B, N, M
 
     def forward(self, *input):
         query = input[0]
         key = input[1]
-        src_embedding = self.model.forward(key, query, None, None).transpose(2, 1).contiguous()
-        src_attn = self.model.decoder.layers[-1].src_attn.attn
+        knn_index = input[2] if len(input) > 2 else None
+        src_embedding = self.model.forward(
+            key, query, None, None,
+            knn_index=knn_index).transpose(2, 1).contiguous()
+
+        src_attn = self.model.decoder.layers[-1].src_attn.attn if self.return_attn else None
 
         outputs = {"src_embedding": src_embedding, "src_attn": src_attn}
 
         if self.bidirectional:
             tgt_embedding = (
-                self.model(query, key, None, None).transpose(2, 1).contiguous()
+                self.model(query, key, None, None, knn_index=knn_index).transpose(2, 1).contiguous()
             )
-            tgt_attn = self.model.decoder.layers[-1].src_attn.attn
+            tgt_attn = self.model.decoder.layers[-1].src_attn.attn if self.return_attn else None
 
             outputs = {
                 **outputs,
@@ -105,260 +245,3 @@ class CustomTransformer(nn.Module):
         return outputs
 
 
-class ResidualMLPHead(nn.Module):
-    """
-    Base ResidualMLPHead with flow calculated as
-    v_i = f(\phi_i) + \tilde{y}_i - x_i
-    """
-
-    def __init__(self, emb_dims=512, pred_weight=True):
-        super(ResidualMLPHead, self).__init__()
-
-        self.emb_dims = emb_dims
-        if self.emb_dims < 10:
-            self.proj_flow = nn.Sequential(
-                PointNet([emb_dims, 64, 64, 64, 128, 512]),
-                # PointNet([emb_dims, emb_dims//2, emb_dims//4, emb_dims//8]),
-                nn.Conv1d(512, 1, kernel_size=1, bias=False),
-            )
-        else:
-            self.proj_flow = nn.Sequential(
-                PointNet([emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8]),
-                nn.Conv1d(emb_dims // 8, 3, kernel_size=1, bias=False),
-            )
-        self.pred_weight = pred_weight
-        if self.pred_weight:
-            self.proj_flow_weight = nn.Sequential(
-                PointNet([emb_dims, 64, 64, 64, 128, 512]),
-                # PointNet([emb_dims, emb_dims//2, emb_dims//4, emb_dims//8]),
-                nn.Conv1d(512, 1, kernel_size=1, bias=False),
-            )
-
-    def forward(self, *input, scores=None, return_flow_component=False):
-        action_embedding = input[0]
-        anchor_embedding = input[1]
-        action_points = input[2]
-        anchor_points = input[3]
-
-        if scores is None:
-            if len(input) <= 4:
-                action_query = action_embedding
-                anchor_key = anchor_embedding
-            else:
-                action_query = input[4]
-                anchor_key = input[5]
-
-            d_k = action_query.size(1)
-            scores = torch.matmul(
-                action_query.transpose(2, 1).contiguous(), anchor_key
-            ) / math.sqrt(d_k)
-            # W_i # B, N, N (N=number of points, 1024 cur)
-            scores = torch.softmax(scores, dim=2)
-
-        corr_points = torch.matmul(anchor_points, scores.transpose(2, 1).contiguous())
-        # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
-        corr_flow = corr_points - action_points
-
-        embedding = action_embedding  # B,512,N
-        residual_flow = self.proj_flow(embedding)  # B,3,N
-
-        # # Added for debug purpose
-        # if return_flow_component:
-        #     return {'residual_flow': residual_flow,
-        #             'corr_flow': corr_flow,
-        #             'full_flow': residual_flow + corr_flow}
-
-        flow = residual_flow + corr_flow
-        if self.pred_weight:
-            # print("ResidualMLPHead: PRODUCING SVD WEIGHTS!!!!")
-            weight = self.proj_flow_weight(action_embedding)
-            corr_flow_weight = torch.concat([flow, weight], dim=1)
-        else:
-            corr_flow_weight = flow
-
-        return corr_flow_weight
-
-
-class ResidualFlow_DiffEmbTransformer(nn.Module):
-    def __init__(
-        self,
-        emb_dims=512,
-        cycle=True,
-        emb_nn="dgcnn",
-        return_flow_component=False,
-        center_feature=True,
-        inital_sampling_ratio=1.0,
-        pred_weight=True,
-        gc=False,
-    ):
-        super(ResidualFlow_DiffEmbTransformer, self).__init__()
-        self.emb_dims = emb_dims
-        self.cycle = cycle
-        if emb_nn == "pointnet":
-            # TODO: Probably want to swap for the original version.
-            self.emb_nn_action = PointNet()
-            self.emb_nn_anchor = PointNet()
-        elif emb_nn == "dgcnn":
-            self.emb_nn_action = DGCNN_GC(emb_dims=self.emb_dims, gc=gc)
-            self.emb_nn_anchor = DGCNN_GC(emb_dims=self.emb_dims, gc=gc)
-        # elif emb_nn == "vn":
-        #     self.emb_nn_action = VN_PointNet()
-        #     self.emb_nn_anchor = VN_PointNet()
-        else:
-            raise ValueError("Not implemented")
-        self.return_flow_component = return_flow_component
-        self.center_feature = center_feature
-        self.pred_weight = pred_weight
-
-        self.transformer_action = CustomTransformer(
-            emb_dims=emb_dims, return_attn=True, bidirectional=False
-        )
-        self.transformer_anchor = CustomTransformer(
-            emb_dims=emb_dims, return_attn=True, bidirectional=False
-        )
-        self.head_action = ResidualMLPHead(
-            emb_dims=emb_dims, pred_weight=self.pred_weight
-        )
-        self.head_anchor = ResidualMLPHead(
-            emb_dims=emb_dims, pred_weight=self.pred_weight
-        )
-
-    def forward(self, *input):
-        action_points = input[0].permute(0, 2, 1).contiguous()  # B,3,num_points
-        anchor_points = input[1].permute(0, 2, 1).contiguous()
-        if len(input) == 3:
-            cat = input[2]
-        else:
-            cat = None
-        action_points_dmean = action_points - action_points.mean(dim=2, keepdim=True)
-        anchor_points_dmean = anchor_points - anchor_points.mean(dim=2, keepdim=True)
-        # mean center point cloud before DGCNN
-        if not self.center_feature:
-            action_points_dmean = action_points
-            anchor_points_dmean = anchor_points
-        action_embedding = self.emb_nn_action(action_points_dmean, cat)
-        anchor_embedding = self.emb_nn_anchor(anchor_points_dmean, cat)
-
-        # tilde_phi, phi are both B,512,N
-        action_embedding_tf, action_attn = self.transformer_action(
-            action_embedding, anchor_embedding
-        )
-        anchor_embedding_tf, anchor_attn = self.transformer_anchor(
-            anchor_embedding, action_embedding
-        )
-
-        action_embedding_tf = action_embedding + action_embedding_tf
-        anchor_embedding_tf = anchor_embedding + anchor_embedding_tf
-
-        action_attn = action_attn.mean(dim=1)
-        if self.return_flow_component:
-            flow_output_action = self.head_action(
-                action_embedding_tf,
-                anchor_embedding_tf,
-                action_points,
-                anchor_points,
-                scores=action_attn,
-                return_flow_component=self.return_flow_component,
-            )
-            flow_action = flow_output_action["full_flow"].permute(0, 2, 1).contiguous()
-            residual_flow_action = flow_output_action["residual_flow"].permute(0, 2, 1).contiguous()
-            corr_flow_action = flow_output_action["corr_flow"].permute(0, 2, 1).contiguous()
-        else:
-            flow_action = self.head_action(
-                action_embedding_tf,
-                anchor_embedding_tf,
-                action_points,
-                anchor_points,
-                scores=action_attn,
-                return_flow_component=self.return_flow_component,
-            ).permute(0, 2, 1).contiguous()
-
-        if self.cycle:
-            anchor_attn = anchor_attn.mean(dim=1)
-            if self.return_flow_component:
-                flow_output_anchor = self.head_anchor(
-                    anchor_embedding_tf,
-                    action_embedding_tf,
-                    anchor_points,
-                    action_points,
-                    scores=anchor_attn,
-                    return_flow_component=self.return_flow_component,
-                )
-                flow_anchor = flow_output_anchor["full_flow"].permute(0, 2, 1).contiguous()
-                residual_flow_anchor = flow_output_anchor["residual_flow"].permute(
-                    0, 2, 1
-                ).contiguous()
-                corr_flow_anchor = flow_output_anchor["corr_flow"].permute(0, 2, 1).contiguous()
-            else:
-                flow_anchor = self.head_anchor(
-                    anchor_embedding_tf,
-                    action_embedding_tf,
-                    anchor_points,
-                    action_points,
-                    scores=anchor_attn,
-                    return_flow_component=self.return_flow_component,
-                ).permute(0, 2, 1).contiguous()
-            if self.return_flow_component:
-                return {
-                    "flow_action": flow_action,
-                    "flow_anchor": flow_anchor,
-                    "residual_flow_action": residual_flow_action,
-                    "residual_flow_anchor": residual_flow_anchor,
-                    "corr_flow_action": corr_flow_action,
-                    "corr_flow_anchor": corr_flow_anchor,
-                }
-            else:
-                return flow_action, flow_anchor
-        if self.return_flow_component:
-            return {
-                "flow_action": flow_action,
-                "residual_flow_action": residual_flow_action,
-                "corr_flow_action": corr_flow_action,
-            }
-
-
-def extract_flow_and_weight(x, sigmoid_on=False):
-    # x: Batch, num_points, 4
-    pred_flow = x[:, :, :3]
-    if x.shape[2] > 3:
-        if sigmoid_on:
-            pred_w = torch.sigmoid(x[:, :, 3])
-        else:
-            pred_w = x[:, :, 3]
-    else:
-        pred_w = None
-    return pred_flow, pred_w
-
-
-class BrianChuerAdapter(nn.Module):
-    def __init__(self, emb_dims=512, gc=False):
-        super().__init__()
-        self.model = ResidualFlow_DiffEmbTransformer(emb_dims, gc=gc)
-        self.weight_normalize = "l1"
-        self.softmax_temperature = None
-
-    def forward(self, X, Y, cat=None):
-        Fx, Fy = self.model(X, Y, cat)
-
-        Fx, pred_w_action = extract_flow_and_weight(Fx, True)
-        Fy, pred_w_anchor = extract_flow_and_weight(Fy, True)
-
-        pred_T_action = dualflow2pose(
-            xyz_src=X,
-            xyz_tgt=Y,
-            flow_src=Fx,
-            flow_tgt=Fy,
-            weights_src=pred_w_action,
-            weights_tgt=pred_w_anchor,
-            return_transform3d=True,
-            normalization_scehme=self.weight_normalize,
-            temperature=self.softmax_temperature,
-        )
-
-        # It's weirdly structured...
-        mat = pred_T_action.get_matrix().transpose(-1, -2)
-
-        R_pred = mat[:, :3, :3]
-        t_pred = mat[:, :3, 3]
-
-        return R_pred, t_pred, pred_T_action, Fx, Fy

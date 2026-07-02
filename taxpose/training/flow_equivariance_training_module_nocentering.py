@@ -57,21 +57,28 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         softmax_temperature=None,
         flow_supervision="both",  # ('both', 'action2anchor', 'anchor2action')
         tr_super_time_ratio=0.0,
-        point_cloud_loss: str = "MSE",
-        tensorboard_writer=None,
+        point_cloud_loss: str = "MSE_SUM",
+        debug=False,
         optimization_mode: str = "auto",
     ):
         super().__init__(
             model=model,
             lr=lr,
             image_log_period=image_log_period,
-            tensorboard_writer=tensorboard_writer,
+            debug=debug,
             optimization_mode=optimization_mode,
             **lr_cfg,
         )
-        self.point_cloud_loss = PointCloudLoss(point_cloud_loss, reduction="sum")
-        self.dense_flow_loss = PointCloudLoss("MSE", reduction="sum")
-        self.smooth_flow_loss = PointCloudLoss(point_cloud_loss, reduction="sum")
+
+        if '_' in point_cloud_loss:
+            loss_mode = point_cloud_loss.split('_')
+            pc_loss, red = loss_mode[0], str.lower(loss_mode[1])
+        else:
+            red = "sum"
+            pc_loss = point_cloud_loss
+        self.point_cloud_loss = PointCloudLoss(pc_loss, reduction=red)
+        self.dense_flow_loss = PointCloudLoss("MSE", reduction=red)
+        self.smooth_flow_loss = PointCloudLoss(pc_loss, reduction=red)
         self.model = model
         self.lr = lr
         self.image_log_period = image_log_period
@@ -181,7 +188,22 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             error_t_max, error_t_min, error_t_mean = get_translation(
                 T0.inverse().compose(T1).compose(pred_T_action.inverse())
             )
-
+            if "hook_trans_T" in model_output:
+                hook_trans_T = model_output["hook_trans_T"]
+                for i, Ti in enumerate(hook_trans_T):
+                    error_R_i = get_degree_angle(
+                        T0.inverse().compose(T1).compose(Ti.inverse())
+                    )[-1]
+                    error_t_i = get_translation(
+                        T0.inverse().compose(T1).compose(Ti.inverse())
+                    )[-1]
+                    log_values[f"{loss_prefix}error_R_stage{i}"] = error_R_i
+                    log_values[f"{loss_prefix}error_t_stage{i}"] = error_t_i
+            if "observing_deltaT" in model_output:
+                observing_deltaT = model_output["observing_deltaT"]
+                for i, (theta_i, delta_t_i) in enumerate(observing_deltaT):
+                    log_values[f"{loss_prefix}delta_theta_stage{i}"] = (theta_i / torch.pi * 180.0).mean()
+                    log_values[f"{loss_prefix}delta_t_stage{i}"] = (delta_t_i).mean()
             # Loss associated with ground truth transform
             pred_points_action = pred_T_action.transform_points(points_trans_action)
             points_action_target = T1.transform_points(points_action)

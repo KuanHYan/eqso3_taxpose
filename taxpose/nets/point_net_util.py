@@ -71,10 +71,10 @@ def get_graph_feature(x_q, x_k=None, k=20, coord_q=None, coord_k=None):
     idx = idx.view(-1)
     
     feature = x_k.view(batch_size * num_points_k, -1)[idx, :]
-    feature = feature.view(batch_size, k, num_points_q, num_dims).permute(0, 3, 2, 1).contiguous()
-    x_q = x_q.view(batch_size, num_points_q, 1, num_dims).expand(-1, -1, k, -1).permute(0, 3, 1, 2).contiguous()
-    feature = torch.cat((feature - x_q, x_q), dim=1)
-    return feature
+    feature = feature.view(batch_size, k, num_points_q, num_dims)
+    x_q = x_q.view(batch_size, 1, num_points_q, num_dims).expand(-1, k, -1, -1)
+    feature = torch.cat((feature - x_q, x_q), dim=-1)
+    return feature.permute(0, 3, 2, 1).contiguous()
 
 
 def get_graph_feature_for_vndgcnn(x, k=20, idx=None, x_coord=None):

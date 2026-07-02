@@ -24,13 +24,13 @@ class RLRewardTrainingModule(PointCloudTrainingModule):
         },
         sigmoid_on=False,
         point_cloud_loss: str = "CD",
-        tensorboard_writer=None,
+        debug=False,
         optimization_mode: str = "auto",
     ):
         super().__init__(
             model=model,
             lr=lr,
-            tensorboard_writer=tensorboard_writer,
+            debug=debug,
             optimization_mode=optimization_mode,
             **lr_cfg,
         )

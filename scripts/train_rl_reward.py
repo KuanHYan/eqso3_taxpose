@@ -168,18 +168,14 @@ def main(cfg):
         'by_epoch': cfg.training.lr_scheduler_by_epoch,
     }
     print(f"lr_scheduler_total_steps: {lr_scheduler_total_steps}, warmup_ratio: {cfg.training.warmup_ratio}")
-    if cfg.debug:
-        from torch.utils.tensorboard.writer import SummaryWriter
-        tensorboard_writer = SummaryWriter()
-    else:
-        tensorboard_writer = None
+
     model = RLRewardTrainingModule(
         network,
         lr=cfg.training.lr,
         lr_cfg=scheduler_cfg,
         sigmoid_on=cfg.training.sigmoid_on,
         point_cloud_loss=cfg.training.point_cloud_loss,
-        tensorboard_writer=tensorboard_writer
+        debug=cfg.debug
     )
 
     model.cuda()
