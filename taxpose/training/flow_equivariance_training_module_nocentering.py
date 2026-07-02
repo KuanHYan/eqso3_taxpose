@@ -566,13 +566,24 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
 
         forward_fun = self.model.forward if self.train else self.model.inference
         compute_loss = partial(self.compute_loss, batch=batch) if self.train else None
+        T0 = Transform3d(matrix=batch["T0"])
+        T1 = Transform3d(matrix=batch["T1"])
+        if self.debug:
+            gt_act_target = T1.transform_points(batch["points_action"])
+            gt_anch_target = T0.transform_points(batch["points_anchor"])
+        else:
+            gt_act_target = None
+            gt_anch_target = None
+
         model_output = forward_fun(
             points_trans_action,
             points_trans_anchor,
             action_features,
             anchor_features,
             phase_onehot,
-            compute_loss=compute_loss
+            compute_loss=compute_loss,
+            gt_act_target=gt_act_target,
+            gt_anch_target=gt_anch_target
         )
 
         log_values = {}

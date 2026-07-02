@@ -35,6 +35,7 @@ from pytorch3d.transforms import (
     so3_rotation_angle,
     so3_relative_angle
 )
+from pytorch3d.loss import chamfer_distance
 
 class EquivariantFeatureEmbeddingNetwork(nn.Module):
     def __init__(self, encoder_cfg):
@@ -1187,18 +1188,15 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
         )
         self.fine_tune_trans = fine_tune_trans
         if fine_tune_trans:
-            fine_tune_trans_context_in = emb_dims * 2 + 4
+            fine_tune_trans_context_in = emb_dims + 3 + 1
             # refine_hidden_dim = refine_hidden_dim * 2
             self.refine_trans_hidden_dim = refine_hidden_dim
 
             self.fine_tune_trans_context_encoder = nn.Sequential(
-                nn.Conv1d(fine_tune_trans_context_in, 2 * refine_hidden_dim, 1),
+                nn.Conv1d(fine_tune_trans_context_in, refine_hidden_dim, 1),
                 # nn.GroupNorm(gn_groups, refine_hidden_dim),
                 nn.ReLU(inplace=True),
-                nn.Conv1d(2 * refine_hidden_dim, refine_hidden_dim, 1),
-                nn.ReLU(inplace=True),
                 nn.Conv1d(refine_hidden_dim, refine_hidden_dim, 1),
-                nn.AdaptiveMaxPool1d(1)  # (B, H, N) → (B, H, 1)
             )
 
             # ── GRU 时序记忆 ──
@@ -1206,16 +1204,13 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
             self.fine_tune_trans_gru_anchor = nn.GRUCell(refine_hidden_dim, refine_hidden_dim)
 
             # ── delta 预测头: hidden → delta_flow(3) + [delta_weight(1)] ──
-            dim_trans = 6
+            # dim_trans = 6
             self.delta_rot_scale = 1.0 # 5 / 180 * torch.pi   # 可学习
             self.delta_trans_scale = 1.0 #0.01
             self.fine_tune_trans_delta_head = nn.Sequential(
-                nn.Linear(refine_hidden_dim * 2, refine_hidden_dim),
+                nn.Conv1d(refine_hidden_dim, refine_hidden_dim // 2, 1),
                 nn.ReLU(inplace=True),
-                nn.Linear(refine_hidden_dim, refine_hidden_dim // 2, 1),
-                nn.ReLU(inplace=True),
-                nn.Linear(refine_hidden_dim // 2, dim_trans, 1),
-                # nn.Tanh()
+                nn.Conv1d(refine_hidden_dim // 2, dim_flow, 1),
             )
 
     def get_parameters(self, module: str):
@@ -1307,6 +1302,7 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
                     xyz=action_bn3, flow=pf_a, weights=pw_a,
                     return_transform3d=True,
                     normalization_scehme='l1')
+            hook_trans_T.append(T)
             # ── Action 侧精调 ──
             rigid_a = T.transform_points(action_bn3) - action_bn3  # (B,N,3)
             error_a = rigid_a - pf_a                                      # (B,N,3)
@@ -1347,55 +1343,48 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
 
                 delta_b = self.delta_head(h_b).permute(0, 2, 1)
                 flow_anchor = flow_anchor + delta_b
-            hook_trans_T.append(T)
 
             if self.fine_tune_trans:
+                tgt_pt = kwargs.get("gt_act_target", anchor_bn3)
+                key_point_error: torch.Tensor = chamfer_distance(
+                    action_bn3, tgt_pt,
+                    batch_reduction=None, point_reduction=None,
+                    single_directional=True)[0]
                 ctx_act = torch.cat(
                     [
                         act_emb_tf.detach(),
-                        anchor_embedding.detach(),
-                        flow_action.transpose(1, 2),
+                        flow_action[:, :, :3].transpose(1, 2),
+                        # anchor_embedding.detach(),
+                        key_point_error.unsqueeze(1)
                     ], dim=1)
-                ctx_act = self.fine_tune_trans_context_encoder(ctx_act).squeeze(-1)          # (B, H)
-                h_trans_a = self.fine_tune_trans_gru_action(ctx_act, h_trans_a)  # (B, H)
+                ctx_act = self.fine_tune_trans_context_encoder(ctx_act)  # (B, H, N)
+                flat = ctx_act.permute(0, 2, 1).reshape(B * N, -1)
+                h_flat = h_trans_a.permute(0, 2, 1).reshape(B * N, -1)
+                new_ = self.gru_action(flat, h_flat)
+                h_trans_a = new_.reshape(B, N, -1).permute(0, 2, 1)
+
+                delta_a = self.fine_tune_trans_delta_head(h_trans_a).permute(0, 2, 1)              # (B,N,4)
+                flow_action = flow_action + delta_a
                 
                 if has_anchor:
+                    tgt_pt = kwargs.get("gt_anch_target", action_bn3)
+                    key_point_error_b: torch.Tensor = chamfer_distance(
+                        anchor_bn3, tgt_pt,
+                        batch_reduction=None, point_reduction=None,
+                        single_directional=True)[0]
                     ctx_anch = torch.cat(
                         [
                             anchor_emb_tf.detach(),
-                            action_embedding.detach(),
-                            flow_anchor.transpose(1, 2),
+                            flow_anchor[:, :, :3].transpose(1, 2),
+                            key_point_error_b.unsqueeze(1),
                         ], dim=1)
-                    ctx_anch = self.fine_tune_trans_context_encoder(ctx_anch).squeeze(-1)          # (B, H)
-                    h_trans_b = self.fine_tune_trans_gru_anchor(ctx_anch, h_trans_b)
-                
-                delta_se3 = self.fine_tune_trans_delta_head(
-                    torch.cat([h_trans_a, h_trans_b], dim=1))         # (B, 6)
-                # NOTE: 使用 6D元素表达旋转会导致初始角度太大
-                # delta_R = axis_angle_to_matrix(delta_se3[:, :3] * self.delta_rot_scale)  # (B, 3, 3)
-                # Try ℝ³ → S³ (轴角 → 四元数)
-                epsilon = delta_se3[:, :3] * self.delta_rot_scale
-                theta = epsilon.norm(p=2, dim=-1, keepdim=True)     # (B, 1)
-                safe_theta = torch.where(theta < 1e-8, torch.ones_like(theta), theta)
-                axis = epsilon / safe_theta                          # (B, 3)
-                cos_half = torch.cos(theta / 2.0)
-                sin_half = torch.sin(theta / 2.0)
-                delta_q = torch.cat([cos_half, sin_half * axis], dim=-1)  # (B, 4)
-                delta_R = quaternion_to_matrix(delta_q)
-                delta_t = delta_se3[:, 3:] * self.delta_trans_scale       # (B, 3)
-                # reg_loss = 0.01 * (
-                #     delta_se3[:, :3].norm(dim=-1).mean() +   # 旋转角度范数
-                #     delta_se3[:, 3:].norm(dim=-1).mean()     # 平移范数
-                # )
-                delta_T = Rotate(delta_R).translate(delta_t)
-                # T = T.compose(delta_T)
-                flow_act_trans = delta_T.transform_normals(flow_action[:, :, :3])
-                flow_action = torch.cat([flow_act_trans, flow_action[:, :, 3:]], dim=-1)
-                if has_anchor:
-                    inverse_delta_T = delta_T.inverse()
-                    flow_anch_trans = inverse_delta_T.transform_normals(flow_anchor[:, :, :3])
-                    flow_anchor = torch.cat([flow_anch_trans, flow_anchor[:, :, 3:]], dim=-1)
-                # outputs['tuned_T'] = T
+                    ctx_anch = self.fine_tune_trans_context_encoder(ctx_anch)         # (B, H)
+                    flat = ctx_anch.permute(0, 2, 1).reshape(B * N, -1)
+                    h_flat = h_trans_b.permute(0, 2, 1).reshape(B * N, -1)
+                    new_ = self.gru_anchor(flat, h_flat)
+                    h_trans_b = new_.reshape(B, N, -1).permute(0, 2, 1)
+                    delta_b = self.fine_tune_trans_delta_head(h_trans_b).permute(0, 2, 1)
+                    flow_anchor = flow_anchor + delta_b
 
                 # outputs["flow_action"] = flow_action
                 # if has_anchor:
@@ -1405,8 +1394,6 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
                 #     refined_loss, _ = kwargs["compute_loss"](outputs)
                 #     refined_loss_list.append(sum(refined_loss) / self.num_refine_steps)
 
-                observing_deltaT += [(theta.detach(), delta_t.detach())]
-                hook_trans_T.append(T.compose(delta_T))
             outputs["flow_action"] = flow_action
             if has_anchor:
                 outputs["flow_anchor"] = flow_anchor
@@ -1416,7 +1403,8 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
 
         # Hook to save trans, which are used to observe the T each fine-tune step
         outputs.update(hook_trans_T=hook_trans_T)
-        outputs.update(observing_deltaT=observing_deltaT)
+        if len(observing_deltaT) > 0:
+            outputs.update(observing_deltaT=observing_deltaT)
 
         if "compute_loss" in kwargs:
             outputs.update(coarse_loss=coarse_loss)
