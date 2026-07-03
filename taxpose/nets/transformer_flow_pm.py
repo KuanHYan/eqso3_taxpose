@@ -218,10 +218,10 @@ class CustomTransformer(nn.Module):
         src_attn = self.model.decoder.layers[-1].src_attn.attn
         return src_attn.mean(dim=1), emb  # B, H, N, M --> B, N, M
 
-    def forward(self, *input):
+    def forward(self, *input, knn_index=None):
         query = input[0]
         key = input[1]
-        knn_index = input[2] if len(input) > 2 else None
+
         src_embedding = self.model.forward(
             key, query, None, None,
             knn_index=knn_index).transpose(2, 1).contiguous()

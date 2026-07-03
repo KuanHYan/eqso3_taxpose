@@ -12,7 +12,7 @@ def get_graph_feature(feas, idx):
     """
     batch_size, num_points, num_dims = feas.size()
     k = idx.shape[-1]
-    idx = idx.transpose(-1, -2).contiguous()  # B K N
+    idx = idx.detach().transpose(-1, -2).contiguous()  # B K N
 
     idx_base = torch.arange(0, batch_size, device=feas.device).view(-1, 1, 1) * num_points
     idx = idx + idx_base
