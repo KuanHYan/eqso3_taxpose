@@ -50,8 +50,8 @@ class EncoderLayer(nn.Module):
         #     knn_mask = knn_index_to_mask(knn_index, N, x.device)
         #     local_mask = knn_mask if mask is None else mask + knn_mask
 
-        x = self.sublayer[0](x, 
-                    lambda x: self.self_attn(x, x, x, local_mask, knn_index))
+        x = self.sublayer[0](x,
+                    lambda x: self.self_attn(x, x, x, mask=local_mask, knn_index=knn_index))
         return self.sublayer[1](x, self.feed_forward)
 
 
@@ -94,10 +94,10 @@ class DecoderLayer(nn.Module):
 
         m = memory
         x = self.sublayer[0](x,
-                    lambda x: self.self_attn(x, x, x, lc_tgt_mask, knn_index))
+                    lambda x: self.self_attn(x, x, x, mask=lc_tgt_mask, knn_index=knn_index))
         # src-attn: 全注意力（跨点云匹配）
         x = self.sublayer[1](x,
-                             lambda x: self.src_attn(x, m, m, src_mask))
+                             lambda x: self.src_attn(x, m, m, mask=src_mask))
         return self.sublayer[2](x, self.feed_forward)
 
 

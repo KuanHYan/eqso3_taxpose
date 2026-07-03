@@ -121,7 +121,7 @@ class MHAttention(nn.Module):
         )
         self.need_weights = need_weights
 
-    def forward(self, query, key, value, mask=None):
+    def forward(self, query, key, value, **kwargs):
         x, self.attn = self.attn_net.forward(
             query, key, value,
             need_weights=self.need_weights, average_attn_weights=False
@@ -191,7 +191,7 @@ class LinearMHAttention(nn.Module):
         return F.elu(x) + 1.0
 
     def forward(self, query: torch.Tensor, key: torch.Tensor,
-                value: torch.Tensor, mask=None):
+                value: torch.Tensor, **kwargs):
         """Forward pass.
 
         Args:

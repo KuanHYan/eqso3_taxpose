@@ -52,7 +52,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.freeze_embnn=True \
     model.dropout=0.1 \
     model.n_blocks=1 \
-    model.attn_mode="torch_attn_with_knn" \
+    model.attn_mode="linear_attn" \
     model.pos_encoding=$ENCODEING \
     model.fine_tune=False \
     model.num_refine_steps=3 \
