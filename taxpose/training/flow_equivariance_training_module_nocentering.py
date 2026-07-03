@@ -72,13 +72,13 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
 
         if '_' in point_cloud_loss:
             loss_mode = point_cloud_loss.split('_')
-            pc_loss, red = loss_mode[0], str.lower(loss_mode[1])
+            pc_loss, reduc = loss_mode[0], str.lower(loss_mode[1])
         else:
-            red = "sum"
+            reduc = "sum"
             pc_loss = point_cloud_loss
-        self.point_cloud_loss = PointCloudLoss(pc_loss, reduction=red)
-        self.dense_flow_loss = PointCloudLoss("MSE", reduction=red)
-        self.smooth_flow_loss = PointCloudLoss(pc_loss, reduction=red)
+        self.point_cloud_loss = PointCloudLoss(pc_loss, reduction=reduc)
+        self.dense_flow_loss = PointCloudLoss(pc_loss, reduction=reduc)
+        self.smooth_flow_loss = PointCloudLoss(pc_loss, reduction=reduc)
         self.model = model
         self.lr = lr
         self.image_log_period = image_log_period

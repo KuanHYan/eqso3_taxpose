@@ -13,8 +13,10 @@ cd "$ROOT_DIR" || exit 1
 
 # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
+export MANUAL_CLIP_GRAD=False
+
 ENCODEING=False
-POINTS=768
+POINTS=700
 DATA_POINTS_N=1024
 EMB_DIM=384
 
@@ -61,9 +63,9 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.encoder.emb_dims=$EMB_DIM \
     model.encoder.pos_encoding=$ENCODEING \
     model.encoder.output_num=$POINTS \
-    model.head.head_type=residual \
-    model.head.project_corrs=True \
-    model.head.project_corrs_mode="vn" \
+    model.head.head_type=vn_residual \
+    model.head.project_corrs=False \
+    model.head.project_corrs_mode="mlp" \
     model.head.norm=LN \
     model.head.head_bias=False \
     model.head.residual_on=True \
@@ -73,7 +75,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     'model.pretraining.action.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
     'model.pretraining.anchor.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
     wandb.offline=$EVAL \
-    debug=False \
+    debug=True \
     eval=$EVAL \
     resume_ckpt=$RESUME_CKPT
 exit 1

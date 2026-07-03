@@ -173,7 +173,9 @@ def mean_pool(x, dim=-1, keepdim=False):
 
 
 class VNStdFeature(nn.Module):
-    def __init__(self, in_channels, dim=4, normalize_frame=False, share_nonlinearity=False, negative_slope=0.2):
+    def __init__(self, in_channels, dim=4,
+                 normalize_frame=False, global_frame=False,
+                 share_nonlinearity=False, negative_slope=0.2):
         super(VNStdFeature, self).__init__()
         self.dim = dim
         self.normalize_frame = normalize_frame
@@ -184,7 +186,8 @@ class VNStdFeature(nn.Module):
             self.vn_lin = nn.Linear(in_channels//4, 2, bias=False)
         else:
             self.vn_lin = nn.Linear(in_channels//4, 3, bias=False)
-    
+        self.global_frame = global_frame
+
     def forward(self, x):
         '''
         x: point features of shape [B, N_feat, 3, N_samples, ...]
@@ -192,8 +195,10 @@ class VNStdFeature(nn.Module):
         z0 = x
         z0 = self.vn1(z0)
         z0 = self.vn2(z0)
+        if self.global_frame:
+            z0 = mean_pool(z0, dim=-1, keepdim=True)
         z0 = self.vn_lin(z0.transpose(1, -1)).transpose(1, -1).contiguous()
-        
+
         if self.normalize_frame:
             # make z0 orthogonal. u2 = v2 - proj_u1(v2)
             v1 = z0[:,0,:]
@@ -211,7 +216,10 @@ class VNStdFeature(nn.Module):
             z0 = torch.stack([u1, u2, u3], dim=1).transpose(1, 2).contiguous()
         else:
             z0 = z0.transpose(1, 2).contiguous()
-        
+
+        if self.global_frame:
+            z0 = z0.expand(-1, -1, -1, x.size(-1))
+
         if self.dim == 4:
             x_std = torch.einsum('bijm,bjkm->bikm', x, z0)
         elif self.dim == 3:

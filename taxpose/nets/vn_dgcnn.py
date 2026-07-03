@@ -51,6 +51,29 @@ class VN4Head(VNLinearAndLeakyReLU):
         return x.squeeze(-1).transpose(2, 1).contiguous()
 
 
+class CoordBasedStdFeature(nn.Module):
+    """从点坐标直接预测规范坐标系，绕过特征编码。"""
+    def __init__(self, hidden_dim=64):
+        super().__init__()
+        # 对坐标做 VN 卷积来预测 z0（类似 PointNet 但保持 SO(3) 等变）
+        self.vn_conv = nn.Sequential(
+            VNLinearLeakyReLU(1, hidden_dim//4, dim=4, share_nonlinearity=False),
+            VNLinearLeakyReLU(hidden_dim//4, hidden_dim//4, dim=4, share_nonlinearity=False),
+        )
+        self.vn_lin = nn.Linear(hidden_dim//4, 3, bias=False)
+
+    def forward(self, coords):
+        # coords: (B, 3, N) → (B, 1, 3, N)
+        x = coords.unsqueeze(1)
+        # VN 卷积
+        x = self.vn_conv(x)
+        # 全局池化 → 单一坐标系
+        x = x.mean(dim=-1, keepdim=True)  # (B, C, 3, 1)
+        # 预测 3×3 旋转矩阵
+        z0 = self.vn_lin(x.transpose(1, -1)).transpose(1, -1)  # (B, 3, 3, 1)
+        return z0
+
+
 class raw_VN_DGCNN(nn.Module):
     def __init__(
         self, args, emb_dim, norm_mode='BN', gc=True

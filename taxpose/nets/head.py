@@ -7,7 +7,7 @@ from torch.nn.utils import weight_norm
 from taxpose.nets.pointnet import ResidualPointNet, PointwiseMLP
 from taxpose.nets.huggingface_tf import Transformer
 from taxpose.nets.transformer_flow_pm import CustomTransformer
-from taxpose.nets.vn_dgcnn import VN4Head
+from taxpose.nets.vn_dgcnn import VN4Head, CoordBasedStdFeature
 from taxpose.nets.moe_wab import MOELayer
 from taxpose.nets.upsample_head import LearnedUpsamplingHead
 from taxpose.utils.se3 import points2pose
@@ -430,6 +430,62 @@ class ResidualMLPHead(nn.Module):
             else:
                 residual_flow = self.proj_flow(action_embedding_tf)  # B,3,N
 
+            flow = residual_flow + corr_flow
+        else:
+            flow = corr_flow
+            residual_flow = torch.zeros_like(flow)
+
+        if self.pred_weight:
+            corr_flow_weight = torch.concat([flow, weight], dim=1)
+        else:
+            corr_flow_weight = flow
+        return {
+            "full_flow": corr_flow_weight,
+            "residual_flow": residual_flow,
+            "corr_flow": corr_flow,
+            "corr_points": corr_points,
+            "scores": scores,
+        }
+
+
+class VNResidualMLPHead(ResidualMLPHead):
+    def __init__(self, vn_dim=64, **kwargs):
+        kwargs.pop("project_corrs")
+        super(VNResidualMLPHead, self).__init__(project_corrs=False, **kwargs)
+        self.global_coordinate = CoordBasedStdFeature(vn_dim)
+        self.deocer_std_Pab = PointwiseMLP(
+            [self.emb_dims, self.emb_dims // 2, self.emb_dims // 4],
+            3, kwargs.get("norm", nn.Identity),
+        )
+
+    def forward(self, *input, scores=None, return_embedding=False):
+        action_embedding_tf = input[0]
+        action_embedding_raw = input[1]  # It's wrong
+        anchor_embedding = input[2]
+        action_points = input[3]
+        anchor_points = input[4]
+        if action_embedding_tf.shape[2] != action_points.shape[2]:
+            # NOTE: 1_dim is for channel dim, 2_dim is for points dim
+            action_points = input[5]
+            anchor_points = input[6]
+
+        assert anchor_points is not None, "anchor_points is None"
+        if self.pred_weight:
+            weight = self.proj_flow_weight(action_embedding_tf)
+            anchor_global = (anchor_points * weight).mean(dim=2, keepdim=True)
+        else:
+            anchor_global = anchor_points.mean(dim=2, keepdim=True)
+
+        anchor_coorsys = self.global_coordinate(anchor_points)
+        corr_pts_std = self.deocer_std_Pab(action_embedding_tf) + anchor_global  # B,3,N
+        z0_inv = anchor_coorsys.transpose(1, 2).contiguous().squeeze(-1)
+        corr_points = torch.einsum('bikm,bkj->bijm', corr_pts_std.unsqueeze(1), z0_inv)
+        corr_points = corr_points.squeeze(1)
+        # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
+        corr_flow = corr_points - action_points
+
+        if self.residual_on:
+            residual_flow = self.proj_flow(action_embedding_tf)  # B,3,N
             flow = residual_flow + corr_flow
         else:
             flow = corr_flow
@@ -975,6 +1031,18 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             cfg.project_corrs,
             cfg.project_corrs_mode,
             cfg.output_num,
+        )
+    if cfg.head_type == "vn_residual":
+        return VNResidualMLPHead(
+            vn_dim=64,
+            emb_dims=cfg.emb_dims,
+            norm=cfg.norm,
+            pred_weight=cfg.pred_weight,
+            residual_on=cfg.residual_on,
+            project_corrs=cfg.project_corrs,
+            project_corrs_mode=cfg.project_corrs_mode,
+            use_coarse_ps=cfg.use_coarse_soft,
+            output_num=cfg.output_num,
         )
     return ResidualMLPHead(
         cfg.emb_dims,
