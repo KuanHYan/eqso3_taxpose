@@ -7,7 +7,7 @@ from torch.nn.utils import weight_norm
 from taxpose.nets.pointnet import ResidualPointNet, PointwiseMLP
 from taxpose.nets.huggingface_tf import Transformer
 from taxpose.nets.transformer_flow_pm import CustomTransformer
-from taxpose.nets.vn_dgcnn import VN4Head, CoordBasedStdFeature
+from taxpose.nets.vn_dgcnn import VN4Head, CoordBasedStdFeature, PCACoordinateFrame
 from taxpose.nets.moe_wab import MOELayer
 from taxpose.nets.upsample_head import LearnedUpsamplingHead
 from taxpose.utils.se3 import points2pose
@@ -452,7 +452,16 @@ class VNResidualMLPHead(ResidualMLPHead):
     def __init__(self, vn_dim=64, **kwargs):
         kwargs.pop("project_corrs")
         super(VNResidualMLPHead, self).__init__(project_corrs=False, **kwargs)
-        self.global_coordinate = CoordBasedStdFeature(vn_dim)
+        emb_dims = self.emb_dims
+        # 共享特征提取
+        self.shared_point_importance = PointwiseMLP(
+            [emb_dims, emb_dims, emb_dims], emb_dims, None,
+        )
+        if self.pred_weight:
+            self.proj_flow_weight = nn.Conv1d(emb_dims, 1, 1)
+        # self.score = nn.Conv1d(emb_dims, 1, 1)
+
+        self.global_coordinate = PCACoordinateFrame()
         self.deocer_std_Pab = PointwiseMLP(
             [self.emb_dims, self.emb_dims // 2, self.emb_dims // 4],
             3, kwargs.get("norm", nn.Identity),
@@ -470,36 +479,42 @@ class VNResidualMLPHead(ResidualMLPHead):
             anchor_points = input[6]
 
         assert anchor_points is not None, "anchor_points is None"
-        if self.pred_weight:
-            weight = self.proj_flow_weight(action_embedding_tf)
-            anchor_global = (anchor_points * weight).mean(dim=2, keepdim=True)
-        else:
-            anchor_global = anchor_points.mean(dim=2, keepdim=True)
-
-        anchor_coorsys = self.global_coordinate(anchor_points)
-        corr_pts_std = self.deocer_std_Pab(action_embedding_tf) + anchor_global  # B,3,N
-        z0_inv = anchor_coorsys.transpose(1, 2).contiguous().squeeze(-1)
-        corr_points = torch.einsum('bikm,bkj->bijm', corr_pts_std.unsqueeze(1), z0_inv)
+        weight_shared_embedding = self.shared_point_importance(action_embedding_tf)
+        # pt_scores = self.score(weight_shared_embedding).transpose(2, 1).contiguous()  # B, C, N --> B, N, 1
+        # pt_scores = F.softmax(pt_scores, dim=1)
+        # anchor_points @ pt_scores  # B, 3, 1
+        anchor_points_mean = anchor_points.mean(dim=2, keepdim=True)
+        anchor_global = anchor_points_mean
+        anchor_points_centered = anchor_points - anchor_points_mean
+        # get coordinate system of anch_pts using vn-dgcnn
+        anchor_coorsys = self.global_coordinate(anchor_points_centered)
+        # z0_inv = anchor_coorsys.transpose(1, 2).contiguous()  # B,3,3
+        
+        corr_pts_std = self.deocer_std_Pab(action_embedding_tf)  # B,3,N
+        if self.residual_on:
+            residual_flow = self.proj_flow(action_embedding_tf)  # B,3,N
+            corr_pts_std = corr_pts_std + residual_flow
+        corr_points = torch.einsum('bikm,bkj->bijm', corr_pts_std.unsqueeze(1), anchor_coorsys)
         corr_points = corr_points.squeeze(1)
+        if anchor_global is not None:
+            corr_points = corr_points + anchor_global
         # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
         corr_flow = corr_points - action_points
 
-        if self.residual_on:
-            residual_flow = self.proj_flow(action_embedding_tf)  # B,3,N
-            flow = residual_flow + corr_flow
-        else:
-            flow = corr_flow
-            residual_flow = torch.zeros_like(flow)
+        if not self.residual_on:
+            residual_flow = torch.zeros_like(corr_flow)
 
         if self.pred_weight:
-            corr_flow_weight = torch.concat([flow, weight], dim=1)
+            weight = self.proj_flow_weight(weight_shared_embedding)
+            corr_flow_weight = torch.concat([corr_flow, weight], dim=1)
         else:
-            corr_flow_weight = flow
+            corr_flow_weight = corr_flow
         return {
             "full_flow": corr_flow_weight,
             "residual_flow": residual_flow,
             "corr_flow": corr_flow,
             "corr_points": corr_points,
+            "corr_std": corr_pts_std,
             "scores": scores,
         }
 

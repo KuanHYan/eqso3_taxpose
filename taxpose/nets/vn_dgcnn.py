@@ -9,6 +9,7 @@ import torch.nn as nn
 from taxpose.utils.se3 import random_se3
 from taxpose.nets.point_net_util import get_graph_feature_for_vndgcnn
 from taxpose.nets.vn_layers import (
+    EPS,
     VNLinearLeakyReLU,
     VNLinearAndLeakyReLU,
     VNMaxPool,
@@ -57,8 +58,10 @@ class CoordBasedStdFeature(nn.Module):
         super().__init__()
         # 对坐标做 VN 卷积来预测 z0（类似 PointNet 但保持 SO(3) 等变）
         self.vn_conv = nn.Sequential(
-            VNLinearLeakyReLU(1, hidden_dim//4, dim=4, share_nonlinearity=False),
-            VNLinearLeakyReLU(hidden_dim//4, hidden_dim//4, dim=4, share_nonlinearity=False),
+            VNLinearAndLeakyReLU(1, hidden_dim//4, dim=4, negative_slope=0.0,
+                                 share_nonlinearity=False, norm=VNLayerNorm(hidden_dim//4, 4)),
+            VNLinearAndLeakyReLU(hidden_dim//4, hidden_dim//4, dim=4, negative_slope=0.0,
+                                 share_nonlinearity=False, norm=VNLayerNorm(hidden_dim//4, 4)),
         )
         self.vn_lin = nn.Linear(hidden_dim//4, 3, bias=False)
 
@@ -71,7 +74,69 @@ class CoordBasedStdFeature(nn.Module):
         x = x.mean(dim=-1, keepdim=True)  # (B, C, 3, 1)
         # 预测 3×3 旋转矩阵
         z0 = self.vn_lin(x.transpose(1, -1)).transpose(1, -1)  # (B, 3, 3, 1)
-        return z0
+        # make z0 orthogonal. u2 = v2 - proj_u1(v2)
+        v1 = z0[:,0,:]
+        #u1 = F.normalize(v1, dim=1)
+        v1_norm = torch.sqrt((v1*v1).sum(1, keepdims=True))
+        u1 = v1 / (v1_norm+EPS)
+        v2 = z0[:,1,:]
+        v2 = v2 - (v2*u1).sum(1, keepdims=True)*u1
+        #u2 = F.normalize(u2, dim=1)
+        v2_norm = torch.sqrt((v2*v2).sum(1, keepdims=True))
+        u2 = v2 / (v2_norm+EPS)
+
+        # compute the cross product of the two output vectors        
+        u3 = torch.cross(u1, u2)
+        z0 = torch.stack([u1, u2, u3], dim=1).contiguous()
+
+        return z0.squeeze(-1)
+
+
+class PCACoordinateFrame(nn.Module):
+    """从点云计算旋转等变的正交坐标系（PCA 主方向）。
+
+    性质：
+      - 旋转等变：点云旋转 R，输出的 basis 也旋转 R
+      - 正交归一：basis @ basis^T = I（右手系）
+      - 无需训练：纯几何计算
+    """
+
+    def __init__(self, sign_ambiguity_fix: bool = True):
+        super().__init__()
+        self.sign_ambiguity_fix = sign_ambiguity_fix
+
+    def forward(self, points):
+        """
+        Args:
+            points: (B, 3, N)  点云坐标（已去均值更好）
+        Returns:
+            basis:  (B, 3, 3)  正交坐标系，列向量 [e1, e2, e3]
+        """
+        B, _, N = points.shape
+
+        # 1. 协方差矩阵 (B, 3, 3)
+        C = torch.bmm(points, points.transpose(1, 2)) / N
+
+        # 2. 特征分解（eigh 保证特征向量正交）
+        eigenvalues, eigenvectors = torch.linalg.eigh(C)  # 升序排列
+
+        # 3. 按特征值降序（主方向在前）
+        basis = eigenvectors.flip(-1)  # (B, 3, 3): [e_max, e_mid, e_min]
+
+        # 4. 确保右手系（det = +1）
+        det = torch.det(basis)
+        # 如果 det < 0，翻转最小特征向量
+        basis[:, :, -1] *= det.sign().unsqueeze(-1)
+
+        if self.sign_ambiguity_fix:
+            # 5. 消除符号歧义：让 basis 的朝向与点云"重心方向"一致
+            #    取每列投影的符号，确保它指向点云主要分布侧
+            projected = torch.bmm(points.transpose(1, 2), basis)  # (B, N, 3)
+            sign = projected.sum(dim=1).sign()     # (B, 3)
+            sign = sign + (sign == 0).float()       # 避免零
+            basis = basis * sign.unsqueeze(1)
+
+        return basis
 
 
 class raw_VN_DGCNN(nn.Module):

@@ -753,7 +753,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         residual_flow_action = head_action_output["residual_flow"].permute(0, 2, 1).contiguous()
         corr_flow_action = head_action_output["corr_flow"].permute(0, 2, 1).contiguous()
         corr_points_action = head_action_output["corr_points"].permute(0, 2, 1).contiguous()
-
+        corr_std = head_action_output.get("corr_std", None)
         outputs = {
             "flow_action": flow_action,
             "residual_flow_action": residual_flow_action,
@@ -764,6 +764,11 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             ),
             "b3n_act_corr_points": to_next_stage_corr_points
         }
+        if corr_std is not None:
+            outputs["corr_std_act"] = corr_std.permute(0, 2, 1).contiguous()
+        
+        #  *************************DEBUG*************************
+        outputs.update(attns=action_attn)
 
         if "P_A" in head_action_output:
             original_points_action = head_action_output["P_A"].permute(0, 2, 1).contiguous()
@@ -789,7 +794,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             residual_flow_anchor = head_anchor_output["residual_flow"].permute(0, 2, 1).contiguous()
             corr_flow_anchor = head_anchor_output["corr_flow"].permute(0, 2, 1).contiguous()
             corr_points_anchor = head_anchor_output["corr_points"].permute(0, 2, 1).contiguous()
-
+            corr_std = head_anchor_output.get("corr_std", None)
             outputs = {
                 **outputs,
                 "flow_anchor": flow_anchor,
@@ -803,7 +808,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 ),
                 "b3n_anch_corr_points": to_next_anch_corr_points
             }
-
+            if corr_std is not None:
+                outputs["corr_std_anch"] = corr_std.permute(0, 2, 1).contiguous()
             if "P_A" in head_anchor_output:
                 original_points_anchor = head_anchor_output["P_A"].permute(0, 2, 1).contiguous()
                 outputs["original_points_anchor"] = original_points_anchor
@@ -945,8 +951,6 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 outputs["flow_action"].detach(),
                 outputs["flow_anchor"].detach(),
             ))
-        #  *************************DEBUG*************************
-        outputs.update(attns=action_attn)
         action_cps = outputs.pop("b3n_act_corr_points")
         anchor_cps = outputs.pop("b3n_anch_corr_points", None)
         outputs.update(shared_args=[

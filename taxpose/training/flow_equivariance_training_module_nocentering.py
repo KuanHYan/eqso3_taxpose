@@ -130,7 +130,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         points_trans_action = batch["points_action_trans"]  # T0 -> action point clouds
         points_trans_anchor = batch["points_anchor_trans"]  # T1 -> anchor point clouds
         input_act_pts = points_trans_action
-        inputs_anch_pts = points_trans_anchor
+        input_anch_pts = points_trans_anchor
 
         # If we've applied some sampling, we need to extract the predictions too...
         if "sampled_ixs_action" in model_output:
@@ -166,12 +166,12 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
 
         if points_trans_action.shape[1] != pred_flow_action.shape[1]:
             input_act_pts = model_output["act_down_sample"]
-            inputs_anch_pts = model_output["anch_down_sample"]
+            input_anch_pts = model_output["anch_down_sample"]
 
         if self.flow_supervision == "both":
             pred_T_action = dualflow2pose(
                 xyz_src=input_act_pts,
-                xyz_tgt=inputs_anch_pts,
+                xyz_tgt=input_anch_pts,
                 flow_src=pred_flow_action,
                 flow_tgt=pred_flow_anchor,
                 weights_src=pred_w_action,
@@ -250,7 +250,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
 
             # Loss associated flow vectors matching a consistent rigid transform
             induced_flow_anchor = (
-                pred_T_anchor.transform_points(inputs_anch_pts) - inputs_anch_pts
+                pred_T_anchor.transform_points(input_anch_pts) - input_anch_pts
             ).detach()
             smoothness_loss_anchor = self.smooth_flow_loss(
                 pred_flow_anchor,
@@ -262,7 +262,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             gt_T_anchor = T1.inverse().compose(T0)
             dense_loss_anchor = self.dense_flow_loss(
                 pred_flow_anchor,
-                gt_T_anchor.transform_points(inputs_anch_pts) - inputs_anch_pts,
+                gt_T_anchor.transform_points(input_anch_pts) - input_anch_pts,
             )
             # dense_loss_anchor = dense_flow_distribution_loss(
             #     points=inputs_anch_pts,
@@ -408,6 +408,16 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
                 self.direct_correspondence_loss_weight * dense_loss,
             )
 
+        corr_std_act = model_output.get("corr_std_act", None)
+        corr_std_anch = model_output.get("corr_std_anch", None)
+        if corr_std_act is not None and corr_std_anch is not None:
+            std_loss = (
+                0.5 * self.point_cloud_loss(corr_std_act, T0.inverse().transform_points(input_act_pts)) +
+                0.5 * self.point_cloud_loss(corr_std_anch, T1.inverse().transform_points(input_anch_pts))
+            )
+            loss += (std_loss,)
+            log_values[loss_prefix + "std_loss"] = std_loss.detach()
+
         if "tuned_T" in model_output:
             # 使用MSE直接计算预测变换和真值变换的误差
             pred_T = model_output["tuned_T"]
@@ -433,8 +443,8 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
                 act_perm = torch.randperm(input_act_pts.shape[1])
                 action_points = input_act_pts[:, act_perm, :]
 
-                anch_perm = torch.randperm(inputs_anch_pts.shape[1])
-                anchor_points = inputs_anch_pts[:, anch_perm, :]
+                anch_perm = torch.randperm(input_anch_pts.shape[1])
+                anchor_points = input_anch_pts[:, anch_perm, :]
 
                 shuffled_output = self.model(
                     action_points,
@@ -465,7 +475,7 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
                 model_output["residual_flow_action"], input_act_pts
             )
             anch_res_smooth_loss = self.compute_res_smoothness_loss(
-                model_output["residual_flow_anchor"], inputs_anch_pts
+                model_output["residual_flow_anchor"], input_anch_pts
             )
             loss_res = (
                 self.res_smooth_loss_weight * act_res_smooth_loss
@@ -890,25 +900,25 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             xyzrgb = torch.cat([action_xyzrgb, anchor_xyzrgb], dim=0)
             res_images["symmetry_vis"] = wandb.Object3D(xyzrgb.cpu().numpy())
 
-        batch_0_attn = model_output["attns"][0].detach().cpu()
-        attns_for_anchor = batch_0_attn.sum(dim=0)  # [N, N] -> N, 1
-        # mean_entropy = -torch.sum(batch_0_attn * torch.log(batch_0_attn + 1e-8), dim=-1)
-        # idx = torch.randint(0, len(attns_for_anchor), (40,)).to(device=batch_0_attn.device)
-        w_min = torch.quantile(attns_for_anchor, 0.01)
-        w_max = torch.quantile(attns_for_anchor, 0.99)
-        attns_for_anchor = torch.clamp(attns_for_anchor, w_min, w_max)
-        w_norm = (attns_for_anchor - w_min) / (w_max - w_min + 1e-8)
-        # print(f"DEBUG: shape {attns_for_anchor}, min {w_min}, max {w_max}, mean entropy {mean_entropy[idx]}")
+        if "attns" in model_output and model_output["attns"] is not None:
+            batch_0_attn = model_output["attns"][0].detach().cpu()
+            attns_for_anchor = batch_0_attn.sum(dim=0)  # [N, N] -> N, 1
+            # mean_entropy = -torch.sum(batch_0_attn * torch.log(batch_0_attn + 1e-8), dim=-1)
+            # idx = torch.randint(0, len(attns_for_anchor), (40,)).to(device=batch_0_attn.device)
+            w_min = torch.quantile(attns_for_anchor, 0.01)
+            w_max = torch.quantile(attns_for_anchor, 0.99)
+            attns_for_anchor = torch.clamp(attns_for_anchor, w_min, w_max)
+            w_norm = (attns_for_anchor - w_min) / (w_max - w_min + 1e-8)
 
-        # 使用 coolwarm (蓝-白-红) 映射
-        color_dist = (
-            255 * cm.coolwarm(w_norm.cpu().numpy())[:, :3]
-        )  # [N, 3], ignore alpha
-        vis_pts = points_trans_anchor[0].detach().cpu()
-        if vis_pts.shape[0] != color_dist.shape[0]:
-            vis_pts = model_output["anch_down_sample"][0].detach().cpu()
-        attns_action = np.concatenate([vis_pts.numpy(), color_dist], axis=1)
-        res_images["attns_action"] = wandb.Object3D(attns_action)
+            # 使用 coolwarm (蓝-白-红) 映射
+            color_dist = (
+                255 * cm.coolwarm(w_norm.cpu().numpy())[:, :3]
+            )  # [N, 3], ignore alpha
+            vis_pts = points_trans_anchor[0].detach().cpu()
+            if vis_pts.shape[0] != color_dist.shape[0]:
+                vis_pts = model_output["anch_down_sample"][0].detach().cpu()
+            attns_action = np.concatenate([vis_pts.numpy(), color_dist], axis=1)
+            res_images["attns_action"] = wandb.Object3D(attns_action)
 
         corr_points = model_output["corr_points_action"][0].cpu()
         corr_points = corr_points - corr_points.mean(dim=0, keepdim=True)
