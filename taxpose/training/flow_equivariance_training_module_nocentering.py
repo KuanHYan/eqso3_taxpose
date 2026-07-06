@@ -582,8 +582,8 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             anchor_features,
             phase_onehot,
             compute_loss=compute_loss,
-            gt_act_target=gt_act_target,
-            gt_anch_target=gt_anch_target
+            # gt_act_target=gt_act_target,
+            # gt_anch_target=gt_anch_target
         )
 
         log_values = {}

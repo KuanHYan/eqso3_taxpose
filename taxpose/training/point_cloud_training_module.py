@@ -95,18 +95,18 @@ class PointCloudTrainingModule(pl.LightningModule):
                 # post_clip_norm[f"grad/post_clip_{module_name}"] = total_norm ** 0.5
 
         # DEBUG: 尝试单独参加project_flow
-        if hasattr(self.model, "head_action"):
-            params = self.model.head_action.proj_flow.parameters()
-            torch.nn.utils.clip_grad.clip_grad_norm_(params, 10)
-        if hasattr(self.model, "head_anchor"):
-            params = self.model.head_anchor.proj_flow.parameters()
-            torch.nn.utils.clip_grad.clip_grad_norm_(params, 10)
-        if hasattr(self.model, "emb_nn_action"):
-            params = self.model.emb_nn_action.named_parameters()
-            for name, param in params:
-                if not params:
-                    continue
-                torch.nn.utils.clip_grad.clip_grad_norm_(param, 100)
+        # if hasattr(self.model, "head_action"):
+        #     params = self.model.head_action.proj_flow.parameters()
+        #     torch.nn.utils.clip_grad.clip_grad_norm_(params, 10)
+        # if hasattr(self.model, "head_anchor"):
+        #     params = self.model.head_anchor.proj_flow.parameters()
+        #     torch.nn.utils.clip_grad.clip_grad_norm_(params, 10)
+        # if hasattr(self.model, "emb_nn_action"):
+        #     params = self.model.emb_nn_action.named_parameters()
+        #     for name, param in params:
+        #         if not params:
+        #             continue
+        #         torch.nn.utils.clip_grad.clip_grad_norm_(param, 100)
 
         # ── 梯度日志记录 ──
         grad_log_period = getattr(self, 'image_log_period', 500)

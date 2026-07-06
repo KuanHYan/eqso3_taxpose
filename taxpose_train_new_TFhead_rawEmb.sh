@@ -14,7 +14,7 @@ cd "$ROOT_DIR" || exit 1
 # export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6,max_split_size_mb:512
 export PYTEST_CURRENT_TEST=$TEST_MODE
 ENCODEING=False
-POINTS=768
+POINTS=640
 DATA_POINTS_N=1024
 EMB_DIM=384
 
@@ -25,9 +25,9 @@ bash "./my_launch.sh" local $GPU_INDEX \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=32 \
-    training.lr=2e-4 \
-    training.min_lr=2e-5 \
+    training.batch_size=40 \
+    training.lr=2.5e-4 \
+    training.min_lr=2.5e-5 \
     training.warmup_ratio=0.025 \
     training.weight_decay=1e-4 \
     training.precision='32' \
@@ -52,9 +52,9 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.n_blocks=1 \
     model.attn_mode="linear" \
     model.pos_encoding=$ENCODEING \
-    model.fine_tune=False \
+    model.fine_tune=True \
     model.num_refine_steps=3 \
-    model.refine_hidden_dim=128 \
+    model.refine_hidden_dim=256 \
     model.stage_num=2 \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \
@@ -63,7 +63,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.encoder.output_num=$POINTS \
     model.head.head_type=residual \
     model.head.project_corrs=True \
-    model.head.project_corrs_mode="vn" \
+    model.head.project_corrs_mode="mlp" \
     model.head.norm=LN \
     model.head.head_bias=False \
     model.head.residual_on=True \
@@ -73,7 +73,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     'model.pretraining.action.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
     'model.pretraining.anchor.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
     wandb.offline=$EVAL \
-    debug=False \
+    debug=True \
     eval=$EVAL \
     resume_ckpt=$RESUME_CKPT
 exit 1
