@@ -345,6 +345,12 @@ class ResidualMLPHead(nn.Module):
             self.proj_flow = PointwiseMLP(
                 [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm    
             )
+            # TODO: Is ResidualPointNet better than PointwiseMLP ?
+            # self.proj_flow = ResidualPointNet(
+            #     [emb_dims, 128, 64],
+            #     norm,
+            #     relu_type="leaky_relu"
+            # )
 
         self.pred_weight = pred_weight
         if self.pred_weight:

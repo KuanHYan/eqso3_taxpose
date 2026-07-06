@@ -30,9 +30,6 @@ class PointCloudLoss(nn.Module):
 
     def forward(self, x, y, weights=None):
         reduce_ops = torch.mean if self.reduction == "mean" else torch.sum
-        if self.reduction == "mean":
-            x = x * 100
-            y = y * 100  # 使用平均损失时由于输入点的单位是米，导致loss过小，所以这里乘100
         if weights is None:
             weights = torch.ones(x.shape[0], x.shape[1]).to(x.device)
         else:
@@ -46,6 +43,9 @@ class PointCloudLoss(nn.Module):
             # L2 distance between two point clouds, averaged over the batch and point dimension
             l2_dist = torch.norm(x - y, dim=-1)
             loss = reduce_ops(l2_dist, dim=-1)
+            # 使用平均损失时由于输入点的单位是米，导致loss过小，所以这里乘100
+            if self.reduction == "mean":
+                loss = loss * 100.0
             return loss.mean()
         else:
             loss_per_point = F.mse_loss(x, y, reduction='none')   # (B, N, 3)

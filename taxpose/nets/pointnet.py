@@ -19,11 +19,16 @@ class NormWrapper(nn.Module):
 
 
 class ResidualPointNetBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, norm_layer=nn.BatchNorm1d):
+    def __init__(self, in_channels, out_channels, norm_layer=nn.BatchNorm1d, relu_type='relu'):
         super().__init__()
-        self.conv = nn.Conv1d(in_channels, out_channels, 1, bias=False)
-        self.norm = NormWrapper(out_channels, norm_layer)
-        self.relu = nn.ReLU(inplace=True)
+        self.conv1 = nn.Conv1d(in_channels, out_channels, 1, bias=False)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, 1, bias=False)
+        self.norm1 = NormWrapper(out_channels, norm_layer)
+        self.norm2 = NormWrapper(out_channels, norm_layer)
+        if relu_type == 'relu':
+            self.relu = nn.ReLU(inplace=True)
+        elif relu_type == 'leaky_relu':
+            self.relu = nn.LeakyReLU(negative_slope=0.1, inplace=True)
         # 维度不匹配时需要投影
         if in_channels != out_channels:
             self.proj = nn.Conv1d(in_channels, out_channels, 1, bias=False)
@@ -33,13 +38,17 @@ class ResidualPointNetBlock(nn.Module):
 
     def forward(self, x):
         residual = x
-        out = self.conv(x)
-        out = self.norm(out)
+        out = self.conv1(x)
+        out = self.norm1(out)
         out = self.relu(out)
+        out = self.conv2(out)
+        out = self.norm2(out)
         if self.proj is not None:
             residual = self.proj(residual)
             residual = self.proj_norm(residual)
-        return out + residual   # 残差加在 ReLU 后，更利于梯度流通
+        out = out + residual          # 残差加在 ReLU 之前
+        out = self.relu(out)          # 激活在加法之后（标准 ResNet 做法）
+        return out
 
 
 class PointNet(nn.Module):
@@ -109,65 +118,46 @@ class PointwiseMLP(nn.Module):
 class ResidualPointNet(nn.Module):
     pos_enc_dim = 24
 
-    def __init__(self, layer_dims, norm=nn.BatchNorm1d,
-                 init_scale=0.01, use_coarse_ps=False, pos_encoding=False):
+    def __init__(self, layer_dims, norm=nn.BatchNorm1d, relu_type='relu'):
+        """
+        Args:
+            layer_dims: [C_in, C_mid, C_out]
+            norm: normalization layer
+            relu_type: "relu" or "leaky_relu"
+        """
         super().__init__()
-        self.use_coarse_ps = use_coarse_ps
-        self.pos_encoding = pos_encoding
-        self.first_conv_channel = layer_dims[0] + \
-            3 * use_coarse_ps + self.pos_enc_dim * pos_encoding
+        self.relu_type = relu_type
+        assert relu_type in ['relu', 'leaky_relu'], "Invalid ReLU type"
+        self.first_conv_channel = layer_dims[0]
         layer_dims[0] = self.first_conv_channel
         blocks = []
         for i in range(len(layer_dims) - 1):
             in_c = layer_dims[i]
             out_c = layer_dims[i+1]
-            blocks.append(ResidualPointNetBlock(in_c, out_c, norm))
+            blocks.append(ResidualPointNetBlock(in_c, out_c, norm, relu_type))
         self.blocks = nn.Sequential(*blocks)
         # 最后输出层：线性投影到 3 维（点坐标）
         self.output = nn.Conv1d(layer_dims[-1], 3, kernel_size=1, bias=True)
-        # 可训练缩放因子
-        if init_scale > 0:
-            self.scale = nn.Parameter(torch.ones(1) * init_scale)
-        if pos_encoding:
-            self.pos_encoder = ManualPointWiseGemoFea(project=False)
         self._init_weights()
 
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv1d):
                 # 对 ReLU 激活使用 Kaiming 初始化
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_out', nonlinearity=self.relu_type)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, NormWrapper):
                 nn.init.constant_(m.norm_layer.weight, 1)
                 nn.init.constant_(m.norm_layer.bias, 0)
-        # 输出层若使用 bias，可以初始化为 0，scale 已提提供整体尺度
 
-    def forward(self, x, coarse_points=None):
+    def forward(self, x):
         """
         x: (B, C_in, N)
-        coarse_points: (B, 3, N_coarse)
         return: (B, 3, N)
         """
-        cat_fea = [x]
-        if coarse_points is not None and self.use_coarse_ps:
-            cat_fea += [coarse_points]
-        if self.pos_encoding:
-            pe = self.positional_encoding(coarse_points)  # (B, pos_enc_dim, N)
-            cat_fea += [pe]
-        if len(cat_fea) > 1:
-            x = torch.cat(cat_fea, dim=1)
-        del cat_fea
         assert x.shape[1] == self.first_conv_channel
         feat = self.blocks(x)          # (B, C_mid, N)
         out = self.output(feat)        # (B, 3, N)
-        if getattr(self, 'scale', None) is not None:
-            out = out * self.scale
         return out
-
-    def positional_encoding(self, coords):
-        """对坐标做正余弦位置编码
-        coords: (B, 3, N)
-        """
-        return self.pos_encoder.get_geom_fea(coords, downsample_num=coords.shape[2])
