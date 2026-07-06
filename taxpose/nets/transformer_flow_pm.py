@@ -13,7 +13,12 @@ from third_party.dcp.model import (
     SublayerConnection,
     clones,
 )
-from taxpose.nets.huggingface_tf import LinearMHAttnWithKNN, MHAttention, LinearMHAttention, MHAttnWithKNN
+from taxpose.nets.huggingface_tf import (
+    LinearMHAttnWithKNN,
+    MHAttention,
+    LinearMHAttention,
+    MHAttnWithKNN
+)
 
 
 def knn_index_to_mask(knn_index, num_points, device):

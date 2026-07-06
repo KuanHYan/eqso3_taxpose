@@ -27,9 +27,9 @@ bash "./my_launch.sh" local $GPU_INDEX \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
     training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=64 \
-    training.lr=4e-4 \
-    training.min_lr=4e-5 \
+    training.batch_size=40 \
+    training.lr=2.5e-4 \
+    training.min_lr=2.5e-5 \
     training.warmup_ratio=0.025 \
     training.weight_decay=1e-3 \
     training.precision='32' \
@@ -55,9 +55,9 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.attn_mode="torch_attn" \
     model.return_attn=False \
     model.pos_encoding=$ENCODEING \
-    model.fine_tune=False \
+    model.fine_tune=True \
     model.num_refine_steps=3 \
-    model.refine_hidden_dim=128 \
+    model.refine_hidden_dim=256 \
     model.stage_num=2 \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \
