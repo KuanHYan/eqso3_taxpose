@@ -25,7 +25,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     --config-name train_ndf \
     job_type="train_taxpose" \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
-    training.max_epochs=500 \
+    training.max_epochs=250 \
     training.check_val_every_n_epoch=1 \
     training.batch_size=40 \
     training.lr=2.5e-4 \
@@ -39,7 +39,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     training.point_cloud_loss="MSE_sum" \
     dataset@dm=tax_pose \
     dm.test_folder=val_data \
-    dm.train_dset.dataset_size=6400 \
+    dm.train_dset.dataset_size=12800 \
     dm.train_dset.demo_dset.num_demo=6000 \
     dm.train_dset.demo_dset.min_num_points=$DATA_POINTS_N \
     dm.train_dset.demo_dset.occlusion_cfg.random_dropout=False \
@@ -76,7 +76,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     wandb.name=$WANDB_NAME \
     'model.pretraining.action.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
     'model.pretraining.anchor.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
-    wandb.offline=$EVAL \
+    wandb.offline=True \
     debug=True \
     eval=$EVAL \
     resume_ckpt=$RESUME_CKPT
