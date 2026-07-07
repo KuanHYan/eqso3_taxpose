@@ -201,7 +201,8 @@ class CustomTransformer(nn.Module):
         )
         ff = PositionwiseFeedForward(self.emb_dims, self.ff_dims, self.dropout)
         self.model = EncoderDecoder(
-            Encoder(EncoderLayer(self.emb_dims, c(attn), c(ff), self.dropout), self.N),
+            Encoder(
+                EncoderLayer(self.emb_dims, c(attn), c(ff), self.dropout), self.N),
             Decoder(
                 DecoderLayer(self.emb_dims, c(attn), c(attn), c(ff), self.dropout),
                 self.N,

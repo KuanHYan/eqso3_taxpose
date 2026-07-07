@@ -9,6 +9,8 @@ def get_graph_feature(feas, idx):
     Args:
         feas: B, N, C
         idx: B, N, K
+    Return:
+        B, K, N, C
     """
     batch_size, num_points, num_dims = feas.size()
     k = idx.shape[-1]

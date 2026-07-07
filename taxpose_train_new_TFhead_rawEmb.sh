@@ -76,7 +76,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     wandb.name=$WANDB_NAME \
     'model.pretraining.action.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
     'model.pretraining.anchor.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
-    wandb.offline=True \
+    wandb.offline=$EVAL \
     debug=True \
     eval=$EVAL \
     resume_ckpt=$RESUME_CKPT

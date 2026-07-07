@@ -48,6 +48,7 @@ def key_point(p1, p2, K: int = 1, mode: str = "pt", emb_func=None):
     Returns:
         key points: (B, N, K, 3)  近邻点
     """
+    assert mode in ["normal", "emb", "pt"]
     if mode == "normal":
         return knn_points_with_normals(
                 p1, p2,
@@ -123,7 +124,7 @@ def knn_points_with_normals(
     return idx, None
 
 
-def knn_query_with_embedding(embedding_q, embedding_k,
+def knn_query_with_embedding(embedding_q, embedding_k=None,
                             K: int = 1, return_sorted: bool = True):
     """基于 embedding 余弦相似度的 KNN 查询。
 
@@ -137,6 +138,8 @@ def knn_query_with_embedding(embedding_q, embedding_k,
     Returns:
         idx: (B, N, K) — 每个 query 点在 key 中的 K 近邻索引
     """
+    if embedding_k is None:
+        embedding_k = embedding_q
     emb_q = F.normalize(embedding_q, dim=-1)
     emb_k = F.normalize(embedding_k, dim=-1)
     # (B, N, C) @ (B, C, M) → (B, N, M), 每行是 query 点对所有 key 点的相似度
@@ -670,6 +673,8 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         self.stage = stage
         self.is_final_stage = is_final
         self.knn_in_tf = "knn" in attn_mode
+        self.knn_mode = kwargs.get("knn_mode", "emb")
+        print(f"Using {self.knn_mode} knn mode")
 
     def get_parameters(self, module: str):
         """返回指定模块的参数列表，用于分层学习率。
@@ -1017,11 +1022,17 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             action_embedding = action_cp_embedding + shared_act_embedding
             anchor_embedding = anchor_cp_embedding + shared_anch_embedding
 
-        tf_act_proxys = shared_act_embedding
-        tf_anch_proxys = shared_anch_embedding  # TODO: 测试使用emb特征KNN而非点云
-
-        act_index = knn(tf_act_proxys, 8) if self.knn_in_tf else None
-        anch_index = knn(tf_anch_proxys, 8) if self.knn_in_tf else None
+        if self.knn_in_tf and self.knn_mode == 'emb':
+            act_index = knn_query_with_embedding(action_embedding, 8)
+            anch_index = knn_query_with_embedding(anchor_embedding, 8)
+        elif self.knn_in_tf and self.knn_mode == 'pt':
+            tf_act_proxys = action_points if act_down_sample is None else act_down_sample
+            tf_anch_proxys = anchor_points if anch_down_sample is None else anch_down_sample
+            act_index = knn(tf_act_proxys, 8)
+            anch_index = knn(tf_anch_proxys, 8)
+        else:
+            act_index = None
+            anch_index = None
         (
             action_embedding_tf,
             anchor_embedding_tf,
@@ -1154,6 +1165,7 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
         )
         self.fine_tune_trans = fine_tune_trans
         self.knn_mode = knn_mode
+        print(f"[TwoStageFlowTransformer] knn_mode: {knn_mode}")
         if fine_tune_trans:
             fine_tune_trans_context_in = emb_dims + 4 + 3
             # refine_hidden_dim = refine_hidden_dim * 2
@@ -1581,6 +1593,7 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             attn_mode=r_cfg.attn_mode,
             fine_tune=getattr(cfg, 'fine_tune', False),
             weight_beta=getattr(cfg, 'weight_beta', 0.5),
+            knn_mode=getattr(cfg, 'knn_mode', 'emb'),
         )
     elif cfg.model_type == "two_stage_flow_transformer":
         r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
