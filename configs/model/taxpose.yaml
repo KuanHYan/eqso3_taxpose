@@ -14,3 +14,4 @@ num_refine_steps: 3
 refine_hidden_dim: 128
 # Cascade
 stage_num: 2
+knn_mode: "pt"

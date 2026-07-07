@@ -38,6 +38,37 @@ from pytorch3d.transforms import (
 from pytorch3d.ops import knn_points, knn_gather, estimate_pointcloud_normals
 
 
+def key_point(p1, p2, K: int = 1, mode: str = "pt", emb_func=None):
+    """获取 K 个最近邻点。
+    Args:
+        p1, p2: (B, N, 3)  位置坐标
+        K: nearst neighbor number
+        mode: "pt" | "normal" | "emb"
+        emb_func: embedding function
+    Returns:
+        key points: (B, N, K, 3)  近邻点
+    """
+    if mode == "normal":
+        return knn_points_with_normals(
+                p1, p2,
+                n1=estimate_pointcloud_normals(p1, 20),
+                n2=estimate_pointcloud_normals(p2, 20),
+                K=K, return_nn=True)[-1]  # (B,N,k,3)
+    if mode == "emb":
+        assert emb_func is not None
+        emb1 = emb_func(p1.transpose(1, 2)).transpose(1, 2).contiguous()
+        emb2 = emb_func(p2.transpose(1, 2)).transpose(1, 2).contiguous()
+        idx = knn_query_with_embedding(
+            emb1, emb2,
+            K=K, return_sorted=True)
+        return knn_gather(p2, idx)
+    return knn_points(
+        p1, p2, K=K,
+        return_nn=True,
+        return_sorted=True,
+    ).knn
+
+
 def knn_points_with_normals(
     p1: torch.Tensor,
     p2: torch.Tensor,
@@ -93,7 +124,7 @@ def knn_points_with_normals(
 
 
 def knn_query_with_embedding(embedding_q, embedding_k,
-                             K: int = 1, return_sorted: bool = True):
+                            K: int = 1, return_sorted: bool = True):
     """基于 embedding 余弦相似度的 KNN 查询。
 
     通过 L2 归一化 + matmul 计算全部 pairwise 余弦相似度，
@@ -1092,6 +1123,7 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
         num_refine_steps: int = 3,
         refine_hidden_dim: int = 128,
         fine_tune_trans: bool = False,
+        knn_mode: str = "pt",
         **kwargs,
     ):
         super().__init__(encoder_cfg, head_cfg, *args, **kwargs)
@@ -1121,6 +1153,7 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
             nn.Linear(refine_hidden_dim // 2, dim_flow),
         )
         self.fine_tune_trans = fine_tune_trans
+        self.knn_mode = knn_mode
         if fine_tune_trans:
             fine_tune_trans_context_in = emb_dims + 4 + 3
             # refine_hidden_dim = refine_hidden_dim * 2
@@ -1272,11 +1305,10 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
 
             if self.fine_tune_trans:
                 tgt_pt = kwargs.get("gt_act_target", anchor_bn3)
-                tgt_pt = knn_points_with_normals(
+                tgt_pt = key_point(
                     coarsed_act, tgt_pt,
-                    n1=estimate_pointcloud_normals(coarsed_act, 20),
-                    n2=estimate_pointcloud_normals(tgt_pt, 20),
-                    K=1, return_nn=True)[-1]  # (B,N,k,3)
+                    mode=self.knn_mode,
+                    emb_func=self._action_embedding)  # (B,N,k,3)
                 if tgt_pt.dim() == 4:
                     tgt_pt = tgt_pt.squeeze(2)  # (B,N,3)
                 # key_point_error: torch.Tensor = chamfer_distance(
@@ -1302,11 +1334,10 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
                 
                 if has_anchor:
                     tgt_pt = kwargs.get("gt_anch_target", action_bn3)
-                    tgt_pt = knn_points_with_normals(
+                    tgt_pt = key_point(
                         coarsed_anchor, tgt_pt,
-                        n1=estimate_pointcloud_normals(coarsed_anchor, 20),
-                        n2=estimate_pointcloud_normals(tgt_pt, 20),
-                        K=1, return_nn=True)[-1]  # (B,N,k,3)
+                        mode=self.knn_mode,
+                        emb_func=self._action_embedding)  # (B,N,k,3)
                     if tgt_pt.dim() == 4:
                         tgt_pt = tgt_pt.squeeze(2)  # (B,N,3)
 
@@ -1556,6 +1587,7 @@ def create_network(cfg: ModelConfig) -> nn.Module:
         network: nn.Module = TwoStageFlowTransformer(
             encoder_cfg=r_cfg.encoder,
             head_cfg=r_cfg.head,
+            knn_mode=getattr(cfg, 'knn_mode', 'pt'),
             cycle=r_cfg.cycle,
             center_feature=r_cfg.center_feature,
             freeze_embnn=r_cfg.freeze_embnn,
@@ -1602,6 +1634,7 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             attn_mode=r_cfg.attn_mode,
             refine_hidden_dim=r_cfg.refine_hidden_dim,
             fine_tune_trans=r_cfg.fine_tune,
+            knn_mode=getattr(cfg, 'knn_mode', 'pt'),
         )
     else:
         raise ValueError(f"Unknown model type: {cfg.model_type}")

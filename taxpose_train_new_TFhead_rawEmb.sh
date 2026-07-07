@@ -58,6 +58,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.fine_tune=True \
     model.num_refine_steps=3 \
     model.refine_hidden_dim=256 \
+    model.knn_mode="normal" \
     model.stage_num=2 \
     model.encoder.name=raw_dgcnn \
     model.encoder.norm=BN \

@@ -22,6 +22,7 @@ from taxpose.utils.se3 import (
     get_degree_angle,
     get_translation,
     PointCloudLoss,
+    random_se3,
 )
 
 import matplotlib.cm as cm
@@ -60,6 +61,12 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         point_cloud_loss: str = "MSE_SUM",
         debug=False,
         optimization_mode: str = "auto",
+        # ── GPU 增强参数（已从数据集移至此处） ──
+        action_rot_var: float = 3.1416,
+        anchor_rot_var: float = 3.1416,
+        trans_var: float = 0.5,
+        action_rot_sample_method: str = "axis_angle",
+        anchor_rot_sample_method: str = "axis_angle",
     ):
         super().__init__(
             model=model,
@@ -105,6 +112,13 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         self.res_smooth_loss_weight = res_smooth_loss_weight
         self.res_smooth_start_epoch = start_res_flow_epoch
         self.alpha = 1.0
+
+        # GPU 增强参数
+        self.action_rot_var = action_rot_var
+        self.anchor_rot_var = anchor_rot_var
+        self.trans_var = trans_var
+        self.action_rot_sample_method = action_rot_sample_method
+        self.anchor_rot_sample_method = anchor_rot_sample_method
 
     # def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
     #     # 仅加载 self.model 在 state_dict 有的参数
@@ -560,6 +574,31 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
         return loss_smooth
 
     def module_step(self, batch, batch_idx):
+        # ── GPU 增强：随机旋转 + 平移（原先在 Dataset.__getitem__ 的 CPU 上执行）──
+        B = batch["points_action"].shape[0]
+        device = batch["points_action"].device
+
+        T0 = random_se3(
+            B,
+            rot_var=self.action_rot_var,
+            trans_var=self.trans_var,
+            device=device,
+            rot_sample_method=self.action_rot_sample_method,
+        )
+        T1 = random_se3(
+            B,
+            rot_var=self.anchor_rot_var,
+            trans_var=self.trans_var,
+            device=device,
+            rot_sample_method=self.anchor_rot_sample_method,
+        )
+
+        batch["points_action_trans"] = T0.transform_points(batch["points_action"])
+        batch["points_anchor_trans"] = T1.transform_points(batch["points_anchor"])
+        batch["T0"] = T0.get_matrix()
+        batch["T1"] = T1.get_matrix()
+
+        # ── 原有逻辑不变 ──
         points_trans_action = batch["points_action_trans"]
         points_trans_anchor = batch["points_anchor_trans"]
         action_features = (
@@ -576,14 +615,6 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
 
         forward_fun = self.model.forward if self.train else self.model.inference
         compute_loss = partial(self.compute_loss, batch=batch) if self.train else None
-        T0 = Transform3d(matrix=batch["T0"])
-        T1 = Transform3d(matrix=batch["T1"])
-        if self.debug:
-            gt_act_target = T1.transform_points(batch["points_action"])
-            gt_anch_target = T0.transform_points(batch["points_anchor"])
-        else:
-            gt_act_target = None
-            gt_anch_target = None
 
         model_output = forward_fun(
             points_trans_action,
@@ -592,8 +623,6 @@ class EquivarianceTrainingModule(PointCloudTrainingModule):
             anchor_features,
             phase_onehot,
             compute_loss=compute_loss,
-            # gt_act_target=gt_act_target,
-            # gt_anch_target=gt_anch_target
         )
 
         log_values = {}

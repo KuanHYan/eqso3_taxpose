@@ -56,7 +56,6 @@ class PointCloudTrainingModule(pl.LightningModule):
         return super().on_train_epoch_start()
     
     def on_train_epoch_end(self) -> None:
-        torch.cuda.empty_cache()
         return super().on_train_epoch_end()
 
     def on_before_optimizer_step(self, optimizer) -> None:

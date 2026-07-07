@@ -9,7 +9,6 @@ from taxpose.datasets.base import (
     PlacementPointCloudDataset,
     PlacementPointCloudDatasetConfig,
 )
-from taxpose.utils.se3 import random_se3
 
 
 @dataclass
@@ -79,37 +78,15 @@ class PointCloudDataset(Dataset):
         else:
             data_ix = index
         data = self.dataset[data_ix]
-        points_action = torch.from_numpy(data["points_action"])
-        points_anchor = torch.from_numpy(data["points_anchor"])
+        points_action = torch.from_numpy(data["points_action"]).squeeze(0)
+        points_anchor = torch.from_numpy(data["points_anchor"]).squeeze(0)
         phase_onehot = None if data["phase_onehot"] is None else \
             torch.from_numpy(data["phase_onehot"])
 
-        T0 = random_se3(
-            1,
-            rot_var=self.action_rot_var,
-            trans_var=self.trans_var,
-            device=points_action.device,
-            rot_sample_method=self.action_rot_sample_method,
-        )
-        T1 = random_se3(
-            1,
-            rot_var=self.anchor_rot_var,
-            trans_var=self.trans_var,
-            device=points_anchor.device,
-            rot_sample_method=self.anchor_rot_sample_method,
-        )
-
-        # Transform the points!
-        points_action_trans = T0.transform_points(points_action)
-        points_anchor_trans = T1.transform_points(points_anchor)
-
+        # 增强已移至 GPU (module_step)，此处仅加载原始数据
         out_dict = {
-            "points_action": points_action.squeeze(0),
-            "points_anchor": points_anchor.squeeze(0),
-            "points_action_trans": points_action_trans.squeeze(0),
-            "points_anchor_trans": points_anchor_trans.squeeze(0),
-            "T0": T0.get_matrix().squeeze(0),
-            "T1": T1.get_matrix().squeeze(0),
+            "points_action": points_action,
+            "points_anchor": points_anchor,
         }
         if phase_onehot is not None:
             out_dict["phase_onehot"] = phase_onehot

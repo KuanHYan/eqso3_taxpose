@@ -251,6 +251,12 @@ def main(cfg):
         tr_super_time_ratio=cfg.training.tr_super_start_time_ratio,
         point_cloud_loss=cfg.training.point_cloud_loss,
         debug=cfg.debug,
+        # ── GPU 增强参数（从 dataset config 读取）──
+        action_rot_var=cfg.dm.train_dset.action_rotation_variance,
+        anchor_rot_var=cfg.dm.train_dset.anchor_rotation_variance,
+        trans_var=cfg.dm.train_dset.translation_variance,
+        action_rot_sample_method=cfg.dm.train_dset.action_rot_sample_method,
+        anchor_rot_sample_method=cfg.dm.train_dset.anchor_rot_sample_method,
     )
 
     model.cuda()
