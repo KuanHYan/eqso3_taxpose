@@ -35,7 +35,84 @@ from pytorch3d.transforms import (
     so3_rotation_angle,
     so3_relative_angle
 )
-from pytorch3d.ops import knn_points
+from pytorch3d.ops import knn_points, knn_gather, estimate_pointcloud_normals
+
+
+def knn_points_with_normals(
+    p1: torch.Tensor,
+    p2: torch.Tensor,
+    n1: torch.Tensor = None,
+    n2: torch.Tensor = None,
+    K: int = 1,
+    normal_weight: float = 0.5,
+    return_nn: bool = False,
+    return_sorted: bool = True,
+):
+    """融合位置和法向量信息的 KNN 搜索。
+
+    将位置和加权法向量拼接为 6D 特征，利用标准 L2 KNN 实现
+    联合距离度量:
+        dist² = ||p₁-p₂||² + λ²·||n₁-n₂||²
+
+    法向量差 L2 与余弦相似度的关系:
+        ||n₁-n₂||² = 2 - 2·cos(θ)
+        对齐时(cos=1) → 0，相反时(cos=-1) → 4
+
+    Args:
+        p1, p2: (B, N, 3)  位置坐标
+        n1, n2: (B, N, 3)  法向量（自动归一化）
+        K: 近邻数量
+        normal_weight: 法向量权重 λ，越大法向一致性越重要
+        return_nn: 是否返回最近邻的点
+        return_sorted: 是否按距离排序
+    Returns:
+        idx:   (B, N, K)  近邻索引
+        nn:    (B, N, K, 6)  近邻的 [位置, λ·法向量]（仅 return_nn=True）
+    """
+    if n1 is None or n2 is None:
+        return knn_points(
+            p1, p2, K=K,
+            return_nn=return_nn,
+            return_sorted=return_sorted,
+        )
+
+    # 归一化法向量
+    n1 = F.normalize(n1, dim=-1)
+    n2 = F.normalize(n2, dim=-1)
+
+    cdist = torch.cdist(p1, p2)
+    abs_cos_sim = torch.abs(torch.matmul(n1, n2.transpose(-2, -1)))  # (B, N, M)
+    dist = cdist + normal_weight * (1 - abs_cos_sim)
+    
+    idx = torch.topk(dist, k=K, dim=-1, largest=False, sorted=return_sorted)[1]
+
+    if return_nn:
+        nn = knn_gather(p2, idx)
+        return idx, nn
+    return idx, None
+
+
+def knn_query_with_embedding(embedding_q, embedding_k,
+                             K: int = 1, return_sorted: bool = True):
+    """基于 embedding 余弦相似度的 KNN 查询。
+
+    通过 L2 归一化 + matmul 计算全部 pairwise 余弦相似度，
+    然后取 top-K 索引。
+
+    Args:
+        embedding_q: (B, N, C) — query embedding（特征必须在最后一维）
+        embedding_k: (B, M, C) — key embedding
+        K: 近邻数
+    Returns:
+        idx: (B, N, K) — 每个 query 点在 key 中的 K 近邻索引
+    """
+    emb_q = F.normalize(embedding_q, dim=-1)
+    emb_k = F.normalize(embedding_k, dim=-1)
+    # (B, N, C) @ (B, C, M) → (B, N, M), 每行是 query 点对所有 key 点的相似度
+    sim = torch.matmul(emb_q, emb_k.transpose(-2, -1))
+    idx = torch.topk(sim, k=K, dim=-1, sorted=return_sorted)[1]
+    return idx
+
 
 class EquivariantFeatureEmbeddingNetwork(nn.Module):
     def __init__(self, encoder_cfg):
@@ -1026,10 +1103,10 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
         context_in = emb_dims + 7
         # gn_groups = max(1, refine_hidden_dim // 16)
         self.context_encoder = nn.Sequential(
-            nn.Conv1d(context_in, refine_hidden_dim, 1),
+            nn.Linear(context_in, refine_hidden_dim),
             # nn.GroupNorm(gn_groups, refine_hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Conv1d(refine_hidden_dim, refine_hidden_dim, 1),
+            nn.Linear(refine_hidden_dim, refine_hidden_dim),
         )
 
         # ── GRU 时序记忆 ──
@@ -1039,9 +1116,9 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
         # ── delta 预测头: hidden → delta_flow(3) + [delta_weight(1)] ──
         dim_flow = 4 if self.head_action.pred_weight else 3
         self.delta_head = nn.Sequential(
-            nn.Conv1d(refine_hidden_dim, refine_hidden_dim // 2, 1),
+            nn.Linear(refine_hidden_dim, refine_hidden_dim // 2),
             nn.ReLU(inplace=True),
-            nn.Conv1d(refine_hidden_dim // 2, dim_flow, 1),
+            nn.Linear(refine_hidden_dim // 2, dim_flow),
         )
         self.fine_tune_trans = fine_tune_trans
         if fine_tune_trans:
@@ -1050,10 +1127,10 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
             self.refine_trans_hidden_dim = refine_hidden_dim
 
             self.fine_tune_trans_context_encoder = nn.Sequential(
-                nn.Conv1d(fine_tune_trans_context_in, refine_hidden_dim, 1),
+                nn.Linear(fine_tune_trans_context_in, refine_hidden_dim),
                 # nn.GroupNorm(gn_groups, refine_hidden_dim),
                 nn.ReLU(inplace=True),
-                nn.Conv1d(refine_hidden_dim, refine_hidden_dim, 1),
+                nn.Linear(refine_hidden_dim, refine_hidden_dim),
             )
 
             # ── GRU 时序记忆 ──
@@ -1065,9 +1142,9 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
             # self.delta_rot_scale = 1.0 # 5 / 180 * torch.pi   # 可学习
             # self.delta_trans_scale = 1.0 #0.01
             self.fine_tune_trans_delta_head = nn.Sequential(
-                nn.Conv1d(refine_hidden_dim, refine_hidden_dim // 2, 1),
+                nn.Linear(refine_hidden_dim, refine_hidden_dim // 2),
                 nn.ReLU(inplace=True),
-                nn.Conv1d(refine_hidden_dim // 2, dim_flow, 1),
+                nn.Linear(refine_hidden_dim // 2, dim_flow),
             )
 
     def get_parameters(self, module: str):
@@ -1088,21 +1165,34 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
         return super().get_parameters(module)
 
     def _gru_step(self, gru_net, emb_tf, p_flow, error, hiddn):
+        """GRU 迭代精调步骤
+        Args:
+            gru_net: GRUCell 网络
+            emb_tf: Transformer embedding (B,N,C)
+            p_flow: 预测的流 (B,N,4)
+            error: 刚性流误差 (B,N,3)
+            hiddn: GRU 隐状态 (B,N,H)
+        Returns:
+            delta_flow: GRU 输出的流增量 (B,N,4)
+            hiddn: 更新后的 GRU 隐状态 (B,N,H)
+        """
         B, N, _ = p_flow.shape
+        assert emb_tf.size(1) == hiddn.size(1) == N, \
+            f"Mismatch in number of points: emb_tf {emb_tf.size(1)}, hiddn {hiddn.size(1)}"
         ctx_a = torch.cat(
             [
-                emb_tf.detach(),
-                p_flow.transpose(1, 2),
-                error.transpose(1, 2)
-            ], dim=1)     # (B,C+6,N)
-        ctx_a = self.context_encoder(ctx_a)                           # (B,H,N)
+                emb_tf,
+                p_flow,
+                error
+            ], dim=-1)     # (B,N,C+3+4)
+        ctx_a = self.context_encoder(ctx_a)  # (B,N,H)
 
         # GRU 更新
-        ctx_flat = ctx_a.permute(0, 2, 1).reshape(B * N, -1)
-        hid_flat = hiddn.permute(0, 2, 1).reshape(B * N, -1)
+        ctx_flat = ctx_a.reshape(B * N, -1)
+        hid_flat = hiddn.reshape(B * N, -1)
         h_new = gru_net(ctx_flat, hid_flat)
-        hiddn = h_new.reshape(B, N, -1).permute(0, 2, 1)
-        delta_a = self.delta_head(hiddn).permute(0, 2, 1)              # (B,N,4)
+        hiddn = h_new.reshape(B, N, -1)
+        delta_a = self.delta_head(hiddn)  # (B,N,4)
         return delta_a, hiddn
 
     # ------------------------------------------------------------------
@@ -1118,10 +1208,9 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
 
         shared_args = outputs['shared_args']
         action_embedding = shared_args[2]
-        anchor_embedding = shared_args[3]
         # Pop TF embedding, which will not be used at next stage
-        act_emb_tf = shared_args.pop(4)
-        anchor_emb_tf = shared_args.pop(4)
+        act_emb_tf = shared_args.pop(4).detach().transpose(1, 2).contiguous()
+        anch_emb_tf = shared_args.pop(4).detach().transpose(1, 2).contiguous()
 
         has_anchor = ("flow_anchor" in outputs
                       and outputs["flow_anchor"] is not None)
@@ -1144,15 +1233,13 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
 
         B, N, _ = flow_action.shape
         # 初始化 GRU 隐状态
-        h_a = torch.zeros(B, self.refine_hidden_dim, N,
+        h_a = torch.zeros(B, N, self.refine_hidden_dim,
                           device=flow_action.device)
-        h_b = torch.zeros(B, self.refine_hidden_dim, N,
+        h_b = torch.zeros(B, N, self.refine_hidden_dim,
                           device=flow_action.device) if has_anchor else None
         if self.fine_tune_trans:
-            h_trans_a = torch.zeros(B, self.refine_trans_hidden_dim, N,
-                            device=flow_action.device)
-            h_trans_b = torch.zeros(B, self.refine_trans_hidden_dim, N,
-                            device=flow_action.device) if has_anchor else None
+            h_trans_a = torch.zeros_like(h_a)
+            h_trans_b = torch.zeros_like(h_b) if has_anchor else None
 
         refined_loss_list = []
         for step in range(self.num_refine_steps):
@@ -1169,7 +1256,7 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
             # ── Action 侧精调 ──
             coarsed_act = T.transform_points(action_bn3)
             rigid_a = coarsed_act - action_bn3  # (B,N,3)
-            error_a = rigid_a - pf_a                                      # (B,N,3)
+            error_a = rigid_a - pf_a            # (B,N,3)
             delta_a, h_a = self._gru_step(self.gru_action, act_emb_tf, fa, error_a, h_a)
             flow_action = delta_a + flow_action
 
@@ -1180,12 +1267,16 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
                 coarsed_anchor = T.inverse().transform_points(anchor_bn3)
                 rigid_b = coarsed_anchor - anchor_bn3
                 error_b = rigid_b - fb[:, :, :3]
-                delta_b, h_b = self._gru_step(self.gru_anchor, anchor_emb_tf, fb, error_b, h_b)
+                delta_b, h_b = self._gru_step(self.gru_anchor, anch_emb_tf, fb, error_b, h_b)
                 flow_anchor = flow_anchor + delta_b
 
             if self.fine_tune_trans:
                 tgt_pt = kwargs.get("gt_act_target", anchor_bn3)
-                tgt_pt = knn_points(coarsed_act, tgt_pt, K=1, return_nn=True)[-1]  # (B,N,k,3)
+                tgt_pt = knn_points_with_normals(
+                    coarsed_act, tgt_pt,
+                    n1=estimate_pointcloud_normals(coarsed_act, 20),
+                    n2=estimate_pointcloud_normals(tgt_pt, 20),
+                    K=1, return_nn=True)[-1]  # (B,N,k,3)
                 if tgt_pt.dim() == 4:
                     tgt_pt = tgt_pt.squeeze(2)  # (B,N,3)
                 # key_point_error: torch.Tensor = chamfer_distance(
@@ -1195,23 +1286,27 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
                 key_point_error = tgt_pt - coarsed_act
                 ctx_act = torch.cat(
                     [
-                        act_emb_tf.detach(),
-                        flow_action.transpose(1, 2),
+                        act_emb_tf,
+                        flow_action,
                         # anchor_embedding.detach(),
-                        key_point_error.transpose(1, 2),
-                    ], dim=1)
-                ctx_act = self.fine_tune_trans_context_encoder(ctx_act)  # (B, H, N)
-                flat = ctx_act.permute(0, 2, 1).reshape(B * N, -1)
-                h_flat = h_trans_a.permute(0, 2, 1).reshape(B * N, -1)
+                        key_point_error,
+                    ], dim=-1)
+                ctx_act = self.fine_tune_trans_context_encoder(ctx_act)  # (B, N, H)
+                flat = ctx_act.reshape(B * N, -1)
+                h_flat = h_trans_a.reshape(B * N, -1)
                 new_ = self.gru_action(flat, h_flat)
-                h_trans_a = new_.reshape(B, N, -1).permute(0, 2, 1)
+                h_trans_a = new_.reshape(B, N, -1)
 
-                delta_a = self.fine_tune_trans_delta_head(h_trans_a).permute(0, 2, 1)              # (B,N,4)
+                delta_a = self.fine_tune_trans_delta_head(h_trans_a)              # (B,N,4)
                 flow_action = flow_action + delta_a
                 
                 if has_anchor:
                     tgt_pt = kwargs.get("gt_anch_target", action_bn3)
-                    tgt_pt = knn_points(coarsed_anchor, tgt_pt, K=1, return_nn=True)[-1]  # (B,N,k,3)
+                    tgt_pt = knn_points_with_normals(
+                        coarsed_anchor, tgt_pt,
+                        n1=estimate_pointcloud_normals(coarsed_anchor, 20),
+                        n2=estimate_pointcloud_normals(tgt_pt, 20),
+                        K=1, return_nn=True)[-1]  # (B,N,k,3)
                     if tgt_pt.dim() == 4:
                         tgt_pt = tgt_pt.squeeze(2)  # (B,N,3)
 
@@ -1222,16 +1317,16 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
                     key_point_error_b = tgt_pt - coarsed_anchor
                     ctx_anch = torch.cat(
                         [
-                            anchor_emb_tf.detach(),
-                            flow_anchor.transpose(1, 2),
-                            key_point_error_b.transpose(1, 2),
-                        ], dim=1)
-                    ctx_anch = self.fine_tune_trans_context_encoder(ctx_anch)         # (B, H)
-                    flat = ctx_anch.permute(0, 2, 1).reshape(B * N, -1)
-                    h_flat = h_trans_b.permute(0, 2, 1).reshape(B * N, -1)
+                            anch_emb_tf,
+                            flow_anchor,
+                            key_point_error_b,
+                        ], dim=-1)
+                    ctx_anch = self.fine_tune_trans_context_encoder(ctx_anch)  # (B, N, H)
+                    flat = ctx_anch.reshape(B * N, -1)
+                    h_flat = h_trans_b.reshape(B * N, -1)
                     new_ = self.gru_anchor(flat, h_flat)
-                    h_trans_b = new_.reshape(B, N, -1).permute(0, 2, 1)
-                    delta_b = self.fine_tune_trans_delta_head(h_trans_b).permute(0, 2, 1)
+                    h_trans_b = new_.reshape(B, N, -1)
+                    delta_b = self.fine_tune_trans_delta_head(h_trans_b)
                     flow_anchor = flow_anchor + delta_b
 
             outputs["flow_action"] = flow_action

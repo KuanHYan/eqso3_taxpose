@@ -36,8 +36,6 @@ elif [ $PLATFORM == "cloud-featurize" ]; then
         --network host \
         --gpus all \
         --shm-size=48g \
-        -e WANDB_BASE_URL=http://localhost:8765 \
-        -e WANDB_API_KEY=local-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 \
         -v /home/featurize/data/ideal_pair_models:/root/pairpose/data \
         -v /home/featurize/work/taxpose/logs:/root/pairpose/logs \
         -v /home/featurize/work/eqso3_taxpose:/root/pairpose \
@@ -52,8 +50,6 @@ elif [ $PLATFORM == "cloud-gongji" ]; then
         --network host \
         --gpus all \
         --shm-size=48g \
-        -e WANDB_BASE_URL=http://localhost:8080 \
-        -e WANDB_API_KEY=local-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 \
         crpi-6he4t9ttrgr1us6h.cn-hangzhou.personal.cr.aliyuncs.com/cross-pose/docker4train:v0.2 \
         $COMMAND \
         log_dir=/root/pairpose/logs \

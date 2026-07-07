@@ -169,7 +169,6 @@ class LearnedUpsamplingHead(nn.Module):
         return output
 
 
-
 class Fold(nn.Module):
     def __init__(self, in_channel , step , hidden_dim = 512):
         super().__init__()
