@@ -333,19 +333,24 @@ class ResidualMLPHead(nn.Module):
         super(ResidualMLPHead, self).__init__()
 
         self.emb_dims = emb_dims
+        self.pred_weight = pred_weight
         if use_coarse_ps and residual_on:
             self.proj_flow = ResidualPointNet(
                 [emb_dims+3, 128, 64],
                 norm,
-                3 + self.pred_weight,
+                3,
                 relu_type="leaky_relu"
             )
         elif residual_on:
             self.proj_flow = PointwiseMLP(
                 [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm    
             )
-
-        self.pred_weight = pred_weight
+            # self.proj_flow = ResidualPointNet(
+            #     [emb_dims, 128, 64],
+            #     norm,
+            #     3,
+            #     relu_type="leaky_relu"
+            # )
         if self.pred_weight:
             self.proj_flow_weight = PointwiseMLP(
                 [emb_dims, 64, 64, 64, 128, 512], 1, norm
@@ -397,8 +402,8 @@ class ResidualMLPHead(nn.Module):
             inputs = corr_points-corr_points_center
             if isinstance(self.project_pts, MOELayer):
                 inputs = (inputs, action_embedding_tf)
-            corr_points = self.project_pts(inputs)
-            corr_points += corr_points_center
+            corr_points_zero = self.project_pts(inputs)
+            corr_points = corr_points_zero + corr_points_center
         # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
         corr_flow = corr_points - action_points
 
@@ -407,25 +412,11 @@ class ResidualMLPHead(nn.Module):
 
         if self.residual_on:
             if self.use_coarse_ps:
-                coarse_pts = corr_points.detach()
-                if self.pred_weight:
-                    _weight = weight / (
-                        weight.sum(dim=1, keepdim=True) + 1e-8
-                    )  # 归一化权重和为1
-                    center = (coarse_pts * _weight).sum(dim=1, keepdims=True)
-                    # distances = torch.norm(centered, dim=2, keepdim=False)  # [B,N]
-                    # radius = distances.max(dim=1, keepdim=True)[0].unsqueeze(-1)  # [B,1,1]
-                    # radius = torch.where(radius < 1e-8, torch.ones_like(radius), radius)
-                    # centered_corr_points = centered / radius
-                else:
-                    center = coarse_pts.mean(dim=1, keepdim=True)  # [B,1,3]
-                # 平移至重心 NOTE: 不再尺度归一化。这可能会带来尺度不匹配问题？
-                centered_corr_points = coarse_pts - center  # [B,N,3]
-                residual_flow = self.proj_flow(
-                    action_embedding_tf, coarse_points=centered_corr_points
-                )
-                residual_flow = residual_flow + center
-
+                if not self.project_corrs:
+                    center = corr_points.mean(dim=2, keepdim=True)  # [B,3,1]
+                    corr_points_zero = corr_points - center  # [B,3,N]
+                tf_fea = torch.cat([action_embedding_tf, corr_points_zero], dim=1)
+                residual_flow = self.proj_flow(tf_fea)
             else:
                 residual_flow = self.proj_flow(action_embedding_tf)  # B,3,N
 
@@ -1291,7 +1282,7 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             cfg.use_coarse_soft,
             cfg.output_num,
         )
-    return NewResidualMLPHead(
+    return ResidualMLPHead(
         cfg.emb_dims,
         cfg.pred_weight,
         cfg.residual_on,

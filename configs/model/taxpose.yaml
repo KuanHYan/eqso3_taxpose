@@ -17,3 +17,4 @@ stage_num: 2
 knn_mode: "pt"
 point_augmented: true
 point_ffn_mode: ${.head.project_corrs_mode}   # "none" | "mlp" | "vn" | "moe"
+stage_emb_cat: mlp

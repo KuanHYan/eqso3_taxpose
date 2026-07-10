@@ -289,7 +289,7 @@ class CustomTransformer(nn.Module):
         else:
             attn_class = MHAttention
 
-        attn = attn_class(
+        self_attn = attn_class(
             self.n_heads,
             self.emb_dims,
             dropout=self.dropout,
@@ -321,7 +321,7 @@ class CustomTransformer(nn.Module):
             ff = PositionwiseFeedForward(
                 self.emb_dims, self.ff_dims, self.dropout)
             decoder_layer = PointAugmentedDecoderLayer(
-                self.emb_dims, c(attn), src_attn, decoder_ff, self.dropout,
+                self.emb_dims, c(self_attn), src_attn, decoder_ff, self.dropout,
             )
             decoder = PointAugmentedDecoder(decoder_layer, self.N)
         else:
@@ -334,13 +334,13 @@ class CustomTransformer(nn.Module):
             )
             ff = PositionwiseFeedForward(self.emb_dims, self.ff_dims, self.dropout)
             decoder = Decoder(
-                DecoderLayer(self.emb_dims, c(attn), src_attn, c(ff), self.dropout),
+                DecoderLayer(self.emb_dims, c(self_attn), src_attn, c(ff), self.dropout),
                 self.N,
             )
 
         self.model = EncoderDecoder(
             Encoder(
-                EncoderLayer(self.emb_dims, c(attn), c(ff), self.dropout), self.N),
+                EncoderLayer(self.emb_dims, c(self_attn), c(ff), self.dropout), self.N),
             decoder,
             nn.Sequential(),
             nn.Sequential(),

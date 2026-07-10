@@ -716,28 +716,22 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         if self.stage == 0:
             (
                 action_points, anchor_points,
-                shared_act_embedding, shared_anch_embedding,
+                action_embedding, anchor_embedding,
                 action_pt_pos, anchor_pt_pos,
                 act_down_sample, anch_down_sample
             ) = self._embedding(*input)
-            action_embedding = shared_act_embedding
-            anchor_embedding = shared_anch_embedding
         else:
             (
                 action_points, anchor_points,
-                shared_act_embedding, shared_anch_embedding,
+                action_embedding, anchor_embedding,
                 action_pt_pos, anchor_pt_pos,
                 act_down_sample, anch_down_sample,
                 action_cps, anchor_cps   #  B, 3, N
             ) = input
-            action_cp_embedding = self._anchor_embedding(action_cps, allow_down=True)
-            anchor_cp_embedding = self._anchor_embedding(anchor_cps, allow_down=True)
-            action_embedding = action_cp_embedding + shared_act_embedding
-            anchor_embedding = anchor_cp_embedding + shared_anch_embedding
 
         if self.knn_in_tf and self.knn_mode == 'emb':
-            act_index = knn_query_with_embedding(action_embedding, 8)
-            anch_index = knn_query_with_embedding(anchor_embedding, 8)
+            act_index = knn_query_with_embedding(action_embedding, K=8)
+            anch_index = knn_query_with_embedding(anchor_embedding, K=8)
         elif self.knn_in_tf and self.knn_mode == 'pt':
             act_index = knn(act_down_sample, 8)
             anch_index = knn(anch_down_sample, 8)
@@ -793,7 +787,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         anchor_cps = outputs.pop("b3n_anch_corr_points", None)
         outputs.update(shared_args=[
             action_points, anchor_points,
-            shared_act_embedding, shared_anch_embedding,
+            action_embedding, anchor_embedding,
             action_embedding_tf, anchor_embedding_tf,
             action_pt_pos, anchor_pt_pos,
             act_down_sample, anch_down_sample,
@@ -996,9 +990,11 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
         B, N, _ = flow_action.shape
         # 初始化 GRU 隐状态
         h_a = torch.zeros(B, N, self.refine_hidden_dim,
-                          device=flow_action.device)
+                          device=flow_action.device,
+                          dtype=flow_action.dtype)
         h_b = torch.zeros(B, N, self.refine_hidden_dim,
-                          device=flow_action.device) if has_anchor else None
+                          device=flow_action.device,
+                          dtype=flow_action.dtype) if has_anchor else None
         if self.fine_tune_trans:
             h_trans_a = torch.zeros_like(h_a)
             h_trans_b = torch.zeros_like(h_b) if has_anchor else None
@@ -1119,7 +1115,7 @@ class CascadeFlowTransformer(nn.Module):
     def __init__(
         self,
         encoder_cfg,
-        head_cfg, 
+        head_cfg,
         stage_num: int = 2,
         num_refine_steps: int = 0,
         **kwargs
@@ -1130,6 +1126,12 @@ class CascadeFlowTransformer(nn.Module):
         self.stage_num = stage_num
         block_type = TwoStageFlowTransformer if num_refine_steps > 0 \
             else ResidualFlow_DiffEmbTransformer
+        self.stage_emb_cat = kwargs.get("stage_emb_cat", "mlp")
+        if self.stage_emb_cat == "mlp":
+            self.cat_emb = nn.Sequential(
+                nn.Conv1d(2 * encoder_cfg.emb_dims, encoder_cfg.emb_dims, 1),
+                nn.LeakyReLU(negative_slope=0.2),
+            )
         self.blocks = nn.ModuleList()
         for i in range(stage_num):
             self.blocks.append(
@@ -1186,6 +1188,17 @@ class CascadeFlowTransformer(nn.Module):
             if len(input) == 12:
                 input.pop(4)
                 input.pop(4)
+            action_cp_embedding = block._action_embedding(input[-2], allow_down=True)
+            anchor_cp_embedding = block._anchor_embedding(input[-1], allow_down=True)
+            if self.stage_emb_cat == "mlp":
+                input[2] = self.cat_emb(
+                    torch.cat([input[2], action_cp_embedding], dim=1))
+                input[3] = self.cat_emb(
+                    torch.cat([input[3], anchor_cp_embedding], dim=1))
+            else:
+                input[2] = action_cp_embedding + input[2]
+                input[3] = anchor_cp_embedding + input[3]
+
             if "refined_loss" not in outputs:
                 outputs.update(
                     refined_loss=[sum(kwargs["compute_loss"](outputs)[0])]
@@ -1354,6 +1367,7 @@ def create_network(cfg: ModelConfig) -> nn.Module:
             knn_mode=getattr(cfg, 'knn_mode', 'pt'),
             point_augmented=getattr(cfg, 'point_augmented', False),
             point_ffn_mode=getattr(cfg, 'point_ffn_mode', 'none'),
+            stage_emb_cat=getattr(cfg, 'stage_emb_cat', 'mlp'),
         )
     else:
         raise ValueError(f"Unknown model type: {cfg.model_type}")
