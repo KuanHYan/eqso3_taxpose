@@ -55,10 +55,10 @@ def hierachical_knn_query_list(points, ref_points, k_list ):
 
 
 class ManualPointWiseGemoFea(nn.Module):
-    def __init__(self, project, embedding_dim=512, sample_num=300,
-                 normal_neighborhood: int = 10):
+    def __init__(self, project: bool, embedding_dim=512, sample_num=300,
+                 normal_neighborhood: int = 20):
         super(ManualPointWiseGemoFea, self).__init__()
-        self.ppf_nn = [10, 20, 40, 80, 160, 300]
+        self.ppf_nn = [10, 20, 40, 80, 160]
         self.normal_neighborhood = normal_neighborhood
         if project:
             self.pos_project = nn.Linear(len(self.ppf_nn)*4, embedding_dim, bias=False).cuda()

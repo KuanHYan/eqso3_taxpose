@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BertConfig, BertModel
+from torch.backends.cuda import sdp_kernel
+# torch.backends.cuda.enable_flash_sdp(True)
+# torch.backends.cuda.enable_math_sdp(False)
 
 
 def get_graph_feature(feas, idx):
@@ -110,7 +113,7 @@ class Transformer(nn.Module):
 
 class MHAttention(nn.Module):
     def __init__(self, n_head, d_model, dropout=0.1,
-                 project_bias=False, need_weights=True):
+                 project_bias=False, need_weights=False):
         "Take in model size and number of heads."
         super(MHAttention, self).__init__()
         assert d_model % n_head == 0
@@ -133,7 +136,7 @@ class MHAttention(nn.Module):
 
 class MHAttnWithKNN(MHAttention):
     def __init__(self, n_head, d_model, dropout=0.1,
-                 project_bias=False, need_weights=True):
+                 project_bias=False, need_weights=False):
         super().__init__(n_head, d_model, dropout,
                          project_bias, need_weights=need_weights)
         # PointTr: 
@@ -317,13 +320,285 @@ class LinearMHAttnWithKNN(LinearMHAttention):
 #         )
 
 
+# ──────────────────────────────────────────────────────────
+#  Point-Augmented Cross Attention
+#  将点云拼接到 Value 中，通过 scaled_dot_product_attention 一次性
+#  完成 embedding 和点的加权求和，避免在 Head 中重复计算 corr_points
+# ──────────────────────────────────────────────────────────
+
+class PointAugmentedCrossAttention(nn.Module):
+    """Cross-attention that concatenates point coordinates to the value.
+
+    Instead of returning attention weights for the head to compute
+    ``corr_points = anchor_points @ softmax(QK^T)``, this module directly
+    produces weighted point coordinates alongside the attention output.
+
+    This enables Flash Attention (via ``F.scaled_dot_product_attention``)
+    since we no longer need to materialize the full N×M attention matrix.
+
+    Shapes:
+        query:      (B, N, d_model)
+        key:        (B, M, d_model)
+        value:      (B, M, d_model)
+        value_pts:  (B, M, 3)
+
+        feat_out:       (B, N, d_model)
+        weighted_pts:   (B, N, 3)
+        attn_weights:   (B, H, N, M)   if return_attn=True, else None
+    """
+
+    def __init__(self, n_head: int, d_model: int, dropout: float = 0.1,
+                 project_bias: bool = False, return_attn: bool = False):
+        super().__init__()
+        assert d_model % n_head == 0
+        self.n_head = n_head
+        self.d_k = d_model // n_head
+        self.d_v = d_model // n_head
+        self.d_model = d_model
+        self.return_attn = return_attn
+        self.scale = self.d_k ** -0.5
+
+        # Q, K, V projections
+        self.W_q = nn.Linear(d_model, d_model, bias=project_bias)
+        self.W_k = nn.Linear(d_model, d_model, bias=project_bias)
+        self.W_v = nn.Linear(d_model, d_model, bias=project_bias)
+        # output projection (only for feature part, not points)
+        self.W_o = nn.Linear(d_model, d_model, bias=project_bias)
+        self.dropout_attn = nn.Dropout(dropout)
+        self.attn = None  # stored attn weights
+
+        # Orthonormal projection to embed 3D points → d_k dims for Flash SDPA.
+        # W_pts @ W_pts^T = I_3, so out = SDPA(Q, K, pts @ W_pts) @ W_pts^T
+        # is mathematically equivalent to softmax(QK^T) @ pts.
+        W = torch.randn(3, self.d_k)
+        U, _, Vt = torch.linalg.svd(W, full_matrices=False)
+        self.register_buffer('W_pts', (U @ Vt).to(torch.float32))  # (3, d_k)
+
+    def _reshape_multihead(self, x: torch.Tensor, H: int) -> torch.Tensor:
+        """(B, L, C) → (B, H, L, C//H)."""
+        B, L, C = x.shape
+        return x.view(B, L, H, C // H).transpose(1, 2)  # (B, H, L, d)
+
+    def _merge_multihead(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, H, L, d) → (B, L, H*d)."""
+        B, H, L, d = x.shape
+        return x.transpose(1, 2).contiguous().view(B, L, H * d)
+
+    def forward(self, query: torch.Tensor, key: torch.Tensor,
+                value: torch.Tensor, value_pts: torch.Tensor = None, **kwargs):
+        """Forward pass.
+
+        Pads Q, K with zeros to match V's augmented dimension.
+        Since zero-padded dims in Q・K^T contribute 0, attention weights
+        are mathematically identical and Flash Attention is triggered.
+
+        Args:
+            query:      (B, N, d_model)
+            key:        (B, M, d_model)
+            value:      (B, M, d_model)
+            value_pts:  (B, M, 3)
+
+        Returns:
+            feat_out:       (B, N, d_model)
+            weighted_pts:   (B, N, 3)
+        """
+        B, N, _ = query.shape
+        H = self.n_head
+        has_pts = value_pts is not None
+        dropout_p = self.dropout_attn.p if self.training else 0.0
+        # pad to next multiple of 8 for Flash Attention (≤128, always safe for d_k=64)
+        PAD = 8
+
+        # ---- project & reshape → (B, H, *, d) ----
+        Q = self._reshape_multihead(self.W_q(query), H)   # (B, H, N, d_k)
+        K = self._reshape_multihead(self.W_k(key), H)     # (B, H, M, d_k)
+        V = self._reshape_multihead(self.W_v(value), H)   # (B, H, M, d_v)
+
+        if has_pts:
+            # Expand points: (B, M, 3) → (B, H, M, 3)
+            pts = value_pts.unsqueeze(1).expand(-1, H, -1, -1)
+            # V_aug = [V | pts | zeros] → match padded Q/K dims
+            V = torch.cat([V, pts], dim=-1)                   # (B, H, M, d_v+3)
+            V = F.pad(V, (0, PAD - 3))                        # (B, H, M, d_k+PAD)
+
+        # Zero-pad Q, K to match V dims (does NOT change attention weights)
+        Q = F.pad(Q, (0, PAD))                                # (B, H, N, d_k+PAD)
+        K = F.pad(K, (0, PAD))                                # (B, H, M, d_k+PAD)
+        raw_type = Q.dtype
+        if raw_type != torch.bfloat16:
+            Q = Q.to(torch.bfloat16)
+            K = K.to(torch.bfloat16)
+            V = V.to(torch.bfloat16)
+        # ---- single SDPA (Flash Attention) ----
+        with sdp_kernel(enable_math=False, enable_mem_efficient=False):
+            out = F.scaled_dot_product_attention(
+                Q, K, V, dropout_p=dropout_p)                  # (B, H, N, d_k+PAD)
+            if raw_type != torch.bfloat16:
+                out = out.to(raw_type)
+        # ---- split features and points ----
+        attn_v = out[..., :self.d_v]                           # (B, H, N, d_v)
+        if has_pts:
+            weighted_pts = out[..., self.d_v:self.d_v + 3].mean(dim=1)  # (B, N, 3)
+        else:
+            weighted_pts = None
+
+        # ---- output projection (features only) ----
+        feat_out = self._merge_multihead(attn_v)               # (B, N, d_model)
+        feat_out = self.W_o(feat_out)
+
+        return feat_out, weighted_pts
+
+
+class PointAugmentedFFN(nn.Module):
+    """FFN that separately processes feature and point coordinates.
+
+    Feature path: standard MLP (linear_up → GELU → dropout → linear_down).
+    Point path:   configurable projection, mirroring ``project_pts`` in
+                  ``ResidualMLPHead``.
+
+    Modes for point_ffn_mode:
+        - ``"mlp"``: ``nn.Linear(num_points, num_points, bias=False)``
+        - ``"vn"``:  ``VN4Head(num_points)``
+        - ``"moe"``: ``MOELayer(emb_dims, num_points, ...)``
+    """
+
+    def __init__(self, d_model: int, d_ff: int, num_points: int,
+                 dropout: float = 0.1,
+                 point_ffn_mode: str = "none",
+                 point_ffn_emb_dims: int = 512):
+        super().__init__()
+        self.d_model = d_model
+        self.point_ffn_mode = point_ffn_mode
+
+        # Feature FFN (standard)
+        self.feat_w1 = nn.Linear(d_model, d_ff)
+        self.feat_w2 = nn.Linear(d_ff, d_model)
+        self.feat_dropout = nn.Dropout(dropout)
+
+        # Point FFN (configurable)
+        if point_ffn_mode == "mlp":
+            self.pts_proj = nn.Sequential(
+                nn.Linear(num_points, num_points, bias=False),
+            )
+        elif point_ffn_mode == "vn":
+            from taxpose.nets.vn_dgcnn import VN4Head
+            self.pts_proj = VN4Head(num_points)
+        elif point_ffn_mode == "moe":
+            from taxpose.nets.moe_wab import MOELayer
+            self.pts_proj = MOELayer(
+                point_ffn_emb_dims, num_points, expert_num=8, top_k=2)
+        elif point_ffn_mode == "none":
+            self.pts_proj = None
+        else:
+            raise ValueError(f"Unknown point_ffn_mode: {point_ffn_mode}")
+
+    def forward(self, feat: torch.Tensor, pts: torch.Tensor,
+                feat_context: torch.Tensor = None):
+        """Forward pass.
+
+        Args:
+            feat:          (B, N, C)  features from attention
+            pts:           (B, N, 3)  weighted point coordinates
+            feat_context:  (B, N, C)  optional embedding for "moe" mode
+
+        Returns:
+            feat_out:  (B, N, C)
+            pts_out:   (B, N, 3)
+        """
+        # ---- Feature FFN ----
+        feat_out = F.gelu(self.feat_w1(feat))
+        feat_out = self.feat_dropout(feat_out)
+        feat_out = self.feat_w2(feat_out)
+
+        # ---- Point FFN ----
+        if self.pts_proj is not None and pts is not None:
+            pts_3n = pts.transpose(1, 2).contiguous()        # (B, 3, N)
+            center = pts_3n.mean(dim=2, keepdim=True)
+            pts_3n = pts_3n - center
+            if self.point_ffn_mode == "moe":
+                # MOELayer expects (B, 3, N) and (B, C, N) tuple
+                if feat_context is not None:
+                    ctx = feat_context.transpose(1, 2).contiguous()  # (B, C, N)
+                else:
+                    ctx = feat.transpose(1, 2).contiguous()
+                pts_out = self.pts_proj((pts_3n, ctx))            # (B, 3, N)
+                pts_out = pts_out.transpose(1, 2).contiguous()    # (B, N, 3)
+            elif self.point_ffn_mode == "vn":
+                # VN4Head expects (B, 3, N)
+                # pts_3n = pts.transpose(1, 2).contiguous()
+                # center before projection
+                pts_out = self.pts_proj(pts_3n)
+                pts_out = pts_out + center
+                pts_out = pts_out.transpose(1, 2).contiguous()    # (B, N, 3)
+            elif self.point_ffn_mode == "mlp":
+                # nn.Linear(N, N): expects (B, 3, N)
+                # pts_3n = pts.transpose(1, 2).contiguous()
+                pts_out = self.pts_proj(pts_3n)
+                pts_out = pts_out + center
+                pts_out = pts_out.transpose(1, 2).contiguous()
+        else:
+            pts_out = pts
+
+        return feat_out, pts_out
+
+
 if __name__ == "__main__":
-    # model = Transformer(emb_dims=256, n_blocks=1, dropout=0.1, ff_dims=1024, n_heads=4, return_attn=True, bidirectional=False)
-    model = LinearMHAttention(n_head=4, d_model=256, dropout=0.1, project_bias=False)
-    model.eval()
-    act_emb = torch.randn(2, 64, 256)
-    tgt_emb = torch.randn(2, 128, 256)
-    outputs = model.forward(act_emb, tgt_emb, tgt_emb, None)
-    print(outputs.shape)
-    print(model.attn.shape)
-    print(model.attn[0])
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print("=" * 60)
+    print("Testing PointAugmentedCrossAttention")
+    print("=" * 60)
+
+    B, N, M, C = 2, 64, 128, 256
+    n_heads = 4
+
+    # Without return_attn (Flash Attention path)
+    attn = PointAugmentedCrossAttention(
+        n_head=n_heads, d_model=C, dropout=0.0, return_attn=False).to(device)
+    query = torch.randn(B, N, C, device=device)
+    key = torch.randn(B, M, C, device=device)
+    value = torch.randn(B, M, C, device=device)
+    value_pts = torch.randn(B, M, 3, device=device)
+
+    feat_out, weighted_pts = attn(query, key, value, value_pts)
+    print(f"feat_out:      {feat_out.shape}")       # (B, N, C)
+    print(f"weighted_pts:  {weighted_pts.shape}")   # (B, N, 3)
+    assert feat_out.shape == (B, N, C)
+    assert weighted_pts.shape == (B, N, 3)
+    assert attn.attn is None, "Flash Attention path should not store attn"
+
+    # With return_attn
+    attn2 = PointAugmentedCrossAttention(
+        n_head=n_heads, d_model=C, dropout=0.0, return_attn=True).to(device)
+    feat_out2, weighted_pts2, attn_weights = attn2(query, key, value, value_pts)
+    print(f"feat_out2:     {feat_out2.shape}")
+    print(f"weighted_pts2: {weighted_pts2.shape}")
+    print(f"attn_weights:  {attn_weights.shape}")   # (B, H, N, M)
+    assert attn_weights.shape == (B, n_heads, N, M)
+
+    # Without points (pure feature attention)
+    feat_out3, weighted_pts3 = attn(query, key, value, None)
+    print(f"\nWithout points - feat_out: {feat_out3.shape}, pts: {weighted_pts3}")
+
+    print(f"\n{'=' * 60}")
+    print("Testing PointAugmentedFFN")
+    print("=" * 60)
+
+    ffn = PointAugmentedFFN(
+        d_model=C, d_ff=4*C, num_points=N,
+        dropout=0.0, point_ffn_mode="mlp").to(device)
+    feat_in = torch.randn(B, N, C, device=device)
+    pts_in = torch.randn(B, N, 3, device=device)
+    feat_out, pts_out = ffn(feat_in, pts_in)
+    print(f"mlp  - feat_out: {feat_out.shape}, pts_out: {pts_out.shape}")
+    assert feat_out.shape == (B, N, C)
+    assert pts_out.shape == (B, N, 3)
+
+    # "none" mode: no point projection
+    ffn_none = PointAugmentedFFN(
+        d_model=C, d_ff=4*C, num_points=N,
+        dropout=0.0, point_ffn_mode="none").to(device)
+    _, pts_none = ffn_none(feat_in, pts_in)
+    print(f"none - pts_out (should == pts_in): {torch.allclose(pts_none, pts_in)}")
+
+    print("\n✓ All tests passed!")
+

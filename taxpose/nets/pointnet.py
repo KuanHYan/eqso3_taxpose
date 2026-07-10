@@ -118,7 +118,7 @@ class PointwiseMLP(nn.Module):
 class ResidualPointNet(nn.Module):
     pos_enc_dim = 24
 
-    def __init__(self, layer_dims, norm=nn.BatchNorm1d, relu_type='relu'):
+    def __init__(self, layer_dims, norm=nn.BatchNorm1d, output_dim=3, relu_type='relu'):
         """
         Args:
             layer_dims: [C_in, C_mid, C_out]
@@ -136,8 +136,8 @@ class ResidualPointNet(nn.Module):
             out_c = layer_dims[i+1]
             blocks.append(ResidualPointNetBlock(in_c, out_c, norm, relu_type))
         self.blocks = nn.Sequential(*blocks)
-        # 最后输出层：线性投影到 3 维（点坐标）
-        self.output = nn.Conv1d(layer_dims[-1], 3, kernel_size=1, bias=True)
+        # 最后输出层：线性投影到 output_dim 维（3 or 4）
+        self.output = nn.Conv1d(layer_dims[-1], output_dim, kernel_size=1, bias=True)
         self._init_weights()
 
     def _init_weights(self):
@@ -155,9 +155,9 @@ class ResidualPointNet(nn.Module):
     def forward(self, x):
         """
         x: (B, C_in, N)
-        return: (B, 3, N)
+        return: (B, d, N)
         """
         assert x.shape[1] == self.first_conv_channel
         feat = self.blocks(x)          # (B, C_mid, N)
-        out = self.output(feat)        # (B, 3, N)
+        out = self.output(feat)        # (B, d, N)
         return out

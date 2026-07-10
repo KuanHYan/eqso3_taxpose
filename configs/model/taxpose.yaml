@@ -6,7 +6,7 @@ name: taxpose
 dropout: 0.0
 pos_encoding: False
 n_blocks: 1
-attn_mode: "custom"  # "linear", "torch_attn", "custom"
+attn_mode: "custom"  # "linear", "torch_attn", "custom", "point_augmented"
 fine_tune: False
 weight_beta: 0.5
 # Fine-tune
@@ -15,3 +15,5 @@ refine_hidden_dim: 128
 # Cascade
 stage_num: 2
 knn_mode: "pt"
+point_augmented: true
+point_ffn_mode: ${.head.project_corrs_mode}   # "none" | "mlp" | "vn" | "moe"

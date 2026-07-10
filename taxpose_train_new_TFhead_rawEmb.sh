@@ -25,7 +25,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     --config-name train_ndf \
     job_type="train_taxpose" \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
-    training.max_epochs=250 \
+    training.max_epochs=500 \
     training.check_val_every_n_epoch=1 \
     training.batch_size=40 \
     training.lr=2.5e-4 \
@@ -66,6 +66,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.encoder.pos_encoding=$ENCODEING \
     model.encoder.output_num=$POINTS \
     model.head.head_type=residual \
+    model.head.use_coarse_soft=True \
     model.head.project_corrs=True \
     model.head.project_corrs_mode="mlp" \
     model.head.norm=LN \

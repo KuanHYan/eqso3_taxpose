@@ -335,22 +335,15 @@ class ResidualMLPHead(nn.Module):
         self.emb_dims = emb_dims
         if use_coarse_ps and residual_on:
             self.proj_flow = ResidualPointNet(
-                [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8],
+                [emb_dims+3, 128, 64],
                 norm,
-                init_scale=0.01,
-                use_coarse_ps=True,
-                pos_encoding=False,
+                3 + self.pred_weight,
+                relu_type="leaky_relu"
             )
         elif residual_on:
             self.proj_flow = PointwiseMLP(
                 [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8], 3, norm    
             )
-            # TODO: Is ResidualPointNet better than PointwiseMLP ?
-            # self.proj_flow = ResidualPointNet(
-            #     [emb_dims, 128, 64],
-            #     norm,
-            #     relu_type="leaky_relu"
-            # )
 
         self.pred_weight = pred_weight
         if self.pred_weight:
@@ -448,6 +441,118 @@ class ResidualMLPHead(nn.Module):
         return {
             "full_flow": corr_flow_weight,
             "residual_flow": residual_flow,
+            "corr_flow": corr_flow,
+            "corr_points": corr_points,
+            "scores": scores,
+        }
+
+
+class NewResidualMLPHead(nn.Module):
+    """
+    Base ResidualMLPHead with flow calculated as
+    v_i = f(\phi_i) + \tilde{y}_i - x_i
+    """
+
+    def __init__(
+        self,
+        emb_dims=512,
+        pred_weight=True,
+        residual_on=True,
+        norm=nn.BatchNorm1d,
+        bias=False,
+        use_coarse_ps=False,
+        project_corrs=False,
+        project_corrs_mode='mlp',
+        output_num=1024,
+    ):
+        super(NewResidualMLPHead, self).__init__()
+        self.emb_dims = emb_dims
+        self.pred_weight = pred_weight
+        out_dim = 3 + self.pred_weight
+        if use_coarse_ps and residual_on:
+            self.proj_flow = ResidualPointNet(
+                [emb_dims+3, 128, 64],
+                norm,
+                out_dim,
+                relu_type="leaky_relu"
+            )
+        elif residual_on:
+            self.proj_flow = PointwiseMLP(
+                [emb_dims, emb_dims // 2, emb_dims // 4, emb_dims // 8],
+                out_dim, norm
+            )
+
+        self.pred_weight = pred_weight
+        self.project_corrs = project_corrs
+        if project_corrs and project_corrs_mode == 'mlp':
+            self.project_pts = nn.Linear(output_num, output_num, bias=False)
+        elif project_corrs and project_corrs_mode == 'vn':
+            self.project_pts = VN4Head(output_num)
+        elif project_corrs and project_corrs_mode == 'moe':
+            self.project_pts = MOELayer(emb_dims, output_num, 8, 2)
+
+        self.residual_on = residual_on
+        self.use_coarse_ps = use_coarse_ps
+
+    def forward(self, *input, scores, return_embedding=False):
+        """
+        input:
+          action_embedding: B,512,N
+          action_embedding_raw: B,512,N
+          anchor_embedding: B,512,N
+          action_points: B,3,N
+          anchor_points: B,3,N
+          scores: B,N,N, if needed, use this instead of calculating scores
+        return:
+          dict with keys:
+          full_flow: B,3,N
+          residual_flow: B,3,N
+          corr_flow: B,3,N
+          corr_points: B,3,N
+          scores: B,N,N
+        """
+        action_embedding_tf = input[0]
+        action_points = input[3]
+        anchor_points = input[4]
+        if action_embedding_tf.shape[2] != action_points.shape[2]:
+            # NOTE: 1_dim is for channel dim, 2_dim is for points dim
+            action_points = input[5]
+            anchor_points = input[6]
+
+        assert scores is not None
+        scores = scores.transpose(2, 1)
+        assert anchor_points is not None, "anchor_points is None"
+        corr_points = torch.matmul(anchor_points, scores)
+        if self.project_corrs:
+            corr_points_center = corr_points.mean(dim=2, keepdim=True)
+            inputs = corr_points-corr_points_center
+            if isinstance(self.project_pts, MOELayer):
+                inputs = (inputs, action_embedding_tf)
+            corr_points_zero = self.project_pts(inputs)
+            corr_points = corr_points_zero + corr_points_center
+        # \tilde{y}_i = sum_{j}{w_ij,y_j}, - x_i  # B, 3, N
+        corr_flow = corr_points - action_points
+
+        if self.residual_on:
+            if self.use_coarse_ps:
+                if not self.project_corrs:
+                    center = corr_points.mean(dim=2, keepdim=True)  # [B,3,1]
+                    corr_points_zero = corr_points - center  # [B,3,N]
+                tf_fea = torch.cat([action_embedding_tf, corr_points_zero], dim=1)
+                residual_flow = self.proj_flow(tf_fea)
+
+            else:
+                residual_flow = self.proj_flow(action_embedding_tf)  # B,3,N
+
+            flow = residual_flow
+            flow[:, 0:3, :] = residual_flow[:, 0:3, :] + corr_flow
+        else:
+            flow = corr_flow
+            residual_flow = torch.zeros_like(flow)
+
+        return {
+            "full_flow": flow,
+            "residual_flow": residual_flow[:, 0:3, :],
             "corr_flow": corr_flow,
             "corr_points": corr_points,
             "scores": scores,
@@ -967,6 +1072,116 @@ class TransformerHead4RL(TransformerHead, ResidualMLPHead4RL):
         return output
 
 
+class PointAugmentedHead(ResidualMLPHead):
+    """Head for point-augmented backbone — receives corr_points directly.
+
+    Unlike ``ResidualMLPHead``, this head does **not** compute
+    ``corr_points = anchor_points @ scores``.  Instead, the backbone
+    already produces ``corr_points`` via ``PointAugmentedCrossAttention``
+    inside the decoder, so this head only needs to compute the residual
+    flow and final flow.
+
+    Interface (differs from ResidualMLPHead):
+        forward(action_embedding_tf, action_embedding_raw, anchor_embedding,
+                action_points, anchor_points, act_down_sample, anch_down_sample,
+                corr_points, ...)
+    """
+
+    def __init__(
+        self,
+        emb_dims=512,
+        pred_weight=True,
+        residual_on=True,
+        norm=nn.BatchNorm1d,
+        bias=False,
+        use_coarse_ps=False,
+        output_num=1024,
+        **kwargs,
+    ):
+        # Intentionally skip project_corrs — handled in backbone's PointAugmentedFFN
+        super(PointAugmentedHead, self).__init__(
+            emb_dims=emb_dims,
+            pred_weight=pred_weight,
+            residual_on=residual_on,
+            norm=norm,
+            bias=bias,
+            use_coarse_ps=use_coarse_ps,
+            project_corrs=False,      # backbone handles this
+            project_corrs_mode='mlp',
+            output_num=output_num,
+        )
+
+    def forward(self, *input, scores=None, corr_points=None, return_embedding=False):
+        """Forward pass with pre-computed corr_points from backbone.
+
+        Args:
+            input[0]: action_embedding_tf   (B, C, N)
+            input[1]: action_embedding_raw  (B, C, N)
+            input[2]: anchor_embedding      (B, C, N)
+            input[3]: action_points         (B, 3, N)
+            input[4]: anchor_points         (B, 3, N)
+            input[5]: act_down_sample       (B, 3, M) or None
+            input[6]: anch_down_sample      (B, 3, M) or None
+            corr_points: (B, 3, N)  — weighted points from backbone
+            scores: unused (kept for API compatibility)
+
+        Returns:
+            dict: full_flow, residual_flow, corr_flow, corr_points
+        """
+        action_embedding_tf = input[0]
+        action_points = input[3]
+
+        # Handle downsampling
+        if action_embedding_tf.shape[2] != action_points.shape[2]:
+            action_points = input[5]
+
+        assert corr_points is not None, \
+            "PointAugmentedHead requires corr_points from backbone"
+
+        # corr_points from backbone is (B, N, 3), convert to (B, 3, N)
+        # to be consistent with action_points format
+        corr_points = corr_points.transpose(1, 2).contiguous()
+
+        # corr_points from backbone is (B, 3, N) — already weighted by attention
+        corr_flow = corr_points - action_points
+
+        if self.pred_weight:
+            weight = self.proj_flow_weight(action_embedding_tf)
+
+        if self.residual_on:
+            if self.use_coarse_ps:
+                coarse_pts = corr_points.detach()
+                if self.pred_weight:
+                    _weight = weight / (
+                        weight.sum(dim=1, keepdim=True) + 1e-8)
+                    center = (coarse_pts * _weight).sum(dim=1, keepdims=True)
+                else:
+                    center = coarse_pts.mean(dim=1, keepdim=True)
+                centered_corr_points = coarse_pts - center
+                residual_flow = self.proj_flow(
+                    action_embedding_tf, coarse_points=centered_corr_points)
+                residual_flow = residual_flow + center
+            else:
+                residual_flow = self.proj_flow(action_embedding_tf)
+
+            flow = residual_flow + corr_flow
+        else:
+            flow = corr_flow
+            residual_flow = torch.zeros_like(flow)
+
+        if self.pred_weight:
+            corr_flow_weight = torch.concat([flow, weight], dim=1)
+        else:
+            corr_flow_weight = flow
+
+        return {
+            "full_flow": corr_flow_weight,
+            "residual_flow": residual_flow,
+            "corr_flow": corr_flow,
+            "corr_points": corr_points,
+        }
+
+
 @dataclass
 class HeadConfig:
     norm: nn.Module = nn.BatchNorm1d
@@ -1065,7 +1280,18 @@ def create_head(cfg: HeadConfig, embedding_fun=None) -> nn.Module:
             use_coarse_ps=cfg.use_coarse_soft,
             output_num=cfg.output_num,
         )
-    return ResidualMLPHead(
+    if cfg.head_type == "point_augmented":
+        print("Using Head: point_augmented")
+        return PointAugmentedHead(
+            cfg.emb_dims,
+            cfg.pred_weight,
+            cfg.residual_on,
+            cfg.norm,
+            cfg.head_bias,
+            cfg.use_coarse_soft,
+            cfg.output_num,
+        )
+    return NewResidualMLPHead(
         cfg.emb_dims,
         cfg.pred_weight,
         cfg.residual_on,
