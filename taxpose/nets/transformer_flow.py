@@ -1289,7 +1289,7 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
         refined_loss_list = []
         for step in range(self.num_refine_steps):
             # ── SVD: 从当前 flow 解位姿 (detach, 不穿梯度) ──
-            fa = flow_action.detach()
+            fa = flow_action
             pf_a = fa[:, :, :3]                                  # (B, N, 3)
             T = self._solve_transformation(
                 action_bn3, fa,
@@ -1308,7 +1308,7 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
             # ── Anchor 侧精调 (对称) ──
             if has_anchor:
                 assert flow_anchor is not None
-                fb = flow_anchor.detach()
+                fb = flow_anchor
                 coarsed_anchor = T.inverse().transform_points(anchor_bn3)
                 rigid_b = coarsed_anchor - anchor_bn3
                 error_b = rigid_b - fb[:, :, :3]
@@ -1388,9 +1388,9 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
             outputs.update(coarse_loss=coarse_loss)
             outputs.update(refined_loss=refined_loss_list)
 
-        shared_args[-2] = shared_args[-2] + flow_action[:, :, :3].permute(0, 2, 1).contiguous()
+        shared_args[-2] = (action_bn3 + flow_action[:, :, :3]).permute(0, 2, 1).contiguous()
         if has_anchor:  # otherwise, shared_args[-1] is None
-            shared_args[-1] = shared_args[-1] + flow_anchor[:, :, :3].permute(0, 2, 1).contiguous()
+            shared_args[-1] = (anchor_bn3 + flow_anchor[:, :, :3]).permute(0, 2, 1).contiguous()
         return outputs
 
     @torch.no_grad()
