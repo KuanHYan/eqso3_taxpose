@@ -215,10 +215,11 @@ class EncoderDecoder(nn.Module):
         self.point_augmented = point_augmented
 
     def forward(self, src, tgt, src_mask, tgt_mask, knn_index=None,
-                mem_pts=None):
+                mem_pts=None, decoder_only=False):
         "Take in and process masked src and target sequences."
+        memory = self.encode(src, src_mask, knn_index=knn_index)
         return self.decode(
-            self.encode(src, src_mask, knn_index=knn_index), src_mask,
+            memory, src_mask,
             tgt, tgt_mask,
             knn_index=knn_index,
             mem_pts=mem_pts,

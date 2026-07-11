@@ -25,9 +25,9 @@ bash "./my_launch.sh" local $GPU_INDEX \
     --config-name train_ndf \
     job_type="train_taxpose" \
     data_root="${ROOT_DIR}data/ideal_pair_models" \
-    training.max_epochs=500 \
+    training.max_epochs=250 \
     training.check_val_every_n_epoch=1 \
-    training.batch_size=20 \
+    training.batch_size=40 \
     training.lr=2.5e-4 \
     training.min_lr=2.5e-5 \
     training.warmup_ratio=0.025 \
@@ -48,11 +48,11 @@ bash "./my_launch.sh" local $GPU_INDEX \
     dm.train_dset.demo_dset.occlusion_cfg.occlusion_class=0 \
     dm.train_dset.anchor_rot_sample_method=axis_angle \
     dm.train_dset.anchor_rotation_variance=3.141592653 \
-    model.model_type=cascade_flow_transformer \
+    model.model_type=two_stage_flow_transformer \
     model.freeze_embnn=True \
     model.dropout=0.1 \
     model.n_blocks=1 \
-    model.attn_mode="torch_attn" \
+    model.attn_mode="linear" \
     model.return_attn=True \
     model.pos_encoding=$ENCODEING \
     model.fine_tune=True \
@@ -68,7 +68,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.head.head_type=residual \
     model.head.use_coarse_soft=False \
     model.head.project_corrs=True \
-    model.head.project_corrs_mode="mlp" \
+    model.head.project_corrs_mode="vn" \
     model.head.norm=LN \
     model.head.head_bias=False \
     model.head.residual_on=True \
@@ -78,7 +78,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     'model.pretraining.action.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
     'model.pretraining.anchor.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
     wandb.offline=$EVAL \
-    debug=True \
+    debug=False \
     eval=$EVAL \
     resume_ckpt=$RESUME_CKPT
 exit 1

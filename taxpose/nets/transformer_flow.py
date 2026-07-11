@@ -1,209 +1,21 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Pulled from DCP
-
-import copy
-import math
 from dataclasses import dataclass
-from typing import Any, ClassVar, Protocol, cast
+from typing import Any, ClassVar, Protocol
 
 from omegaconf import OmegaConf
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from taxpose.nets.pointnet import PointwiseMLP, ResidualPointNet, PointNet
 from taxpose.nets.transformer_flow_pm import CustomTransformer
-from taxpose.nets.tv_mlp import MLP as TVMLP
-from taxpose.utils.multilateration import estimate_p
-from third_party.dcp.model import DGCNN
-from taxpose.nets.raw_dgcnn import DGCNN4TaxPose, DGCNN_VAE, knn
-from taxpose.nets.vn_dgcnn import VN_DGCNN_iqSO3, VNArgs
-from taxpose.nets.dgcnn_group_v2 import DGCNN_Grouper_V2
-from taxpose.nets.head import create_head, HeadConfig
+from taxpose.nets.raw_dgcnn import knn
 from taxpose.nets.gemo_fea import ManualPointWiseGemoFea
 from taxpose.utils.se3 import dualflow2pose, flow2pose
-from pytorch3d.ops import knn_points, knn_gather, estimate_pointcloud_normals
-
-
-def key_point(p1, p2, K: int = 1, mode: str = "pt", emb_func=None):
-    """获取 K 个最近邻点。
-    Args:
-        p1, p2: (B, N, 3)  位置坐标
-        K: nearst neighbor number
-        mode: "pt" | "normal" | "emb"
-        emb_func: embedding function
-    Returns:
-        key points: (B, N, K, 3)  近邻点
-    """
-    assert mode in ["normal", "emb", "pt", "second"]
-    if mode == "normal":
-        return knn_points_with_normals(
-                p1, p2,
-                n1=estimate_pointcloud_normals(p1, 20),
-                n2=estimate_pointcloud_normals(p2, 20),
-                K=K, return_nn=True)[-1]  # (B,N,k,3)
-
-    if mode == "emb":
-        assert emb_func is not None
-        emb1 = emb_func(p1.transpose(1, 2)).transpose(1, 2).contiguous()
-        emb2 = emb_func(p2.transpose(1, 2)).transpose(1, 2).contiguous()
-        idx = knn_query_with_embedding(
-            emb1, emb2,
-            K=K, return_sorted=True)
-        return knn_gather(p2, idx)
-
-    if mode == "second":
-        manual_fea = ManualPointWiseGemoFea(False)
-        fea1 = manual_fea.forward(p1).transpose(1, 2).contiguous()
-        fea1 = torch.cat([p1, fea1], dim=-1)
-        fea2 = manual_fea.forward(p2).transpose(1, 2).contiguous()
-        fea2 = torch.cat([p2, fea2], dim=-1)
-
-        idx = knn_points(
-            fea1, fea2, K=K,
-            return_sorted=True).idx
-        return knn_gather(p2, idx)
-
-    return knn_points(
-        p1, p2, K=K,
-        return_nn=True,
-        return_sorted=True,
-    ).knn
-
-
-def knn_points_with_normals(
-    p1: torch.Tensor,
-    p2: torch.Tensor,
-    n1: torch.Tensor = None,
-    n2: torch.Tensor = None,
-    K: int = 1,
-    normal_weight: float = 0.5,
-    return_nn: bool = False,
-    return_sorted: bool = True,
-):
-    """融合位置和法向量信息的 KNN 搜索。
-
-    将位置和加权法向量拼接为 6D 特征，利用标准 L2 KNN 实现
-    联合距离度量:
-        dist² = ||p₁-p₂||² + λ²·||n₁-n₂||²
-
-    法向量差 L2 与余弦相似度的关系:
-        ||n₁-n₂||² = 2 - 2·cos(θ)
-        对齐时(cos=1) → 0，相反时(cos=-1) → 4
-
-    Args:
-        p1, p2: (B, N, 3)  位置坐标
-        n1, n2: (B, N, 3)  法向量（自动归一化）
-        K: 近邻数量
-        normal_weight: 法向量权重 λ，越大法向一致性越重要
-        return_nn: 是否返回最近邻的点
-        return_sorted: 是否按距离排序
-    Returns:
-        idx:   (B, N, K)  近邻索引
-        nn:    (B, N, K, 6)  近邻的 [位置, λ·法向量]（仅 return_nn=True）
-    """
-    if n1 is None or n2 is None:
-        return knn_points(
-            p1, p2, K=K,
-            return_nn=return_nn,
-            return_sorted=return_sorted,
-        )
-
-    # 归一化法向量
-    n1 = F.normalize(n1, dim=-1)
-    n2 = F.normalize(n2, dim=-1)
-
-    cdist = torch.cdist(p1, p2)
-    abs_cos_sim = torch.abs(torch.matmul(n1, n2.transpose(-2, -1)))  # (B, N, M)
-    dist = cdist + normal_weight * (1 - abs_cos_sim)
-    
-    idx = torch.topk(dist, k=K, dim=-1, largest=False, sorted=return_sorted)[1]
-
-    if return_nn:
-        nn = knn_gather(p2, idx)
-        return idx, nn
-    return idx, None
-
-
-def knn_query_with_embedding(embedding_q, embedding_k=None,
-                            K: int = 1, return_sorted: bool = True):
-    """基于 embedding 余弦相似度的 KNN 查询。
-
-    通过 L2 归一化 + matmul 计算全部 pairwise 余弦相似度，
-    然后取 top-K 索引。
-
-    Args:
-        embedding_q: (B, N, C) — query embedding（特征必须在最后一维）
-        embedding_k: (B, M, C) — key embedding
-        K: 近邻数
-    Returns:
-        idx: (B, N, K) — 每个 query 点在 key 中的 K 近邻索引
-    """
-    if embedding_k is None:
-        embedding_k = embedding_q
-    emb_q = F.normalize(embedding_q, dim=-1)
-    emb_k = F.normalize(embedding_k, dim=-1)
-    # (B, N, C) @ (B, C, M) → (B, N, M), 每行是 query 点对所有 key 点的相似度
-    sim = torch.matmul(emb_q, emb_k.transpose(-2, -1))
-    idx = torch.topk(sim, k=K, dim=-1, sorted=return_sorted)[1]
-    return idx
-
-
-class EquivariantFeatureEmbeddingNetwork(nn.Module):
-    def __init__(self, encoder_cfg):
-        super(EquivariantFeatureEmbeddingNetwork, self).__init__()
-        self.emb_nn = create_embedding_network(encoder_cfg)
-
-    def forward(self, *input):
-        points = input[0]  # B, 3, num_points
-        points_dmean = points - points.mean(dim=2, keepdim=True)
-
-        points_embedding = self.emb_nn(points_dmean)  # B, emb_dims, num_points
-        if isinstance(points_embedding, tuple):
-            points_embedding, points = points_embedding
-        return points_embedding, points.transpose(1, 2).contiguous()
-
-    def get_group_centers(self):
-        return self.emb_nn.coord.transpose(1, 2).contiguous().detach()
-
-
-def create_embedding_network(cfg) -> nn.Module:
-    if cfg.name == "dgcnn":
-        network: nn.Module = DGCNN(emb_dims=cfg.emb_dims)
-    elif cfg.name == "vn_dgcnn":
-        print(f"Using {cfg.name} with iqSO3 pooling")
-        network = VN_DGCNN_iqSO3(
-            emb_dims=cfg.emb_dims,
-            knn=cfg.knn,
-            down_sample=cfg.down_ratio > 1,
-            down_ratio=cfg.down_ratio,
-            output_num=cfg.output_num,
-            pos_encoding=cfg.pos_encoding,
-            norm_mode=cfg.norm,
-            pooling=cfg.pooling,
-        )
-    elif cfg.name == "raw_dgcnn":
-        print(f"Using {cfg.name}")
-        network: nn.Module = DGCNN4TaxPose(
-            cfg.emb_dims, cfg.knn,
-            cfg.dropout, cfg.norm,
-            output_c=cfg.output_num)
-    elif cfg.name == "dgcnn_group":
-        print(f"Using {cfg.name} with grouping")
-        network = DGCNN_Grouper_V2(
-            cfg.emb_dims, cfg.output_num, cfg.knn, cfg.dropout,
-            cfg.norm, downsample_layers=cfg.down_layers)
-    elif cfg.name == "vae_dgcnn":
-        print(f"Using {cfg.name}")
-        network = DGCNN_VAE(
-            cfg,
-            pos_encoding=cfg.pos_encoding,
-        )
-    else:
-        raise ValueError(f"Unknown embedding network type: {cfg.name}")
-
-    return network
+from taxpose.nets.tf_utils import key_point, knn_query_with_embedding
+from taxpose.nets import create_head, HeadConfig
+from taxpose.nets import create_embedding_network
 
 
 class ResidualFlow_DiffEmbTransformer(nn.Module):
@@ -241,7 +53,10 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         self.feature_channels = feature_channels
 
         self.emb_nn_action = create_embedding_network(encoder_cfg)
-        self.emb_nn_anchor = create_embedding_network(encoder_cfg) if freeze_embnn else self.emb_nn_action
+        if freeze_embnn:
+            self.emb_nn_anchor = create_embedding_network(encoder_cfg)
+        else:
+            self.emb_nn_anchor = self.emb_nn_action
         emb_dims = encoder_cfg.emb_dims
         self.freeze_embnn = freeze_embnn
         if freeze_embnn:
@@ -313,23 +128,6 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             )
             self.head_anchor: nn.Module = create_head(
                 cfg, embedding_fun=self._anchor_embedding
-            )
-
-        if self.conditional:
-            # Simple projection to the embedding space. This will be concatenated to the embeddings at
-            # the attention layer.
-            self.proj_onehot = nn.Linear(5, emb_dims)
-
-        if self.feature_channels > 0:
-            # We're basically putting a few MLP layers in on top of the invariant module.
-            combined_dims = emb_dims + self.feature_channels
-            self.feature_channel_encoder_action = nn.Sequential(
-                PointNet([combined_dims, combined_dims * 2, combined_dims * 4]),
-                nn.Conv1d(combined_dims * 4, emb_dims, kernel_size=1, bias=False),
-            )
-            self.feature_channel_encoder_anchor = nn.Sequential(
-                PointNet([combined_dims, combined_dims * 2, combined_dims * 4]),
-                nn.Conv1d(combined_dims * 4, emb_dims, kernel_size=1, bias=False),
             )
 
         self.pos_encoding = pos_encoding
@@ -467,13 +265,14 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 act_down_sample, anch_down_sample,
             )
 
-    def _backbone(self, action_embedding, anchor_embedding,
-                  action_pt_pos, anchor_pt_pos,
+    def _backbone(self, act_query_emb, anch_query_emb,
+                  cache_action_emb=None, cache_anch_emb=None,
                   act_index=None, anch_index=None,
                   action_points=None, anchor_points=None):
-        action_embedding = action_embedding.transpose(2, 1).contiguous()
-        anchor_embedding = anchor_embedding.transpose(2, 1).contiguous()
-
+        act_query_emb = act_query_emb.transpose(2, 1).contiguous()
+        anch_query_emb = anch_query_emb.transpose(2, 1).contiguous()
+        act_src_emb = anch_query_emb if cache_anch_emb is None else cache_anch_emb
+        anch_src_emb = act_query_emb if cache_action_emb is None else cache_action_emb
         if self.point_augmented:
             # mem_pts: (B, N, 3) in B,N,3 format for transformer
             mem_pts_action = None
@@ -485,19 +284,19 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 mem_pts_anchor = action_points.transpose(1, 2).contiguous()
 
             transformer_action_outputs = self.transformer_action(
-                action_embedding, anchor_embedding, act_index,
+                act_query_emb, act_src_emb, act_index,
                 mem_pts=mem_pts_action,
             )
             transformer_anchor_outputs = self.transformer_anchor(
-                anchor_embedding, action_embedding, anch_index,
+                anch_query_emb, anch_src_emb, anch_index,
                 mem_pts=mem_pts_anchor,
             )
         else:
             transformer_action_outputs = self.transformer_action(
-                action_embedding, anchor_embedding, act_index
+                act_query_emb, act_src_emb, act_index
             )
             transformer_anchor_outputs = self.transformer_anchor(
-                anchor_embedding, action_embedding, anch_index
+                anch_query_emb, anch_src_emb, anch_index
             )
         action_embedding_tf = transformer_action_outputs["src_embedding"]
         action_attn = transformer_action_outputs["src_attn"]
@@ -507,10 +306,6 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         if not self.return_attn:
             action_attn = None
             anchor_attn = None
-
-        if self.pos_encoding:
-            action_embedding_tf += action_pt_pos
-            anchor_embedding_tf += anchor_pt_pos
 
         # Extract corr_pts from point-augmented backbone
         action_corr_pts = transformer_action_outputs.get("src_corr_pts", None)
@@ -720,13 +515,15 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
                 action_pt_pos, anchor_pt_pos,
                 act_down_sample, anch_down_sample
             ) = self._embedding(*input)
+            cache_act_emb = action_embedding
+            cache_anch_emb = anchor_embedding
         else:
             (
                 action_points, anchor_points,
-                action_embedding, anchor_embedding,
+                cache_act_emb, cache_anch_emb,
                 action_pt_pos, anchor_pt_pos,
                 act_down_sample, anch_down_sample,
-                action_cps, anchor_cps   #  B, 3, N
+                action_embedding, anchor_embedding   #  B, 3, N
             ) = input
 
         if self.knn_in_tf and self.knn_mode == 'emb':
@@ -745,16 +542,19 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
             anchor_attn,
             action_corr_pts,
             anchor_corr_pts,
-        ) = self._backbone(action_embedding, anchor_embedding,
-                           action_pt_pos, anchor_pt_pos, act_index, anch_index,
-                           action_points=act_down_sample if self.point_augmented else None,
-                           anchor_points=anch_down_sample if self.point_augmented else None)
+        ) = self._backbone(
+            action_embedding, anchor_embedding,
+            cache_act_emb, cache_anch_emb,
+            act_index, anch_index,
+            action_points=act_down_sample if self.point_augmented else None,
+            anchor_points=anch_down_sample if self.point_augmented else None
+        )
 
         outputs = self.coarse_step(
             action_embedding_tf,
             anchor_embedding_tf,
-            action_embedding,
-            anchor_embedding,
+            cache_act_emb,
+            cache_anch_emb,
             action_points,
             anchor_points,
             act_down_sample,
@@ -787,7 +587,7 @@ class ResidualFlow_DiffEmbTransformer(nn.Module):
         anchor_cps = outputs.pop("b3n_anch_corr_points", None)
         outputs.update(shared_args=[
             action_points, anchor_points,
-            action_embedding, anchor_embedding,
+            cache_act_emb, cache_anch_emb,
             action_embedding_tf, anchor_embedding_tf,
             action_pt_pos, anchor_pt_pos,
             act_down_sample, anch_down_sample,
@@ -963,14 +763,13 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
             return outputs
 
         shared_args = outputs['shared_args']
-        action_embedding = shared_args[2]
         # Pop TF embedding, which will not be used at next stage
         act_emb_tf = shared_args.pop(4).detach().transpose(1, 2).contiguous()
         anch_emb_tf = shared_args.pop(4).detach().transpose(1, 2).contiguous()
 
         has_anchor = ("flow_anchor" in outputs
                       and outputs["flow_anchor"] is not None)
-        down_sample = shared_args[0].shape[2] != action_embedding.shape[2]
+        down_sample = shared_args[0].shape[2] != shared_args[2].shape[2]
 
         action_bn3 = shared_args[0] if not down_sample else shared_args[-4]
         action_bn3 = action_bn3.permute(0, 2, 1).contiguous()
@@ -1111,149 +910,6 @@ class TwoStageFlowTransformer(ResidualFlow_DiffEmbTransformer):
         return self.forward(*input, **kwargs)
 
 
-class CascadeFlowTransformer(nn.Module):
-    def __init__(
-        self,
-        encoder_cfg,
-        head_cfg,
-        stage_num: int = 2,
-        num_refine_steps: int = 0,
-        **kwargs
-    ):
-        super().__init__()
-        self.emb_nn_action = create_embedding_network(encoder_cfg)
-        self.emb_nn_anchor = create_embedding_network(encoder_cfg)
-        self.stage_num = stage_num
-        block_type = TwoStageFlowTransformer if num_refine_steps > 0 \
-            else ResidualFlow_DiffEmbTransformer
-        self.stage_emb_cat = kwargs.get("stage_emb_cat", "mlp")
-        if self.stage_emb_cat == "mlp":
-            self.cat_emb = nn.Sequential(
-                nn.Conv1d(2 * encoder_cfg.emb_dims, encoder_cfg.emb_dims, 1),
-                nn.LeakyReLU(negative_slope=0.2),
-            )
-        self.blocks = nn.ModuleList()
-        for i in range(stage_num):
-            self.blocks.append(
-                block_type(
-                    encoder_cfg,
-                    head_cfg,
-                    stage=i,
-                    is_final=(i == stage_num - 1),
-                    **kwargs
-                )
-            )
-            self.blocks[-1].emb_nn_action = self.emb_nn_action
-            self.blocks[-1].emb_nn_anchor = self.emb_nn_anchor
-
-    def get_parameters(self, module: str):
-        """返回指定模块的参数列表，用于分层学习率。
-        Cascade 中 emb 模块为所有 stage 共享，其余模块逐 stage 收集。
-        """
-        if module == "emb":
-            # 共享的 embedding 网络（仅一份）
-            params = list(self.emb_nn_action.parameters()) + \
-                     list(self.emb_nn_anchor.parameters())
-            # 各 block 自己的 pos_encoder / feature_channel_encoder
-            for block in self.blocks:
-                block_params = block.get_parameters("emb")
-                # 排除已被 emb_nn_action/anchor 覆盖的共享参数
-                shared_ids = {id(p) for p in params}
-                for p in block_params:
-                    if id(p) not in shared_ids:
-                        params.append(p)
-                        shared_ids.add(id(p))
-            return params
-        elif module in ("backbone", "head", "gru"):
-            params = []
-            seen_ids = set()
-            for block in self.blocks:
-                for p in block.get_parameters(module):
-                    if id(p) not in seen_ids:
-                        params.append(p)
-                        seen_ids.add(id(p))
-            return params
-        else:
-            return self.blocks[0].get_parameters(module)  # 抛出 ValueError
-
-    def forward(self, *input, **kwargs):
-        staged_coarse_loss = []
-        staged_refined_loss = []
-        staged_hook_trans_T = []
-        outputs = {}
-        assert "compute_loss" in kwargs
-        for i, block in enumerate(self.blocks):
-            outputs = block(*input, **kwargs)
-            input = outputs.pop("shared_args")
-            if len(input) == 12:
-                input.pop(4)
-                input.pop(4)
-            action_cp_embedding = block._action_embedding(input[-2], allow_down=True)
-            anchor_cp_embedding = block._anchor_embedding(input[-1], allow_down=True)
-            if self.stage_emb_cat == "mlp":
-                input[2] = self.cat_emb(
-                    torch.cat([input[2], action_cp_embedding], dim=1))
-                input[3] = self.cat_emb(
-                    torch.cat([input[3], anchor_cp_embedding], dim=1))
-            else:
-                input[2] = action_cp_embedding + input[2]
-                input[3] = anchor_cp_embedding + input[3]
-
-            if "refined_loss" not in outputs:
-                outputs.update(
-                    refined_loss=[sum(kwargs["compute_loss"](outputs)[0])]
-                )
-            staged_coarse_loss += outputs.pop(
-                "coarse_loss", [torch.zeros(1,).to(input[0].device)])
-            staged_refined_loss += outputs.pop(
-                "refined_loss", [torch.zeros(1,).to(input[0].device)])
-            current_hook_trans_T = outputs.pop("hook_trans_T", None)
-            if current_hook_trans_T is None:
-                current_hook_trans_T = [self._solve_transformation(
-                    input, outputs
-                )]
-            staged_hook_trans_T += current_hook_trans_T
-
-        outputs.update(
-            coarse_loss=staged_coarse_loss,
-            refined_loss=staged_refined_loss,
-            hook_trans_T=staged_hook_trans_T
-        )
-        return outputs
-
-    def _solve_transformation(self, shared_args, outputs):
-        action_embedding = shared_args[2]
-
-        has_anchor = ("flow_anchor" in outputs
-                      and outputs["flow_anchor"] is not None)
-        down_sample = shared_args[0].shape[2] != action_embedding.shape[2]
-
-        action_bn3 = shared_args[0] if not down_sample else shared_args[-4]
-        action_bn3 = action_bn3.permute(0, 2, 1).contiguous()
-        anchor_bn3 = shared_args[1].permute(0, 2, 1).contiguous() if has_anchor else None
-        if has_anchor and down_sample:
-            anchor_bn3 = shared_args[-3].permute(0, 2, 1).contiguous()
-        
-        T = ResidualFlow_DiffEmbTransformer._solve_transformation(
-            action_bn3, outputs["flow_action"],
-            has_anchor=has_anchor,
-            anchor_bn3=anchor_bn3,
-            flow_anchor=outputs["flow_anchor"] if has_anchor else None,
-        )
-        return T
-
-    @torch.no_grad()
-    def inference(self, *input, **kwargs):
-        for i, block in enumerate(self.blocks):
-            outputs = block(*input)
-            input = outputs.pop("shared_args")
-            if len(input) == 12:
-                input.pop(4)
-                input.pop(4)
-        
-        return outputs
-
-
 class ModelConfig(Protocol):
     model_type: str
 
@@ -1290,86 +946,3 @@ class ResidualFlowDiffEmbTransformerConfig:
     # Cascade
     stage_num: int = 1
 
-
-def create_network(cfg: ModelConfig) -> nn.Module:
-    # Create the network
-    if cfg.model_type == "residual_flow_diff_emb_transformer":
-        r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
-        network: nn.Module = ResidualFlow_DiffEmbTransformer(
-            encoder_cfg=r_cfg.encoder,
-            head_cfg=r_cfg.head,
-            cycle=r_cfg.cycle,
-            center_feature=r_cfg.center_feature,
-            freeze_embnn=r_cfg.freeze_embnn,
-            return_attn=r_cfg.return_attn,
-            multilaterate=r_cfg.multilaterate,
-            mlat_sample=r_cfg.mlat_sample,
-            mlat_nkps=r_cfg.mlat_nkps,
-            feature_channels=r_cfg.feature_channels,
-            conditional=r_cfg.conditional,
-            dropout=r_cfg.dropout,
-            pos_encoding=r_cfg.pos_encoding,
-            n_blocks=r_cfg.n_blocks,
-            attn_mode=r_cfg.attn_mode,
-            fine_tune=getattr(cfg, 'fine_tune', False),
-            weight_beta=getattr(cfg, 'weight_beta', 0.5),
-            knn_mode=getattr(cfg, 'knn_mode', 'emb'),
-            point_augmented=getattr(cfg, 'point_augmented', False),
-            point_ffn_mode=getattr(cfg, 'point_ffn_mode', 'none'),
-        )
-    elif cfg.model_type == "two_stage_flow_transformer":
-        r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
-        network: nn.Module = TwoStageFlowTransformer(
-            encoder_cfg=r_cfg.encoder,
-            head_cfg=r_cfg.head,
-            knn_mode=getattr(cfg, 'knn_mode', 'pt'),
-            cycle=r_cfg.cycle,
-            center_feature=r_cfg.center_feature,
-            freeze_embnn=r_cfg.freeze_embnn,
-            return_attn=r_cfg.return_attn,
-            multilaterate=r_cfg.multilaterate,
-            mlat_sample=r_cfg.mlat_sample,
-            mlat_nkps=r_cfg.mlat_nkps,
-            feature_channels=r_cfg.feature_channels,
-            conditional=r_cfg.conditional,
-            dropout=r_cfg.dropout,
-            pos_encoding=r_cfg.pos_encoding,
-            n_blocks=r_cfg.n_blocks,
-            attn_mode=r_cfg.attn_mode,
-            num_refine_steps=r_cfg.num_refine_steps,
-            refine_hidden_dim=r_cfg.refine_hidden_dim,
-            fine_tune_trans=r_cfg.fine_tune,
-            point_augmented=getattr(cfg, 'point_augmented', False),
-            point_ffn_mode=getattr(cfg, 'point_ffn_mode', 'none'),
-        )
-    elif cfg.model_type == "cascade_flow_transformer":
-        r_cfg = cast(ResidualFlowDiffEmbTransformerConfig, cfg)
-        network = CascadeFlowTransformer(
-            encoder_cfg=r_cfg.encoder,
-            stage_num=r_cfg.stage_num,
-            num_refine_steps=r_cfg.num_refine_steps,
-            head_cfg=r_cfg.head,
-            cycle=r_cfg.cycle,
-            center_feature=r_cfg.center_feature,
-            freeze_embnn=r_cfg.freeze_embnn,
-            return_attn=r_cfg.return_attn,
-            multilaterate=r_cfg.multilaterate,
-            mlat_sample=r_cfg.mlat_sample,
-            mlat_nkps=r_cfg.mlat_nkps,
-            feature_channels=r_cfg.feature_channels,
-            conditional=r_cfg.conditional,
-            dropout=r_cfg.dropout,
-            pos_encoding=r_cfg.pos_encoding,
-            n_blocks=r_cfg.n_blocks,
-            attn_mode=r_cfg.attn_mode,
-            refine_hidden_dim=r_cfg.refine_hidden_dim,
-            fine_tune_trans=r_cfg.fine_tune,
-            knn_mode=getattr(cfg, 'knn_mode', 'pt'),
-            point_augmented=getattr(cfg, 'point_augmented', False),
-            point_ffn_mode=getattr(cfg, 'point_ffn_mode', 'none'),
-            stage_emb_cat=getattr(cfg, 'stage_emb_cat', 'mlp'),
-        )
-    else:
-        raise ValueError(f"Unknown model type: {cfg.model_type}")
-
-    return network
