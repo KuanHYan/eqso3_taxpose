@@ -403,6 +403,3 @@ pretraining_models
 *.ckpt
 data_default
 pytorch3d
-
-taxpose/nets/transformer_flow copy.py
-test_flash_attn.py

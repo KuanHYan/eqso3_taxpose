@@ -66,9 +66,8 @@ bash "./my_launch.sh" local $GPU_INDEX \
     model.encoder.pos_encoding=$ENCODEING \
     model.encoder.output_num=$POINTS \
     model.head.head_type=residual \
-    model.head.use_coarse_soft=False \
     model.head.project_corrs=True \
-    model.head.project_corrs_mode="vn" \
+    model.head.project_corrs_mode="mlp" \
     model.head.norm=LN \
     model.head.head_bias=False \
     model.head.residual_on=True \
@@ -78,7 +77,7 @@ bash "./my_launch.sh" local $GPU_INDEX \
     'model.pretraining.action.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
     'model.pretraining.anchor.ckpt_path="/home/yan/pose_estimation/taxpose/logs/pretrain_embedding/best_cpkg/dgcnn_v2.ckpt"' \
     wandb.offline=$EVAL \
-    debug=False \
+    debug=True \
     eval=$EVAL \
     resume_ckpt=$RESUME_CKPT
 exit 1
